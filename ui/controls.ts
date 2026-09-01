@@ -1,61 +1,18 @@
-// Lightweight per-parameter control affordance: a small colored dot per
-// controllable param, stacked in a column rising from an entity's
-// bottom-right corner. Hovering reveals a label and a vertical slider
-// positioned so the point representing the current value sits exactly
-// where the dot was — the cursor is already on the thumb, ready to drag.
-// Deliberately minimal by default: this should read as a couple of quiet
-// indicator dots, not a rack of visible knobs/faders.
+// Slider/drag interaction geometry built on top of controlSpecs.ts's dot
+// layout — hover reveals a label and a vertical slider positioned so the
+// point representing the current value sits exactly where the dot was, so
+// the cursor is already on the thumb, ready to drag. Deliberately minimal
+// by default: this should read as a couple of quiet indicator dots, not a
+// rack of visible knobs/faders.
 
 import type { EntityGraph } from '../audio/entityGraph';
 import { effectiveBounds } from './layout';
-import type { DragContext, Point, Rect } from './layout';
+import type { DragContext, Point } from './layout';
+import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
+import type { ControlSpec } from './controlSpecs';
 
-export interface ControlSpec {
-  param: string; // matches entity.params key
-  label: string; // shown on hover
-  min: number;
-  max: number;
-  color: string;
-}
-
-// Per-kind control list — a kind not listed here gets no dots at all.
-const CONTROL_SPECS: Record<string, ControlSpec[]> = {
-  bass: [
-    { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    // Sub-bass/low-bass territory — deliberately a narrower, lower range
-    // than the bow's, matching what this voice is actually for.
-    { param: 'frequency', label: 'pitch', min: 20, max: 150, color: '#5aa0c8' },
-  ],
-  bow: [
-    { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    { param: 'frequency', label: 'pitch', min: 40, max: 500, color: '#5aa0c8' },
-    // STK's own reference implementation only really behaves in ~0.03-0.25
-    // (see dsp/rust/src/lib.rs) — range goes a bit past that for headroom.
-    { param: 'bowVelocity', label: 'bow speed', min: 0, max: 0.3, color: '#7ec850' },
-    // STK's normalized [0,1] pressure convention.
-    { param: 'bowPressure', label: 'bow pressure', min: 0, max: 1, color: '#c85a5a' },
-  ],
-};
-
-export function controlsFor(kind: string): ControlSpec[] {
-  return CONTROL_SPECS[kind] ?? [];
-}
-
-export const CONTROL_DOT_RADIUS = 5;
-export const CONTROL_HIT_RADIUS = 10; // generous target around the small visual dot
-export const CONTROL_TRACK_LENGTH = 80; // px the slider travels, independent of value
-
-const DOT_INSET = 14; // from the box's right/bottom edge to the first (bottom) dot
-const DOT_SPACING = 22; // vertical gap between successive dots in the column
-
-// Rest position of a dot — index 0 is nearest the box (bottom of the column),
-// rising from there.
-export function dotPosition(bounds: Rect, index: number): Point {
-  return {
-    x: bounds.x + bounds.width / 2 - DOT_INSET,
-    y: bounds.y + bounds.height / 2 - DOT_INSET - index * DOT_SPACING,
-  };
-}
+export type { ControlSpec } from './controlSpecs';
+export { controlsFor, dotPosition, CONTROL_DOT_RADIUS, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
 
 export function valueFraction(spec: ControlSpec, value: number): number {
   return Math.min(1, Math.max(0, (value - spec.min) / (spec.max - spec.min)));
@@ -113,4 +70,21 @@ export function hitTestControl(
     }
   }
   return null;
+}
+
+// Where a specific (entityId, param) dot is right now — used to draw a wire
+// running into it (ui/wiring.ts) without the caller needing to know its
+// index in that entity's control list.
+export function controlDotAbsolutePosition(
+  graph: EntityGraph,
+  entityId: string,
+  param: string,
+  drag?: DragContext
+): Point | null {
+  const entity = graph.get(entityId);
+  if (!entity) return null;
+  const specs = controlsFor(entity.kind);
+  const index = specs.findIndex((s) => s.param === param);
+  if (index === -1) return null;
+  return dotPosition(effectiveBounds(graph, entity, drag), index);
 }

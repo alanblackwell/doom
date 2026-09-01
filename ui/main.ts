@@ -55,6 +55,23 @@ graph.add({
   height: 110,
   seed: 2,
 });
+// One-shot, not a drone — click the pad at its center to fire a hit rather
+// than it playing continuously once audio starts. See audio/graph.ts's
+// TRIGGERED_KINDS; there's no event transport yet (ARCHITECTURE.md §5.3),
+// so this is the manual way to trigger it for now.
+graph.add({
+  id: 'kick-1',
+  type: 'source',
+  kind: 'kick',
+  parentId: null,
+  children: [],
+  params: { level: 0.8, pitch: 50, decay: 0.4, click: 0.3 },
+  x: 780,
+  y: 160,
+  width: 160,
+  height: 110,
+  seed: 7,
+});
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
 // canvas (they grow to fit on drop, and live-preview that growth while a
@@ -85,6 +102,50 @@ graph.add({
   width: 100,
   height: 64,
   seed: 4,
+});
+graph.add({
+  id: 'chorus-1',
+  type: 'source',
+  kind: 'chorus',
+  parentId: null,
+  children: [],
+  params: { rate: 0.8, depth: 3, mix: 0.5, level: 0.8 },
+  x: 220,
+  y: 560,
+  width: 100,
+  height: 64,
+  seed: 5,
+});
+graph.add({
+  id: 'flanger-1',
+  type: 'source',
+  kind: 'flanger',
+  parentId: null,
+  children: [],
+  params: { rate: 0.2, depth: 2, feedback: 0.5, mix: 0.5, level: 0.8 },
+  x: 500,
+  y: 560,
+  width: 100,
+  height: 64,
+  seed: 6,
+});
+// A Control entity (type: 'control'), not a source — no audio node of its
+// own (audio/graph.ts skips it entirely), just a value that can be wired to
+// any control dot on another entity. Drag from its small square handle
+// (bottom-left) onto e.g. bow-1's pitch dot to try it; right-click a wired
+// dot to disconnect. Left unwired by default.
+graph.add({
+  id: 'knob-1',
+  type: 'control',
+  kind: 'knob',
+  parentId: null,
+  children: [],
+  params: { value: 0.5 },
+  x: 350,
+  y: 740,
+  width: 60,
+  height: 60,
+  seed: 8,
 });
 
 const interaction = createInteractionState();

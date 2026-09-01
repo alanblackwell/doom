@@ -6,11 +6,21 @@
 // logic in layout.ts.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
-import { PROCESSOR_KINDS } from '../audio/graph';
-import { absolutePosition, effectiveBounds } from './layout';
-import type { DragContext, Rect } from './layout';
+import { PROCESSOR_KINDS, TRIGGERED_KINDS } from '../audio/graph';
+import { absolutePosition, descendantIds, effectiveBounds } from './layout';
+import type { DragContext, Point, Rect } from './layout';
 import type { InteractionState } from './interaction';
-import { controlsFor, dotPosition, trackGeometry, valueFraction, CONTROL_DOT_RADIUS } from './controls';
+import {
+  controlDotAbsolutePosition,
+  controlsFor,
+  dotPosition,
+  trackGeometry,
+  valueFraction,
+  CONTROL_DOT_RADIUS,
+} from './controls';
+import { padRadius, PAD_FLASH_DURATION } from './pads';
+import { knobIndicatorAngle, wireHandlePosition } from './knobs';
+import { getAllWires } from './wiring';
 
 const KIND_COLORS: Record<string, string> = {
   noise: '#4a4a4a',
@@ -18,6 +28,9 @@ const KIND_COLORS: Record<string, string> = {
   bow: '#6b4630',
   overdrive: '#8a5a1c',
   reverb: '#2f4a52',
+  chorus: '#2c4a3c',
+  flanger: '#3a3a52',
+  kick: '#5a2020',
 };
 const DEFAULT_COLOR = '#3a3a3a';
 const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette
@@ -120,13 +133,21 @@ function drawEntity(
     }
   }
 
-  drawBox(ctx, entity, bounds.x, bounds.y, bounds.width * scale, bounds.height * scale, depth, {
-    selected: entity.id === interaction.selectedId,
-    dropTarget: entity.id === interaction.hoverTargetId,
-    lifted: false,
-  });
+  if (entity.type === 'control') {
+    drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
+  } else {
+    drawBox(ctx, entity, bounds.x, bounds.y, bounds.width * scale, bounds.height * scale, depth, {
+      selected: entity.id === interaction.selectedId,
+      dropTarget: entity.id === interaction.hoverTargetId,
+      lifted: false,
+    });
+  }
 
-  drawControls(ctx, entity, bounds, interaction);
+  // Controls are NOT drawn here — they render in a separate final pass in
+  // renderFrame(), on top of every box including the drag overlay. Drawing
+  // them inline (as before) meant anything dropped into a filter, or drawn
+  // after it in the normal tree order, could visually cover its own control
+  // dots/slider even though the box had grown to make room underneath.
 
   for (const child of graph.childrenOf(entity.id)) {
     drawEntity(ctx, graph, child, depth + 1, interaction, now, drag);
@@ -136,7 +157,9 @@ function drawEntity(
 // Quiet-by-default per-parameter control dots (see ui/controls.ts): a small
 // resting dot per param, morphing into a labeled vertical slider on hover —
 // positioned so the point representing the current value lands exactly
-// where the dot was, so the cursor is already on the thumb.
+// where the dot was, so the cursor is already on the thumb. Called from
+// renderFrame()'s final overlay pass, not inline with the box that owns it —
+// see the comment in drawEntity() for why.
 function drawControls(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
@@ -189,6 +212,174 @@ function drawControls(
     ctx.textBaseline = 'middle';
     ctx.fillText(spec.label, track.x - 12, track.top - 6);
     ctx.restore();
+  }
+}
+
+// Center trigger pad for one-shot instruments (audio/graph.ts's
+// TRIGGERED_KINDS) — a quiet ring at rest, with an expanding-and-fading
+// flash ring on trigger for "you hit it" feedback. Called from
+// renderFrame()'s final overlay pass, same reasoning as drawControls above.
+function drawPad(
+  ctx: CanvasRenderingContext2D,
+  entity: Entity,
+  bounds: Rect,
+  interaction: InteractionState,
+  now: number
+): void {
+  if (!TRIGGERED_KINDS.has(entity.kind)) return;
+
+  const radius = padRadius(bounds);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Small "play"-style triangle, subtle — enough to read as a button
+  // without competing with the id/kind labels underneath it.
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.beginPath();
+  const s = radius * 0.5;
+  ctx.moveTo(bounds.x - s * 0.5, bounds.y - s * 0.7);
+  ctx.lineTo(bounds.x - s * 0.5, bounds.y + s * 0.7);
+  ctx.lineTo(bounds.x + s * 0.8, bounds.y);
+  ctx.closePath();
+  ctx.fill();
+
+  const flashStart = interaction.triggerFlashes.get(entity.id);
+  if (flashStart !== undefined) {
+    const elapsed = now - flashStart;
+    if (elapsed < PAD_FLASH_DURATION) {
+      const t = elapsed / PAD_FLASH_DURATION;
+      ctx.beginPath();
+      ctx.arc(bounds.x, bounds.y, radius + t * radius * 1.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 210, 150, ${1 - t})`;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else {
+      interaction.triggerFlashes.delete(entity.id);
+    }
+  }
+
+  ctx.restore();
+}
+
+const KNOB_BODY_COLOR = '#3a3a3a';
+const KNOB_INDICATOR_COLOR = '#e8dcc0'; // matches its own value dot's color (controlSpecs.ts)
+const WIRE_HANDLE_COLOR = '#c8a05a'; // warm brass — reads as "output jack"
+
+// A Control entity (currently just 'knob') — a circular body with a
+// rotating indicator for its own value, plus the wire-start handle drawn
+// separately below (see drawWires). Deliberately NOT the jittered-rect
+// treatment drawBox uses for audio sources — a clean circle reads at a
+// glance as "this is a different kind of object, not an instrument."
+function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+  const radius = Math.min(bounds.width, bounds.height) / 2;
+  const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
+  const angle = knobIndicatorAngle(value);
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 2;
+
+  ctx.beginPath();
+  ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+  const gradient = ctx.createRadialGradient(
+    bounds.x,
+    bounds.y - radius * 0.25,
+    radius * 0.1,
+    bounds.x,
+    bounds.y,
+    radius
+  );
+  gradient.addColorStop(0, shadeColor(KNOB_BODY_COLOR, 1.6));
+  gradient.addColorStop(1, shadeColor(KNOB_BODY_COLOR, 0.8));
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = selected ? 2.5 : 1.5;
+  ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(bounds.x, bounds.y);
+  ctx.lineTo(bounds.x + Math.sin(angle) * radius * 0.8, bounds.y - Math.cos(angle) * radius * 0.8);
+  ctx.strokeStyle = KNOB_INDICATOR_COLOR;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  const handle = wireHandlePosition(bounds);
+  ctx.beginPath();
+  ctx.rect(handle.x - 4, handle.y - 4, 8, 8);
+  ctx.fillStyle = WIRE_HANDLE_COLOR;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(entity.id, bounds.x, bounds.y + radius + 14);
+
+  ctx.restore();
+}
+
+// A soft-sagging cable curve, like a real patch cord — used for both
+// committed wires and the live rubber band while dragging a new one.
+function drawWireLine(ctx: CanvasRenderingContext2D, from: Point, to: Point, color: string): void {
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2 + Math.min(40, Math.hypot(to.x - from.x, to.y - from.y) * 0.15);
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.75;
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.quadraticCurveTo(midX, midY, to.x, to.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// All committed wires, plus the live rubber band while one's being dragged
+// out. Drawn before controls/pads in the final overlay pass so a wire's end
+// looks like it plugs into the dot, not draws over it.
+function drawWires(
+  ctx: CanvasRenderingContext2D,
+  graph: EntityGraph,
+  interaction: InteractionState,
+  drag: DragContext | undefined
+): void {
+  for (const wire of getAllWires()) {
+    const source = graph.get(wire.sourceEntityId);
+    const target = graph.get(wire.targetEntityId);
+    if (!source || !target) continue;
+
+    const anchor = wireHandlePosition(effectiveBounds(graph, source, drag));
+    const dot = controlDotAbsolutePosition(graph, wire.targetEntityId, wire.targetParam, drag);
+    if (!dot) continue;
+
+    const spec = controlsFor(target.kind).find((s) => s.param === wire.targetParam);
+    drawWireLine(ctx, anchor, dot, spec?.color ?? 'rgba(255, 255, 255, 0.4)');
+  }
+
+  if (interaction.wiringFrom && interaction.wireDragPoint) {
+    const source = graph.get(interaction.wiringFrom.entityId);
+    if (source) {
+      const anchor = wireHandlePosition(effectiveBounds(graph, source, drag));
+      const target = interaction.wireHoverTarget;
+      const endPoint = target
+        ? (controlDotAbsolutePosition(graph, target.entityId, target.spec.param, drag) ?? interaction.wireDragPoint)
+        : interaction.wireDragPoint;
+      drawWireLine(ctx, anchor, endPoint, target ? target.spec.color : 'rgba(255, 255, 255, 0.5)');
+    }
   }
 }
 
@@ -319,16 +510,44 @@ export function renderFrame(
   // ride along rather than being left behind at their pre-drag position)
   // drawn last, translated to the live pointer position, lifted above
   // everything else regardless of where it started in the hierarchy.
+  let dragDelta: { x: number; y: number } | null = null;
   if (interaction.draggingId && interaction.dragPointer) {
     const entity = graph.get(interaction.draggingId);
     if (entity) {
       const original = absolutePosition(graph, entity);
-      const delta = {
+      dragDelta = {
         x: interaction.dragPointer.x - original.x,
         y: interaction.dragPointer.y - original.y,
       };
-      drawDraggedSubtree(ctx, graph, entity, delta, 0, true, drag);
+      drawDraggedSubtree(ctx, graph, entity, dragDelta, 0, true, drag);
     }
+  }
+
+  // Controls and trigger pads render last of all, on top of every box
+  // including the drag overlay above — "pop-up controls always float above
+  // all other content." The dragged entity itself shows neither (nothing
+  // else about it renders inline either while it's flying), but a child
+  // riding along with a dragged container still needs its own controls/pad
+  // translated by the same delta, or they'd stay drawn at its pre-drag
+  // position.
+  const draggedSubtreeIds = interaction.draggingId
+    ? descendantIds(graph, interaction.draggingId)
+    : new Set<string>();
+
+  // Wires drawn before controls/pads so a wire's end looks plugged into its
+  // dot rather than drawn over it.
+  drawWires(ctx, graph, interaction, drag);
+
+  for (const entity of graph.all()) {
+    if (entity.id === interaction.draggingId) continue;
+
+    const bounds = effectiveBounds(graph, entity, drag);
+    const drawAt =
+      dragDelta && draggedSubtreeIds.has(entity.id)
+        ? { ...bounds, x: bounds.x + dragDelta.x, y: bounds.y + dragDelta.y }
+        : bounds;
+    drawControls(ctx, entity, drawAt, interaction);
+    drawPad(ctx, entity, drawAt, interaction, now);
   }
 }
 

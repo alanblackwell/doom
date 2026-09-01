@@ -4,6 +4,7 @@
 // pointer) — both depend on this, this depends on neither.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
+import { controlsFor, dotPosition, CONTROL_HIT_RADIUS } from './controlSpecs';
 
 export interface Point {
   x: number;
@@ -52,11 +53,12 @@ export interface DragContext {
 }
 
 // An entity's actual on-screen rect: its own intrinsic width/height, grown
-// (never shrunk) to fully enclose every child's own effective rect, with
-// padding. Recursive, so a grandparent's box automatically accounts for an
-// already-expanded parent — and recomputed fresh from current positions
-// every call, so a container's boundary is always correct for whatever's
-// inside it right now rather than needing an explicit resize step.
+// (never shrunk) to fully enclose every child's own effective rect and its
+// own control column (see below), with padding. Recursive, so a grandparent's
+// box automatically accounts for an already-expanded parent — and
+// recomputed fresh from current positions every call, so a container's
+// boundary is always correct for whatever's inside it right now rather than
+// needing an explicit resize step.
 export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragContext): Rect {
   const pos = absolutePosition(graph, entity);
   let left = pos.x - entity.width / 2;
@@ -70,6 +72,27 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
     top = Math.min(top, b.y - b.height / 2 - CONTAINMENT_PADDING);
     bottom = Math.max(bottom, b.y + b.height / 2 + CONTAINMENT_PADDING);
   };
+
+  // Reserve the entity's own control column (see controlSpecs.ts) as part
+  // of its permanent minimum footprint — unconditional, not just extra
+  // padding around children. Two things this fixes: a control-heavy entity
+  // is never smaller than what it needs to show every dot without one
+  // poking past the box edge, even with zero children; and, combined with
+  // the same padding every child gets, something dropped in still has to
+  // grow the box past the reserved corner rather than being able to land
+  // exactly on top of it.
+  const specs = controlsFor(entity.kind);
+  if (specs.length > 0) {
+    const baseRect = { x: pos.x, y: pos.y, width: entity.width, height: entity.height };
+    const bottomDot = dotPosition(baseRect, 0);
+    const topDot = dotPosition(baseRect, specs.length - 1);
+    grow({
+      x: bottomDot.x,
+      y: (bottomDot.y + topDot.y) / 2,
+      width: CONTROL_HIT_RADIUS * 2,
+      height: bottomDot.y - topDot.y + CONTROL_HIT_RADIUS * 2,
+    });
+  }
 
   for (const child of graph.childrenOf(entity.id)) {
     if (drag && drag.excludeId === child.id) continue; // lifted out mid-drag — don't count its stale position
