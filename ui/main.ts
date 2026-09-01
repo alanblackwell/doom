@@ -9,17 +9,11 @@ import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import { attachInteraction, createInteractionState } from './interaction';
+import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
 const ctx2d = canvas.getContext('2d')!;
 const startButton = document.querySelector<HTMLButtonElement>('#start-audio')!;
-
-function resize(): void {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-window.addEventListener('resize', resize);
-resize();
 
 // Demo composition: a sub-bass drone, a bowed-string voice, and an overdrive
 // pedal (sink+source — drag bass-1 or bow-1 onto it to route their audio
@@ -148,6 +142,35 @@ graph.add({
   seed: 8,
 });
 
+// Margin kept past the furthest entity's edge so it doesn't sit flush
+// against the scrollable area's border.
+const CONTENT_MARGIN = 40;
+
+// The canvas's drawing-buffer size: always at least the viewport, but grown
+// to enclose every top-level entity's effectiveBounds() once content
+// extends past it, so #viewport (see index.html) picks up scrollbars
+// instead of clipping anything. Re-run every frame (see draw() below) since
+// dragging can grow the content bounds at any time, not just on resize.
+function resize(): void {
+  let maxRight = 0;
+  let maxBottom = 0;
+  for (const entity of graph.topLevel()) {
+    const bounds = effectiveBounds(graph, entity);
+    maxRight = Math.max(maxRight, bounds.x + bounds.width / 2);
+    maxBottom = Math.max(maxBottom, bounds.y + bounds.height / 2);
+  }
+  const width = Math.max(window.innerWidth, maxRight + CONTENT_MARGIN);
+  const height = Math.max(window.innerHeight, maxBottom + CONTENT_MARGIN);
+  // Assigning canvas.width/height clears the drawing buffer, so only touch
+  // it when the size actually changed — harmless here since every frame is
+  // fully redrawn anyway, but avoids fighting the browser's scroll-anchoring
+  // while a scrollbar is being dragged.
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+}
+window.addEventListener('resize', resize);
+resize();
+
 const interaction = createInteractionState();
 attachInteraction(canvas, graph, interaction);
 
@@ -210,6 +233,7 @@ startButton.addEventListener('click', () => {
 });
 
 function draw(now: number): void {
+  resize();
   renderFrame(ctx2d, canvas, graph, interaction, now);
   requestAnimationFrame(draw);
 }

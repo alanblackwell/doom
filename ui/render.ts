@@ -14,13 +14,14 @@ import {
   controlDotAbsolutePosition,
   controlsFor,
   dotPosition,
+  restTrackGeometry,
   trackGeometry,
   valueFraction,
   CONTROL_DOT_RADIUS,
 } from './controls';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { knobIndicatorAngle, wireHandlePosition } from './knobs';
-import { getAllWires } from './wiring';
+import { getAllWires, getWireTo } from './wiring';
 
 const KIND_COLORS: Record<string, string> = {
   noise: '#4a4a4a',
@@ -160,8 +161,23 @@ function drawEntity(
 // where the dot was, so the cursor is already on the thumb. Called from
 // renderFrame()'s final overlay pass, not inline with the box that owns it —
 // see the comment in drawEntity() for why.
+// True when (entityId, param) is wired from a source param that's currently
+// being hovered or dragged (see isControlActive below) — i.e. its value is
+// live-changing right now because of that interaction, not just sitting at
+// whatever it was last set to.
+function isReceivingFromActiveWire(
+  graph: EntityGraph,
+  interaction: InteractionState,
+  entityId: string,
+  param: string
+): boolean {
+  const wire = getWireTo(entityId, param);
+  return wire !== undefined && isControlActive(interaction, wire.sourceEntityId, wire.sourceParam);
+}
+
 function drawControls(
   ctx: CanvasRenderingContext2D,
+  graph: EntityGraph,
   entity: Entity,
   bounds: Rect,
   interaction: InteractionState
@@ -174,8 +190,14 @@ function drawControls(
     const dot = dotPosition(bounds, i);
     const isHovering = interaction.hoverControl?.entityId === entity.id && interaction.hoverControl.param === spec.param;
     const dragging = interaction.draggingControl?.entityId === entity.id && interaction.draggingControl.spec.param === spec.param;
+    // A wire target whose feeding source is itself being hovered/dragged
+    // right now — rendered expanded too, so every slider a live change is
+    // reaching visibly tracks it at the same time, not just the one under
+    // the pointer.
+    const receivingLiveWire =
+      !isHovering && !dragging && isReceivingFromActiveWire(graph, interaction, entity.id, spec.param);
 
-    if (!isHovering && !dragging) {
+    if (!isHovering && !dragging && !receivingLiveWire) {
       ctx.beginPath();
       ctx.arc(dot.x, dot.y, CONTROL_DOT_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = spec.color;
@@ -187,7 +209,14 @@ function drawControls(
     // While actively dragging, use the FIXED track captured at drag-start —
     // recomputing it from the live (constantly-changing) value would make
     // the mapping chase itself instead of tracking the pointer smoothly.
-    const track = dragging ? interaction.draggingControl!.track : trackGeometry(dot, spec, currentValue);
+    // Same reasoning for a wire-driven slider: its value changes on its own,
+    // so it needs a value-independent track too, or the scale itself would
+    // shift around instead of the thumb moving within it.
+    const track = dragging
+      ? interaction.draggingControl!.track
+      : receivingLiveWire
+        ? restTrackGeometry(dot)
+        : trackGeometry(dot, spec, currentValue);
 
     ctx.save();
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
@@ -331,16 +360,54 @@ function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, s
   ctx.restore();
 }
 
+// Wire opacity tracks the value actually being propagated along it — 25% at
+// the source param's minimum, 100% at its maximum — but only while that
+// param is actually being operated (hovered or dragged); otherwise the wire
+// sits at the minimum. So a wire brightens/dims live as you work the slider
+// that feeds it, rather than just reflecting a static "current value" at
+// all times.
+const MIN_WIRE_OPACITY = 0.25;
+const MAX_WIRE_OPACITY = 1;
+
+function isControlActive(interaction: InteractionState, entityId: string, param: string): boolean {
+  const hover = interaction.hoverControl;
+  const dragging = interaction.draggingControl;
+  return (
+    (hover !== null && hover.entityId === entityId && hover.param === param) ||
+    (dragging !== null && dragging.entityId === entityId && dragging.spec.param === param)
+  );
+}
+
+function wireOpacity(
+  graph: EntityGraph,
+  interaction: InteractionState,
+  entityId: string,
+  param: string
+): number {
+  const entity = graph.get(entityId);
+  const spec = entity && controlsFor(entity.kind).find((s) => s.param === param);
+  if (!entity || !spec) return MAX_WIRE_OPACITY;
+  if (!isControlActive(interaction, entityId, param)) return MIN_WIRE_OPACITY;
+  const fraction = valueFraction(spec, entity.params[param] ?? spec.min);
+  return MIN_WIRE_OPACITY + fraction * (MAX_WIRE_OPACITY - MIN_WIRE_OPACITY);
+}
+
 // A soft-sagging cable curve, like a real patch cord — used for both
 // committed wires and the live rubber band while dragging a new one.
-function drawWireLine(ctx: CanvasRenderingContext2D, from: Point, to: Point, color: string): void {
+function drawWireLine(
+  ctx: CanvasRenderingContext2D,
+  from: Point,
+  to: Point,
+  color: string,
+  opacity: number
+): void {
   const midX = (from.x + to.x) / 2;
   const midY = (from.y + to.y) / 2 + Math.min(40, Math.hypot(to.x - from.x, to.y - from.y) * 0.15);
 
   ctx.save();
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
-  ctx.globalAlpha = 0.75;
+  ctx.globalAlpha = opacity;
   ctx.beginPath();
   ctx.moveTo(from.x, from.y);
   ctx.quadraticCurveTo(midX, midY, to.x, to.y);
@@ -367,7 +434,8 @@ function drawWires(
     if (!dot) continue;
 
     const spec = controlsFor(target.kind).find((s) => s.param === wire.targetParam);
-    drawWireLine(ctx, anchor, dot, spec?.color ?? 'rgba(255, 255, 255, 0.4)');
+    const opacity = wireOpacity(graph, interaction, wire.sourceEntityId, wire.sourceParam);
+    drawWireLine(ctx, anchor, dot, spec?.color ?? 'rgba(255, 255, 255, 0.4)', opacity);
   }
 
   if (interaction.wiringFrom && interaction.wireDragPoint) {
@@ -378,7 +446,8 @@ function drawWires(
       const endPoint = target
         ? (controlDotAbsolutePosition(graph, target.entityId, target.spec.param, drag) ?? interaction.wireDragPoint)
         : interaction.wireDragPoint;
-      drawWireLine(ctx, anchor, endPoint, target ? target.spec.color : 'rgba(255, 255, 255, 0.5)');
+      const opacity = wireOpacity(graph, interaction, interaction.wiringFrom.entityId, 'value');
+      drawWireLine(ctx, anchor, endPoint, target ? target.spec.color : 'rgba(255, 255, 255, 0.5)', opacity);
     }
   }
 }
@@ -546,7 +615,7 @@ export function renderFrame(
       dragDelta && draggedSubtreeIds.has(entity.id)
         ? { ...bounds, x: bounds.x + dragDelta.x, y: bounds.y + dragDelta.y }
         : bounds;
-    drawControls(ctx, entity, drawAt, interaction);
+    drawControls(ctx, graph, entity, drawAt, interaction);
     drawPad(ctx, entity, drawAt, interaction, now);
   }
 }

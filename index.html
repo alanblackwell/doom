@@ -6,6 +6,9 @@
   <title>doom</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    /* Fixed to the browser viewport; scrolls internally once the canvas
+       (sized to fit its content, see ui/main.ts) grows past it. */
+    #viewport { position: fixed; inset: 0; overflow: auto; }
     canvas { display: block; touch-action: none; }
     #start-audio {
       position: fixed;
@@ -41,7 +44,9 @@
 </head>
 <body>
   <button id="start-audio">start audio</button>
-  <canvas id="stage"></canvas>
+  <div id="viewport">
+    <canvas id="stage"></canvas>
+  </div>
   <script type="module" src="/ui/main.ts"></script>
 </body>
 </html>

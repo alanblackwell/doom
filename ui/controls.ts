@@ -33,6 +33,17 @@ export function trackGeometry(dot: Point, spec: ControlSpec, value: number): Tra
   return { x: dot.x, top: bottom - CONTROL_TRACK_LENGTH, bottom };
 }
 
+// A value-independent track anchor, unlike trackGeometry above (whose whole
+// point is to land the CURRENT value exactly at the dot, so a hovering
+// cursor is already on the thumb, ready to drag). Used wherever a slider is
+// being driven externally rather than by the pointer at this dot — e.g. a
+// wired control mirroring its live-changing source — so the track/scale
+// stays fixed in place and only the thumb moves within it, the same as a
+// real drag's fixed track does.
+export function restTrackGeometry(dot: Point): Track {
+  return { x: dot.x, top: dot.y - CONTROL_TRACK_LENGTH / 2, bottom: dot.y + CONTROL_TRACK_LENGTH / 2 };
+}
+
 // Inverse of trackGeometry's mapping, against a FIXED track captured once at
 // drag-start (not recomputed from the live value mid-drag, which would be
 // circular) — given where the pointer is now, what value does that mean.
