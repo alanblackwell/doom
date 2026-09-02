@@ -1,7 +1,13 @@
 // The composition graph: the single source of truth that both the canvas
 // renderer and the Web Audio graph are projections of. See ARCHITECTURE.md §3.
 
-export type EntityType = 'source' | 'control' | 'liveInput';
+// 'feature' is a new kind of relationship, distinct from both containment
+// (parentId/children — audio routing) and Control's cross-branch wiring: an
+// internal organelle owned by exactly one Source (Entity.ownerId), drawn
+// nested *within* that source's own boundary rather than as a sibling box
+// on the canvas. See ui/organelle.ts for the porthole/popup rendering and
+// audio/graph.ts for how a source's own generator reads its features.
+export type EntityType = 'source' | 'control' | 'liveInput' | 'feature';
 
 // `kind` identifies which DSP/generator implementation a Source instantiates
 // (e.g. 'noise', or 'group' for a pure mixer with no sound of its own).
@@ -37,6 +43,30 @@ export interface Entity {
   // set to is harmless leftover, not read until the entity is dropped back
   // onto the canvas and given a fresh position there.
   docked: boolean;
+
+  // The owning source's id, for a 'feature'-type entity only (null for
+  // everything else) — deliberately a SEPARATE relationship from
+  // parentId/children rather than reusing containment: a feature has no
+  // audio routing meaning of its own (audio/graph.ts's buildFromEntityGraph
+  // skips it entirely — its owner's own generator reads it directly via
+  // EntityGraph.featuresOf), isn't drawn by the normal recursive box-walk
+  // (ui/render.ts), and shouldn't make its owner's box grow to "contain" it
+  // the way a nested Source or reserved control-dot column does (see
+  // ui/layout.ts's effectiveBounds). Reusing parentId/children for this
+  // would have required auditing every containment-assuming code path for
+  // a type it was never meant to see; a separate field keeps features
+  // invisible to all of that by construction.
+  ownerId: string | null;
+
+  // Whether this feature's popup (ui/organelle.ts) is currently open. While
+  // false, it draws as a small "porthole" inset in its owner's box — direct
+  // manipulation and, for now, new wire connections both require opening
+  // it first (an existing wire keeps working either way; it just visually
+  // converges on the porthole while collapsed). Always false for non-
+  // 'feature' entities. x/y/width/height are unused for a feature entity —
+  // its popup's position/size are computed fresh each frame from its
+  // owner's current bounds (ui/organelle.ts), not stored.
+  expanded: boolean;
 }
 
 export class EntityGraph {
@@ -62,13 +92,21 @@ export class EntityGraph {
 
   // Excludes docked entities (see Entity.docked) — they're not part of the
   // canvas tree at all while parked in the dock, just a separate list
-  // ui/dock.ts renders and hit-tests on its own.
+  // ui/dock.ts renders and hit-tests on its own. Also excludes 'feature'
+  // entities (see Entity.ownerId) — they always have parentId === null (they
+  // never participate in containment) but aren't free-floating canvas
+  // objects either; ui/organelle.ts renders them via featuresOf() below,
+  // anchored to their owner.
   topLevel(): Entity[] {
-    return this.all().filter((e) => e.parentId === null && !e.docked);
+    return this.all().filter((e) => e.parentId === null && !e.docked && e.type !== 'feature');
   }
 
   dockedEntities(): Entity[] {
     return this.all().filter((e) => e.docked);
+  }
+
+  featuresOf(ownerId: string): Entity[] {
+    return this.all().filter((e) => e.type === 'feature' && e.ownerId === ownerId);
   }
 
   childrenOf(id: string): Entity[] {

@@ -12,6 +12,7 @@ import type { DragContext, Point } from './layout';
 import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
 import type { ControlSpec } from './controlSpecs';
 import { isControlEntity, knobValueDotPosition } from './knobs';
+import { featureDotAbsolutePosition } from './organelle';
 
 // A knob's own dot sits at its body's center (see knobs.ts), not at
 // controlSpecs.ts's generic per-kind column position — every other kind
@@ -33,6 +34,17 @@ export {
 
 export function valueFraction(spec: ControlSpec, value: number): number {
   return Math.min(1, Math.max(0, (value - spec.min) / (spec.max - spec.min)));
+}
+
+// Decimal places scaled to the value's own magnitude — enough precision to
+// read back and report as a new default without a flood of meaningless
+// digits on a 0-1 param. Shared by render.ts's slider readout and
+// ui/organelle.ts's envelope-handle labels.
+export function formatControlValue(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 100) return value.toFixed(0);
+  if (magnitude >= 10) return value.toFixed(1);
+  return value.toFixed(2);
 }
 
 // Track geometry (fixed length, positioned so it grows and shrinks around
@@ -87,6 +99,10 @@ export function hitTestControl(
 ): ControlHit | null {
   for (const entity of graph.all()) {
     if (entity.docked) continue; // no dots while parked in the dock — see ui/dock.ts
+    // 'feature' entities (ui/organelle.ts) have their own dot layout —
+    // see hitTestFeatureDot there, used instead wherever this generic
+    // per-kind column doesn't apply.
+    if (entity.type === 'feature') continue;
     const specs = controlsFor(entity.kind);
     if (specs.length === 0) continue;
     // Matches render.ts's drawControls: an empty filter's dots aren't
@@ -116,6 +132,11 @@ export function controlDotAbsolutePosition(
 ): Point | null {
   const entity = graph.get(entityId);
   if (!entity) return null;
+  // A 'feature' entity's dot position isn't derived from its own bounds at
+  // all (its x/y/width/height are unused — see Entity.expanded's comment);
+  // delegate entirely to ui/organelle.ts, which resolves it from the
+  // OWNER's bounds instead.
+  if (entity.type === 'feature') return featureDotAbsolutePosition(graph, entity, param, drag);
   const specs = controlsFor(entity.kind);
   const index = specs.findIndex((s) => s.param === param);
   if (index === -1) return null;

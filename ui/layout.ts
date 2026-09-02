@@ -91,9 +91,15 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // dots for exactly the same "empty" condition, so there's nothing to
   // reserve room for there either; the box grows to reveal them the moment
   // something's actually routed through it.
+  // Also skipped for 'feature' entities (ui/organelle.ts) — they're never
+  // walked into here at all in practice (they're not in anything's
+  // `children`, see audio/entityGraph.ts's Entity.ownerId), but their own
+  // controlsFor('envelope') entry does return specs (for wire-color lookup —
+  // see controlSpecs.ts), so this guards against the reservation math
+  // running against a feature's own unused x/y/width/height regardless.
   const specs = controlsFor(entity.kind);
   const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
-  if (specs.length > 0 && entity.type !== 'control' && !isEmptyFilter) {
+  if (specs.length > 0 && entity.type !== 'control' && entity.type !== 'feature' && !isEmptyFilter) {
     const baseRect = { x: pos.x, y: pos.y, width: entity.width, height: entity.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);

@@ -66,6 +66,48 @@ export function triggerEntity(entityId: string): void {
   triggersByEntity.get(entityId)?.();
 }
 
+// Registered by createGenerator() only for an entity that has an ADSR
+// envelope feature attached (audio/entityGraph.ts's EntityType 'feature') —
+// the gate-off half of ui/interaction.ts's press-and-hold pad gesture,
+// firing the envelope's Release ramp. A no-op (not registered at all) for
+// any TRIGGERED_KINDS entity without one, so ui/interaction.ts can call
+// this unconditionally on every pad release rather than first checking
+// whether an envelope exists.
+const releasesByEntity = new Map<string, () => void>();
+
+function registerRelease(entityId: string, release: () => void): void {
+  releasesByEntity.set(entityId, release);
+}
+
+export function releaseEntity(entityId: string): void {
+  releasesByEntity.get(entityId)?.();
+}
+
+// Wall-clock (performance.now()) timing for an in-progress envelope, so
+// ui/organelle.ts's rAF-driven cursor animation can compute "where along
+// the curve is playback right now" without needing to reconcile against
+// AudioContext.currentTime's own (differently-epoched) clock — the cursor
+// only needs to read roughly in sync with the ear, not sample-accurately,
+// so tracking it independently on the same clock the render loop already
+// uses is simpler and sufficient. attack/decay are snapshotted at gate-on
+// (registerTrigger below) and release at gate-off (registerRelease) —
+// exactly the same "read fresh at the moment it happens" values the actual
+// audio ramps were scheduled with, so the visual always matches what's
+// actually sounding even if the popup's sliders keep moving afterward.
+export interface EnvelopePlayback {
+  gateOnAt: number;
+  attack: number;
+  decay: number;
+  gateOffAt: number | null;
+  release: number;
+}
+
+const envelopePlaybackByFeature = new Map<string, EnvelopePlayback>();
+
+export function getEnvelopePlayback(featureId: string): EnvelopePlayback | undefined {
+  return envelopePlaybackByFeature.get(featureId);
+}
+
 // Compiled once in initAudioEngine(), then passed (structured-cloned, not
 // re-fetched/re-compiled) into every WASM-backed AudioWorkletNode's
 // processorOptions — each entity gets its own WASM instance/state (a fresh
@@ -111,8 +153,11 @@ const WASM_KINDS = new Set(['noise', 'bass', 'bow', 'pluck']);
 
 // Creates the node(s) that make an entity's own sound, if it has any.
 // A plain group/mixer entity (no matching case) returns undefined — it
-// contributes nothing but its children's sound, summed at `output`.
-function createGenerator(entity: Entity): AudioNode | undefined {
+// contributes nothing but its children's sound, summed at `output`. Takes
+// `graph` only so a generator can look up its own internal-feature
+// organelles (EntityGraph.featuresOf — see the 'pluck' case's envelope
+// below); every other kind ignores it.
+function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefined {
   const ctx = getAudioContext();
 
   if (!dspModule && WASM_KINDS.has(entity.kind)) {
@@ -265,7 +310,42 @@ function createGenerator(entity: Entity): AudioNode | undefined {
       });
       const level = ctx.createGain();
       level.gain.value = entity.params.level ?? 0.89;
-      pluck.connect(level);
+
+      // An attached ADSR envelope organelle (audio/entityGraph.ts's
+      // EntityType 'feature', ui/organelle.ts) inserts an extra gain stage
+      // between the raw voice and `level` — `level` stays the user-facing
+      // volume knob, this is what the envelope's Attack/Decay/Sustain/
+      // Release ramps actually drive. Silent (gain 0) until gated on.
+      const envelope = graph.featuresOf(entity.id).find((f) => f.kind === 'envelope');
+      let tail: AudioNode = pluck;
+      let envelopeGain: GainNode | undefined;
+      if (envelope) {
+        const gain = ctx.createGain();
+        gain.gain.value = 0;
+        pluck.connect(gain);
+        tail = gain;
+        envelopeGain = gain;
+
+        // Gate-off (ui/interaction.ts's pad-release, via releaseEntity) —
+        // ramp down to silence from wherever the envelope currently sits,
+        // not just from Sustain, so releasing mid-Attack/Decay doesn't
+        // jump/click. Reads envelope.params fresh each call, same "no
+        // baked-in values" reasoning as kick's registerTrigger below.
+        registerRelease(entity.id, () => {
+          const now = ctx.currentTime;
+          const release = Math.max(0.001, envelope.params.release ?? 0.3);
+          gain.gain.cancelScheduledValues(now);
+          gain.gain.setValueAtTime(gain.gain.value, now);
+          gain.gain.linearRampToValueAtTime(0, now + release);
+
+          const playback = envelopePlaybackByFeature.get(envelope.id);
+          if (playback) {
+            playback.gateOffAt = performance.now();
+            playback.release = release;
+          }
+        });
+      }
+      tail.connect(level);
 
       // None of these are native AudioParams — same reasoning as bow above.
       registerControls(entity.id, {
@@ -277,6 +357,30 @@ function createGenerator(entity: Entity): AudioNode | undefined {
 
       registerTrigger(entity.id, () => {
         pluck.port.postMessage({ type: 'excite' });
+
+        // Gate-on: Attack up to full, then Decay down to Sustain — the
+        // Release half lives in the registerRelease closure above, fired
+        // separately on pad-release. Only when an envelope is actually
+        // attached; otherwise this is a plain momentary trigger exactly as
+        // before, no envelope machinery involved at all.
+        if (envelope && envelopeGain) {
+          const now = ctx.currentTime;
+          const attack = Math.max(0.001, envelope.params.attack ?? 0.01);
+          const decay = Math.max(0.001, envelope.params.decay ?? 0.2);
+          const sustain = Math.min(1, Math.max(0, envelope.params.sustain ?? 0.6));
+          envelopeGain.gain.cancelScheduledValues(now);
+          envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
+          envelopeGain.gain.linearRampToValueAtTime(1, now + attack);
+          envelopeGain.gain.linearRampToValueAtTime(sustain, now + attack + decay);
+
+          envelopePlaybackByFeature.set(envelope.id, {
+            gateOnAt: performance.now(),
+            attack,
+            decay,
+            gateOffAt: null,
+            release: 0,
+          });
+        }
       });
 
       return level;
@@ -545,7 +649,7 @@ function createModulatedDelay(
   return outLevel;
 }
 
-function createNodes(entity: Entity): EntityNodes {
+function createNodes(entity: Entity, graph: EntityGraph): EntityNodes {
   const ctx = getAudioContext();
 
   const input = ctx.createGain();
@@ -558,7 +662,7 @@ function createNodes(entity: Entity): EntityNodes {
     input.connect(output);
   }
 
-  const generator = createGenerator(entity);
+  const generator = createGenerator(entity, graph);
   if (generator) generator.connect(output);
 
   const nodes: EntityNodes = { input, output };
@@ -598,8 +702,14 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
     // which builds them lazily at that point instead.
     if (entity.docked) continue;
 
+    // 'feature' entities (audio/entityGraph.ts, ui/organelle.ts) have no
+    // audio nodes of their own — their owning source's own generator reads
+    // them directly (see the 'pluck' case's envelope above, via
+    // graph.featuresOf()).
+    if (entity.type === 'feature') continue;
+
     try {
-      createNodes(entity);
+      createNodes(entity, graph);
     } catch (err) {
       console.error(
         `Failed to build audio for entity "${entity.id}" (kind: ${entity.kind}) — it will be silent; other entities are unaffected.`,
@@ -652,13 +762,13 @@ export function reparentEntity(id: string, newParentId: string | null): void {
 // buildFromEntityGraph's own connect pass. A no-op before "start audio" has
 // ever been pressed — buildFromEntityGraph() picks the entity up normally
 // once it does, since it's no longer docked by then.
-export function activateEntity(entity: Entity): void {
+export function activateEntity(entity: Entity, graph: EntityGraph): void {
   if (!engineReady) return;
 
   let nodes = nodesByEntity.get(entity.id);
   if (!nodes) {
     try {
-      nodes = createNodes(entity);
+      nodes = createNodes(entity, graph);
     } catch (err) {
       console.error(
         `Failed to build audio for entity "${entity.id}" (kind: ${entity.kind}) — it will be silent.`,

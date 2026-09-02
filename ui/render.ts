@@ -14,6 +14,7 @@ import {
   controlDotAbsolutePosition,
   controlsFor,
   dotPositionFor,
+  formatControlValue,
   restTrackGeometry,
   trackGeometry,
   valueFraction,
@@ -29,6 +30,7 @@ import { eventWireEndpoints, valueWireEndpoints, wireCurveControlPoint } from '.
 import { getBeatFlashGlow } from './clockPulse';
 import { formatKeyLabel, getBoundKey } from './tapBindings';
 import { drawDock } from './dock';
+import { drawPopup, drawPorthole } from './organelle';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
@@ -180,16 +182,6 @@ function isReceivingFromActiveWire(
 ): boolean {
   const wire = getWireTo(entityId, param);
   return wire !== undefined && isControlActive(interaction, wire.sourceEntityId, wire.sourceParam);
-}
-
-// Decimal places scaled to the value's own magnitude — enough precision to
-// read back and report as a new default (see drawControls's readout below)
-// without a flood of meaningless digits on a 0-1 param.
-function formatControlValue(value: number): string {
-  const magnitude = Math.abs(value);
-  if (magnitude >= 100) return value.toFixed(0);
-  if (magnitude >= 10) return value.toFixed(1);
-  return value.toFixed(2);
 }
 
 function drawControls(
@@ -798,6 +790,7 @@ export function renderFrame(
   for (const entity of graph.all()) {
     if (entity.id === interaction.draggingId) continue;
     if (entity.docked) continue; // no controls/pad while parked in the dock — see ui/dock.ts
+    if (entity.type === 'feature') continue; // drawn in its own pass below, anchored to its owner
 
     const bounds = effectiveBounds(graph, entity, drag);
     const drawAt =
@@ -806,6 +799,26 @@ export function renderFrame(
         : bounds;
     drawControls(ctx, graph, entity, drawAt, interaction);
     drawPad(ctx, entity, drawAt, interaction, now);
+  }
+
+  // Internal-feature organelles (ui/organelle.ts) — a porthole inset in the
+  // owner's box while collapsed, or a popup floating over the canvas while
+  // expanded. Skipped, same as controls/pads above, while the owner itself
+  // is mid-drag (nothing about a dragged entity renders inline while it's
+  // flying) or docked (nothing to anchor to).
+  for (const feature of graph.all()) {
+    if (feature.type !== 'feature') continue;
+    const owner = feature.ownerId ? graph.get(feature.ownerId) : undefined;
+    if (!owner || owner.docked || owner.id === interaction.draggingId) continue;
+
+    if (feature.expanded) {
+      const activeHandle =
+        interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
+      const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
+      drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
+    } else {
+      drawPorthole(ctx, graph, feature, owner, drag);
+    }
   }
 
   // Topmost of all — a fixed HUD panel pinned to the viewport's right edge

@@ -9,6 +9,7 @@ import {
   reparentEntity as reparentAudio,
   activateEntity,
   getControlSetter,
+  releaseEntity,
   triggerEntity,
   PROCESSOR_KINDS,
   TRIGGERED_KINDS,
@@ -32,6 +33,16 @@ import { bindKey, getEntityForKey } from './tapBindings';
 import { scheduleSoon } from '../audio/transport';
 import { isOverDock, hitTestDockIcon } from './dock';
 import { isDockable, dockEntity } from './docking';
+import {
+  envelopeValuesFromHandle,
+  hitTestFeatureDot,
+  hitTestPopup,
+  hitTestPorthole,
+  requiredTimeScaleFor,
+  timeScaleFromDrag,
+  DEFAULT_TIME_SCALE,
+} from './organelle';
+import type { HandleKind } from './organelle';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -80,6 +91,29 @@ export interface InteractionState {
   // than a value source — mutually exclusive with wireHoverTarget, which of
   // the two is ever used depends on the source's own kind.
   eventWireHoverTarget: string | null;
+
+  // Set while directly dragging one of an open envelope popup's handles
+  // (ui/organelle.ts) — a genuinely different gesture from draggingControl
+  // above (2D curve manipulation, not a single vertical slider), so it gets
+  // its own slot rather than being shoehorned into that one.
+  draggingHandle: { entityId: string; handle: HandleKind } | null;
+
+  // Set while dragging the popup's time-axis zoom grip (ui/organelle.ts) —
+  // rescales how many seconds the curve's fixed pixel width represents
+  // rather than adjusting a param value, so it's tracked separately from
+  // draggingHandle. Delta-based (see organelle.ts's timeScaleFromDrag), not
+  // a direct pointer-to-value mapping like a normal slider, since there's
+  // no fixed pixel position that inherently means "this many seconds."
+  draggingTimeAxis: { entityId: string; startX: number; startTimeScale: number } | null;
+
+  // The TRIGGERED_KINDS entity currently gated on by a held pad press (see
+  // pointerdown below) — released (audio/graph.ts's releaseEntity) on
+  // pointerup/pointercancel regardless of what else happened during the
+  // press (a repositioning drag included). A no-op release for any
+  // instrument with no envelope feature attached, so this is tracked
+  // unconditionally for every TRIGGERED_KINDS press rather than needing to
+  // first check whether one exists.
+  gatedId: string | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -98,6 +132,9 @@ export function createInteractionState(): InteractionState {
     wireDragPoint: null,
     wireHoverTarget: null,
     eventWireHoverTarget: null,
+    draggingHandle: null,
+    draggingTimeAxis: null,
+    gatedId: null,
   };
 }
 
@@ -186,6 +223,42 @@ export function attachInteraction(
   canvas.addEventListener('pointerdown', (e) => {
     const point = canvasPoint(e);
 
+    // An open envelope popup (ui/organelle.ts) sits visually on top of
+    // everything else on the canvas, so its own hit-test goes first — a
+    // click anywhere inside it (its background included) must never fall
+    // through to whatever entity happens to be underneath.
+    const popupHit = hitTestPopup(graph, point);
+    if (popupHit) {
+      if (popupHit.kind === 'close') {
+        const feature = graph.get(popupHit.entityId);
+        if (feature) feature.expanded = false;
+      } else if (popupHit.kind === 'handle') {
+        canvas.setPointerCapture(e.pointerId);
+        state.draggingHandle = { entityId: popupHit.entityId, handle: popupHit.handle };
+      } else if (popupHit.kind === 'axisHandle') {
+        canvas.setPointerCapture(e.pointerId);
+        const feature = graph.get(popupHit.entityId);
+        state.draggingTimeAxis = {
+          entityId: popupHit.entityId,
+          startX: point.x,
+          startTimeScale: feature?.params.timeScale ?? DEFAULT_TIME_SCALE,
+        };
+      }
+      // 'dot' and 'background' are absorbed with no further action — a
+      // dot's only job is receiving a wire dragged in from elsewhere (see
+      // pointermove's wiringFrom branch below), not itself slider-draggable.
+      return;
+    }
+
+    // A collapsed feature's porthole (ui/organelle.ts) — click to expand.
+    // Only meaningful while collapsed; an open popup has its own close
+    // button instead (handled above).
+    const portholeHit = hitTestPorthole(graph, point);
+    if (portholeHit) {
+      portholeHit.expanded = true;
+      return;
+    }
+
     // A knob's wire-start handle takes priority over everything else — the
     // whole point of it being a separate small handle (not the knob's own
     // value dot, not its body) is that it always means "start a wire,"
@@ -244,6 +317,10 @@ export function attachInteraction(
     if (TRIGGERED_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
       triggerEntity(hit.id);
       state.triggerFlashes.set(hit.id, performance.now());
+      // Gate-on for a press-and-hold envelope (see endPress's matching
+      // release) — a no-op release if this instrument has no envelope
+      // feature attached, so tracked unconditionally.
+      state.gatedId = hit.id;
     } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see
@@ -262,6 +339,36 @@ export function attachInteraction(
 
   canvas.addEventListener('pointermove', (e) => {
     const point = canvasPoint(e);
+
+    if (state.draggingHandle) {
+      const { entityId, handle } = state.draggingHandle;
+      const feature = graph.get(entityId);
+      const owner = feature?.ownerId ? graph.get(feature.ownerId) : undefined;
+      if (feature && owner) {
+        for (const update of envelopeValuesFromHandle(feature, owner, graph, handle, point)) {
+          applyControlValue(graph, entityId, update.param, update.value);
+        }
+        // Dragging a handle past the currently visible edge shouldn't lose
+        // it off-screen — grow (never shrink) the axis to keep the whole
+        // envelope in view. Written directly, same reasoning as the
+        // axisHandle branch below: timeScale is UI display state, not a
+        // wireable param.
+        const required = requiredTimeScaleFor(feature);
+        if (required !== null) feature.params.timeScale = required;
+      }
+      return;
+    }
+
+    if (state.draggingTimeAxis) {
+      const { entityId, startX, startTimeScale } = state.draggingTimeAxis;
+      const feature = graph.get(entityId);
+      // Written directly rather than through applyControlValue — timeScale
+      // is UI-only display state (how the popup renders), not one of
+      // controlsFor('envelope')'s specs, so it's never wireable and has no
+      // control-setter to dispatch to.
+      if (feature) feature.params.timeScale = timeScaleFromDrag(startTimeScale, point.x - startX);
+      return;
+    }
 
     if (state.wiringFrom) {
       state.wireDragPoint = point;
@@ -289,7 +396,10 @@ export function attachInteraction(
       }
       state.eventWireHoverTarget = null;
 
-      const hit = hitTestControl(graph, point);
+      // hitTestFeatureDot covers an open envelope popup's connection dots
+      // (ui/organelle.ts) — outside the generic per-kind column hitTestControl
+      // otherwise handles, but the same ControlHit shape either way.
+      const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point);
       // A wire can't target its own source (self-connection is meaningless)
       // or any other control entity's dot — knobs are sources only for now,
       // never targets, which is also what keeps applyControlValue's
@@ -401,6 +511,18 @@ export function attachInteraction(
   });
 
   function endPress(e: PointerEvent): void {
+    if (state.draggingHandle) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.draggingHandle = null;
+      return;
+    }
+
+    if (state.draggingTimeAxis) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.draggingTimeAxis = null;
+      return;
+    }
+
     if (state.wiringFrom) {
       canvas.releasePointerCapture(e.pointerId);
       if (state.eventWireHoverTarget) {
@@ -446,6 +568,14 @@ export function attachInteraction(
     state.dragPointer = null;
     state.hoverTargetId = null;
     state.hoverDock = false;
+
+    // Gate-off for a held pad press (see pointerdown's matching gate-on) —
+    // unconditional on release regardless of whether a repositioning drag
+    // also happened in between.
+    if (state.gatedId) {
+      releaseEntity(state.gatedId);
+      state.gatedId = null;
+    }
   }
 
   canvas.addEventListener('pointerup', endPress);
@@ -476,7 +606,7 @@ export function attachInteraction(
       }
     }
 
-    const hit = hitTestControl(graph, point);
+    const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point);
     if (hit) {
       e.preventDefault();
       removeWireTo(hit.entityId, hit.spec.param);
@@ -555,7 +685,7 @@ function finalizeDrop(graph: EntityGraph, state: InteractionState, entityId: str
   // disconnected) its audio, now that it has a resolved parent (possibly
   // just set above) to connect into.
   if (wasDocked) {
-    activateEntity(entity);
+    activateEntity(entity, graph);
   }
 
   // Independent of whether reparenting happened — dropping one instrument

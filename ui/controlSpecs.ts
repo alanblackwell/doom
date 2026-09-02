@@ -92,6 +92,22 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
   // of a normalized 0-1. Warm amber to match the beat-pulse glow on its
   // wire-output bump (see ui/render.ts's drawClock).
   clock: [{ param: 'bpm', label: 'bpm', min: 5, max: 300, color: '#f0b860' }],
+  // An ADSR envelope organelle (ui/organelle.ts, EntityType 'feature') —
+  // not drawn via the generic dot column these specs otherwise describe
+  // (see organelle.ts's own connection-point layout, positioned along its
+  // popup's edge instead), but still keyed off the same ControlSpec shape
+  // so the generic wire-color/opacity lookups in ui/render.ts (wireOpacity,
+  // drawWires) and controlDotAbsolutePosition's feature branch in
+  // ui/controls.ts work exactly like any other wire target.
+  // Decay/release headroom well past what the popup's default zoom shows at
+  // once (ui/organelle.ts's timeScale) — doom/drone tails routinely run into
+  // many seconds, longer than a typical synth's ADSR ever needs to reach.
+  envelope: [
+    { param: 'attack', label: 'attack', min: 0.001, max: 5, color: '#7ec850' },
+    { param: 'decay', label: 'decay', min: 0.001, max: 10, color: '#8a7ec8' },
+    { param: 'sustain', label: 'sustain', min: 0, max: 1, color: '#e0c840' },
+    { param: 'release', label: 'release', min: 0.001, max: 15, color: '#5aa0c8' },
+  ],
 };
 
 export function controlsFor(kind: string): ControlSpec[] {

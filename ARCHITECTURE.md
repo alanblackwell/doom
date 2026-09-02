@@ -54,12 +54,31 @@ save/load) is a projection of it.
   output (e.g. a "drone" entity that internally mixes a noise generator + a
   Karplus-Strong string + a slow filter sweep, then exposes one output).
 - **Control** — a parameter modulator with no audio output: a knob, XY pad, LFO,
-  envelope, or sequencer step lane. Controls only ever target `AudioParam`s —
-  either on their parent source, or (via explicit patch reference) on any other
-  entity in the graph.
+  or sequencer step lane. Controls only ever target `AudioParam`s — either on
+  their parent source, or (via explicit patch reference) on any other entity in
+  the graph. (An ADSR envelope turned out to fit better as a Feature, below —
+  it belongs to one specific source rather than being freely relocatable.)
 - **Live Input** — a special Source backed by a hardware input channel
   (`MediaStreamAudioSourceNode`) rather than a synthesis algorithm. Behaves like
   any other Source for routing/nesting purposes once created.
+- **Feature** — an internal organelle belonging to exactly one Source (an ADSR
+  envelope is the first one), drawn *within* that source's own boundary rather
+  than as a sibling box on the canvas — the "metaphorical organelle within the
+  cell" framing. Distinct from both of the above: unlike containment, a Feature
+  has no audio-routing meaning of its own (its owner's own generator reads it
+  directly, e.g. an extra gain stage the envelope's ramps drive); unlike a
+  Control, it isn't a freely-relocatable, freely-wireable top-level entity — it
+  belongs to one Source for its whole life (`ownerId`, not `parentId`), and is
+  never itself a wire *source* the way a knob is. It still accepts incoming
+  value wires on its own params (e.g. an LFO modulating attack time), the same
+  Control→AudioParam wiring §3.2 describes, just as a target rather than ever
+  a source. Two visual states: a small **porthole** inset in the owner's box
+  (any wire converges there, whichever param it actually targets) or, expanded,
+  a **popup** — a simulated (canvas-drawn, not a native browser window, so it
+  works without popup support) floating panel with direct-manipulation handles
+  and per-param connection dots, positioned in the same canvas-content
+  coordinate space as everything else so wires from anywhere else on the
+  canvas can still reach it. See `ui/organelle.ts`.
 
 ### 3.2 Containment = routing (default), explicit patch cables (escape hatch)
 

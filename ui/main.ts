@@ -39,6 +39,8 @@ graph.add({
   height: 70,
   seed: 1,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 graph.add({
   id: 'bow-1',
@@ -56,6 +58,8 @@ graph.add({
   height: 70,
   seed: 2,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 // One-shot, not a drone — click the pad at its center to fire a hit rather
 // than it playing continuously once audio starts. See audio/graph.ts's
@@ -74,6 +78,8 @@ graph.add({
   height: 70,
   seed: 7,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 // Karplus-Strong plucked string (dsp/rust/src/lib.rs) — also one-shot/pad-
 // triggered like kick-1 above, tuned by ear (via ui/render.ts's per-slider
@@ -92,6 +98,36 @@ graph.add({
   height: 70,
   seed: 11,
   docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// pluck-1's ADSR envelope organelle (EntityType 'feature', ui/organelle.ts) —
+// the first "internal feature" of a source: drawn nested within pluck-1's
+// own box (a small porthole) rather than as a sibling on the canvas, and
+// owned by it via ownerId rather than parentId/containment (see
+// audio/entityGraph.ts's Entity.ownerId). Gates on press-and-hold of
+// pluck-1's own pad (ui/interaction.ts) — a quick tap still just plucks
+// briefly, cut short before reaching Sustain. x/y/width/height/seed are
+// unused for a feature entity; its popup's position is computed fresh each
+// frame from pluck-1's current bounds instead (see ui/organelle.ts).
+graph.add({
+  id: 'pluck-1-envelope',
+  type: 'feature',
+  kind: 'envelope',
+  parentId: null,
+  children: [],
+  // timeScale (seconds) is UI-only display state, not an audio param — how
+  // much of the time axis the popup currently shows (ui/organelle.ts); drag
+  // its right-edge zoom grip to change it.
+  params: { attack: 0.01, decay: 0.2, sustain: 0.6, release: 0.3, timeScale: 2 },
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 12,
+  docked: false,
+  ownerId: 'pluck-1',
+  expanded: false,
 });
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
@@ -114,6 +150,8 @@ graph.add({
   height: 44,
   seed: 3,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 graph.add({
   id: 'reverb-1',
@@ -128,6 +166,8 @@ graph.add({
   height: 44,
   seed: 4,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 graph.add({
   id: 'chorus-1',
@@ -142,6 +182,8 @@ graph.add({
   height: 44,
   seed: 5,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 graph.add({
   id: 'flanger-1',
@@ -156,6 +198,8 @@ graph.add({
   height: 44,
   seed: 6,
   docked: true,
+  ownerId: null,
+  expanded: false,
 });
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
@@ -175,6 +219,8 @@ graph.add({
   height: 30,
   seed: 8,
   docked: false, // controls never dock — see ui/docking.ts's isDockable
+  ownerId: null,
+  expanded: false,
 });
 // The master clock (audio/transport.ts), as a Control entity like knob-1
 // above — same drag-a-wire-from-the-bump mechanism, just carrying bpm
@@ -194,6 +240,8 @@ graph.add({
   height: 30,
   seed: 9,
   docked: false,
+  ownerId: null,
+  expanded: false,
 });
 // A momentary trigger, also a Control entity — no continuous value (no
 // entry in controlSpecs.ts's CONTROL_SPECS, so no dot/slider at all),
@@ -215,6 +263,8 @@ graph.add({
   height: 30,
   seed: 10,
   docked: false,
+  ownerId: null,
+  expanded: false,
 });
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush

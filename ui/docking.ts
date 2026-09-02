@@ -36,5 +36,11 @@ export function dockEntity(graph: EntityGraph, entity: Entity): void {
     removeWireTo(entity.id, spec.param);
   }
   removeEventWiresTo(entity.id);
+  // Any internal-feature popup (ui/organelle.ts) has nothing to anchor to
+  // once its owner is off-canvas — close it rather than leaving it stuck
+  // open with a stale position for whenever it reappears.
+  for (const feature of graph.featuresOf(entity.id)) {
+    feature.expanded = false;
+  }
   entity.docked = true;
 }
