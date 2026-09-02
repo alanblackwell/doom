@@ -6,6 +6,7 @@
 // rack of visible knobs/faders.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
+import { PROCESSOR_KINDS } from '../audio/graph';
 import { effectiveBounds } from './layout';
 import type { DragContext, Point } from './layout';
 import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
@@ -87,6 +88,10 @@ export function hitTestControl(
   for (const entity of graph.all()) {
     const specs = controlsFor(entity.kind);
     if (specs.length === 0) continue;
+    // Matches render.ts's drawControls: an empty filter's dots aren't
+    // drawn, so they shouldn't be hit-testable either — no invisible
+    // targets to stumble onto.
+    if (PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0) continue;
 
     const bounds = effectiveBounds(graph, entity, drag);
     for (let i = 0; i < specs.length; i++) {

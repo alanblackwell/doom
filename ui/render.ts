@@ -41,7 +41,6 @@ const KIND_COLORS: Record<string, string> = {
 };
 const DEFAULT_COLOR = '#3a3a3a';
 const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette
-const PROCESSOR_ACCENT = '#e0a840'; // sink+source marker — brighter than the selection accent, always visible
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
 // resting at its center (see drawControls), a little lighter than the
 // canvas's own #111 backdrop, matching the app's existing dark
@@ -202,6 +201,11 @@ function drawControls(
 ): void {
   const specs = controlsFor(entity.kind);
   if (specs.length === 0) return;
+  // An empty filter has nothing routed through it yet for these params to
+  // affect — hiding them saves space and clutter until something's
+  // actually dropped in (see layout.ts's matching effectiveBounds
+  // exemption, which is what lets the box itself shrink to match).
+  if (PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0) return;
 
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i];
@@ -641,6 +645,13 @@ function drawBox(
   flags: { selected: boolean; dropTarget: boolean; lifted: boolean }
 ): void {
   const baseColor = KIND_COLORS[entity.kind] ?? DEFAULT_COLOR;
+  // Sink+source ("pedal"/filter) kinds render hollow — an empty container
+  // waiting for something to be routed through it, rather than a solid
+  // mass like a plain source/mixer. No id label (the box is about what's
+  // inside it, not its own name) and the kind label sits in a top-left
+  // corner that stays clear once contents grow the box, rather than a
+  // centered label that would get buried under whatever's dropped in.
+  const isFilter = PROCESSOR_KINDS.has(entity.kind);
 
   ctx.save();
 
@@ -656,55 +667,53 @@ function drawBox(
 
   jitteredRectPath(ctx, x, y, w, h, entity.seed);
 
-  const gradient = ctx.createRadialGradient(x, y - h * 0.2, w * 0.1, x, y, w * 0.7);
-  // Nested boxes read as recessed layers — each depth level a touch darker.
-  const shade = Math.max(0, 1 - depth * 0.12);
-  gradient.addColorStop(0, shadeColor(baseColor, shade * 1.15));
-  gradient.addColorStop(1, shadeColor(baseColor, shade * 0.75));
-  ctx.fillStyle = gradient;
-  ctx.fill();
-
-  ctx.shadowColor = 'transparent';
-  ctx.lineWidth = flags.selected || flags.dropTarget ? 2.5 : 1;
-  ctx.strokeStyle = flags.selected || flags.dropTarget ? ACCENT : 'rgba(0, 0, 0, 0.5)';
-  if (flags.dropTarget) {
-    ctx.setLineDash([6, 4]);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Sink+source ("pedal"/filter) marker: an IN -> OUT arrow across the box,
-  // so processing entities read differently from plain sources/mixers at a
-  // glance — dropping something in here means "route through," not "mix."
-  if (PROCESSOR_KINDS.has(entity.kind)) {
-    ctx.strokeStyle = PROCESSOR_ACCENT;
-    ctx.fillStyle = PROCESSOR_ACCENT;
-    ctx.lineWidth = 1.5;
-    const arrowY = y + h * 0.28;
-    const left = x - w * 0.32;
-    const right = x + w * 0.32;
-    ctx.beginPath();
-    ctx.moveTo(left, arrowY);
-    ctx.lineTo(right, arrowY);
-    ctx.moveTo(right - 6, arrowY - 5);
-    ctx.lineTo(right, arrowY);
-    ctx.lineTo(right - 6, arrowY + 5);
+  if (isFilter) {
+    ctx.shadowColor = 'transparent';
+    ctx.lineWidth = flags.selected || flags.dropTarget ? 2.5 : 1.5;
+    // A near-black edge (the plain-source default below) would be nearly
+    // invisible against the canvas backdrop with no fill behind it to set
+    // it off — the kind color itself, lightened, reads clearly instead.
+    ctx.strokeStyle = flags.selected || flags.dropTarget ? ACCENT : shadeColor(baseColor, 1.3);
+    if (flags.dropTarget) {
+      ctx.setLineDash([6, 4]);
+    }
     ctx.stroke();
-    ctx.font = '9px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText('IN', left, arrowY - 8);
-    ctx.textAlign = 'right';
-    ctx.fillText('OUT', right, arrowY - 8);
+    ctx.setLineDash([]);
+  } else {
+    const gradient = ctx.createRadialGradient(x, y - h * 0.2, w * 0.1, x, y, w * 0.7);
+    // Nested boxes read as recessed layers — each depth level a touch darker.
+    const shade = Math.max(0, 1 - depth * 0.12);
+    gradient.addColorStop(0, shadeColor(baseColor, shade * 1.15));
+    gradient.addColorStop(1, shadeColor(baseColor, shade * 0.75));
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    ctx.shadowColor = 'transparent';
+    ctx.lineWidth = flags.selected || flags.dropTarget ? 2.5 : 1;
+    ctx.strokeStyle = flags.selected || flags.dropTarget ? ACCENT : 'rgba(0, 0, 0, 0.5)';
+    if (flags.dropTarget) {
+      ctx.setLineDash([6, 4]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '13px monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`${entity.id}`, x, y - 6);
-  ctx.font = '10px monospace';
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-  ctx.fillText(`(${entity.kind})`, x, y + 10);
+  if (isFilter) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(entity.kind, x - w / 2 + 8, y - h / 2 + 8);
+  } else {
+    // Just the kind, centered — no instance id (e.g. "bow-1"), which
+    // named nothing a player needs while performing; the kind alone is
+    // enough to tell voices apart at a glance.
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(entity.kind, x, y);
+  }
 
   ctx.restore();
 }

@@ -31,8 +31,8 @@ graph.add({
   params: { level: 0.5, frequency: 41.2 },
   x: 180,
   y: 160,
-  width: 160,
-  height: 110,
+  width: 110,
+  height: 70,
   seed: 1,
 });
 graph.add({
@@ -47,8 +47,8 @@ graph.add({
   params: { level: 0.6, frequency: 180, bowVelocity: 0.05, bowPressure: 0.5 },
   x: 480,
   y: 160,
-  width: 160,
-  height: 110,
+  width: 110,
+  height: 70,
   seed: 2,
 });
 // One-shot, not a drone — click the pad at its center to fire a hit rather
@@ -64,15 +64,18 @@ graph.add({
   params: { level: 0.8, pitch: 50, decay: 0.4, click: 0.3 },
   x: 780,
   y: 160,
-  width: 160,
-  height: 110,
+  width: 110,
+  height: 70,
   seed: 7,
 });
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
 // canvas (they grow to fit on drop, and live-preview that growth while a
 // drag is still in progress — see effectiveBounds()/DragContext in
-// ui/layout.ts).
+// ui/layout.ts). Small enough that an empty one is just its hollow outline
+// and kind label (ui/render.ts's drawBox) — there's no dot column to leave
+// room for either, until something's actually dropped in (see
+// effectiveBounds's isEmptyFilter exemption).
 graph.add({
   id: 'overdrive-1',
   type: 'source',
@@ -82,8 +85,8 @@ graph.add({
   params: { drive: 6, tone: 3000, level: 0.8 },
   x: 220,
   y: 380,
-  width: 100,
-  height: 64,
+  width: 64,
+  height: 44,
   seed: 3,
 });
 graph.add({
@@ -95,8 +98,8 @@ graph.add({
   params: { decay: 4, mix: 0.4, tone: 3500, level: 0.8 },
   x: 500,
   y: 380,
-  width: 100,
-  height: 64,
+  width: 64,
+  height: 44,
   seed: 4,
 });
 graph.add({
@@ -108,8 +111,8 @@ graph.add({
   params: { rate: 0.8, depth: 3, mix: 0.5, level: 0.8 },
   x: 220,
   y: 560,
-  width: 100,
-  height: 64,
+  width: 64,
+  height: 44,
   seed: 5,
 });
 graph.add({
@@ -121,8 +124,8 @@ graph.add({
   params: { rate: 0.2, depth: 2, feedback: 0.5, mix: 0.5, level: 0.8 },
   x: 500,
   y: 560,
-  width: 100,
-  height: 64,
+  width: 64,
+  height: 44,
   seed: 6,
 });
 // A Control entity (type: 'control'), not a source — no audio node of its

@@ -4,6 +4,7 @@
 // pointer) — both depend on this, this depends on neither.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
+import { PROCESSOR_KINDS } from '../audio/graph';
 import { controlsFor, dotPosition, CONTROL_HIT_RADIUS } from './controlSpecs';
 
 export interface Point {
@@ -85,9 +86,14 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // body's own center (see knobs.ts's knobValueDotPosition), not a column
   // poking out past the edge, so there's nothing to reserve room for — and
   // reserving it anyway would inflate the knob's drawn size well past its
-  // actual width/height.
+  // actual width/height. Also skipped for a sink+source ("filter") kind
+  // with nothing dropped into it yet — render.ts's drawControls hides its
+  // dots for exactly the same "empty" condition, so there's nothing to
+  // reserve room for there either; the box grows to reveal them the moment
+  // something's actually routed through it.
   const specs = controlsFor(entity.kind);
-  if (specs.length > 0 && entity.type !== 'control') {
+  const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
+  if (specs.length > 0 && entity.type !== 'control' && !isEmptyFilter) {
     const baseRect = { x: pos.x, y: pos.y, width: entity.width, height: entity.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);
