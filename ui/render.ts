@@ -17,7 +17,9 @@ import {
   restTrackGeometry,
   trackGeometry,
   valueFraction,
+  CONTROL_DOT_OUTER_RADIUS,
   CONTROL_DOT_RADIUS,
+  CONTROL_DOT_DROP_RADIUS,
 } from './controls';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { knobIndicatorAngle, wireHandlePosition, WIRE_BUMP_RADIUS } from './knobs';
@@ -40,6 +42,11 @@ const KIND_COLORS: Record<string, string> = {
 const DEFAULT_COLOR = '#3a3a3a';
 const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette
 const PROCESSOR_ACCENT = '#e0a840'; // sink+source marker — brighter than the selection accent, always visible
+// A control dot's outer ring — quiet backdrop for the smaller colored dot
+// resting at its center (see drawControls), a little lighter than the
+// canvas's own #111 backdrop, matching the app's existing dark
+// control-surface color (index.html's #start-audio button background).
+const CONTROL_DOT_RING_COLOR = '#262626';
 
 // Deterministic per-entity PRNG (mulberry32) so an entity's jittered
 // silhouette is stable across frames/reloads instead of re-randomizing.
@@ -208,14 +215,20 @@ function drawControls(
     const receivingLiveWire =
       !isHovering && !dragging && isReceivingFromActiveWire(graph, interaction, entity.id, spec.param);
     // This dot is where a wire currently being dragged out would land if
-    // released right now — expand it a little as a "compatible drop site"
-    // cue, same accent used for a container's drop-target highlight.
+    // released right now — a "compatible drop site" cue: the inner colored
+    // dot grows to fill the outer grey ring, rather than the whole thing
+    // expanding past its own footprint.
     const isWireDropTarget =
       interaction.wireHoverTarget?.entityId === entity.id && interaction.wireHoverTarget.spec.param === spec.param;
 
     if (!isHovering && !dragging && !receivingLiveWire) {
       ctx.beginPath();
-      ctx.arc(dot.x, dot.y, isWireDropTarget ? CONTROL_DOT_RADIUS * 1.3 : CONTROL_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.arc(dot.x, dot.y, CONTROL_DOT_OUTER_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = CONTROL_DOT_RING_COLOR;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, isWireDropTarget ? CONTROL_DOT_DROP_RADIUS : CONTROL_DOT_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = spec.color;
       ctx.fill();
       continue;

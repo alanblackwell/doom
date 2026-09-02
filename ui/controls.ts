@@ -20,7 +20,15 @@ export function dotPositionFor(entity: Entity, bounds: Point & { width: number; 
 }
 
 export type { ControlSpec } from './controlSpecs';
-export { controlsFor, dotPosition, CONTROL_DOT_RADIUS, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
+export {
+  controlsFor,
+  dotPosition,
+  CONTROL_DOT_OUTER_RADIUS,
+  CONTROL_DOT_RADIUS,
+  CONTROL_DOT_DROP_RADIUS,
+  CONTROL_HIT_RADIUS,
+  CONTROL_TRACK_LENGTH,
+} from './controlSpecs';
 
 export function valueFraction(spec: ControlSpec, value: number): number {
   return Math.min(1, Math.max(0, (value - spec.min) / (spec.max - spec.min)));

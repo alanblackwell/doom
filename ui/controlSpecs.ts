@@ -86,11 +86,25 @@ export function controlsFor(kind: string): ControlSpec[] {
   return CONTROL_SPECS[kind] ?? [];
 }
 
-export const CONTROL_DOT_RADIUS = 5;
-export const CONTROL_HIT_RADIUS = 10; // generous target around the small visual dot
+// Two-layer dot: a grey outer ring (a fixed backdrop, roughly matching the
+// UI's own dark control-surface color — see ui/render.ts's drawControls)
+// with a smaller colored dot resting at its center. The colored dot grows
+// (not all the way to the ring's own edge — just to CONTROL_DOT_DROP_RADIUS)
+// when it's a valid wire drop target, rather than the whole thing growing
+// past its own footprint.
+export const CONTROL_DOT_OUTER_RADIUS = 8;
+export const CONTROL_DOT_RADIUS = 1.5; // resting inner colored dot
+export const CONTROL_DOT_DROP_RADIUS = 3; // grown size as a wire drop target
+export const CONTROL_HIT_RADIUS = 10; // generous target around the visual dot
 export const CONTROL_TRACK_LENGTH = 80; // px the slider travels, independent of value
 
-export const DOT_INSET = 14; // from the box's right/bottom edge to the first (bottom) dot
+export const DOT_INSET = 14; // from the box's bottom edge to the first (bottom) dot
+// Distance from the box's left edge to the dot's center — mostly outside
+// the boundary (poking out to the left, mirroring a knob's wire-output
+// bump poking out to the right — inputs left, outputs right, matching the
+// wires' left-to-right flow), with a couple of px of overlap back in so it
+// reads as attached rather than floating free of the box.
+export const DOT_OUTSET = CONTROL_DOT_OUTER_RADIUS - 2;
 export const DOT_SPACING = 22; // vertical gap between successive dots in the column
 
 export interface Point {
@@ -107,11 +121,15 @@ export interface BoxLike {
   height: number;
 }
 
-// Rest position of a dot — index 0 is nearest the box (bottom of the column),
-// rising from there.
+// Rest position of a dot — index 0 is nearest the box (bottom of the
+// column), rising from there. On the left, outside the box (see
+// DOT_OUTSET): these are a target's inputs, and wires flow left-to-right
+// from a source's output bump (ui/knobs.ts's wireHandlePosition) on its
+// right — so a wire runs straight across from one box's right side to the
+// next box's left, rather than doubling back.
 export function dotPosition(bounds: BoxLike, index: number): Point {
   return {
-    x: bounds.x + bounds.width / 2 - DOT_INSET,
+    x: bounds.x - bounds.width / 2 - DOT_OUTSET,
     y: bounds.y + bounds.height / 2 - DOT_INSET - index * DOT_SPACING,
   };
 }
