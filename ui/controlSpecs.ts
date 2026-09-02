@@ -75,6 +75,11 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
   // ui/render.ts's drawKnob) so the dot and the thing it's turning read as
   // the same value.
   knob: [{ param: 'value', label: 'value', min: 0, max: 1, color: '#e8dcc0' }],
+  // The master clock's own tempo (audio/transport.ts) — same dot+slider
+  // mechanism as a knob's value, just a musically-meaningful range instead
+  // of a normalized 0-1. Warm amber to match the beat-pulse glow on its
+  // wire-output bump (see ui/render.ts's drawClock).
+  clock: [{ param: 'bpm', label: 'bpm', min: 5, max: 300, color: '#f0b860' }],
 };
 
 export function controlsFor(kind: string): ControlSpec[] {

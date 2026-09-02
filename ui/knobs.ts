@@ -21,19 +21,31 @@ export function knobIndicatorAngle(value01: number): number {
   return ((-135 + clamped * 270) * Math.PI) / 180;
 }
 
-const HANDLE_INSET = 14; // mirrors controlSpecs.ts's DOT_INSET, for visual symmetry
+// Radius of the little bump the wire-output handle is drawn as, protruding
+// out of the knob's body — see drawKnob in render.ts.
+export const WIRE_BUMP_RADIUS = 6;
 
-// Bottom-left corner of the bounding box — mirrors dotPosition's bottom-right
-// convention for a knob's own value dot, so the two anchors sit symmetrically
-// rather than colliding.
+// Center of the output bump, on the knob's right-hand edge — mostly outside
+// the body's own circle (only OVERLAP back in, so it visually joins the
+// body rather than floating free of it).
+const WIRE_BUMP_OVERLAP = 2;
 export function wireHandlePosition(bounds: Rect): Point {
+  const radius = knobRadius(bounds);
   return {
-    x: bounds.x - bounds.width / 2 + HANDLE_INSET,
-    y: bounds.y + bounds.height / 2 - HANDLE_INSET,
+    x: bounds.x + radius + WIRE_BUMP_RADIUS - WIRE_BUMP_OVERLAP,
+    y: bounds.y,
   };
 }
 
-const HANDLE_HIT_RADIUS = 10;
+// The knob's own value dot/slider (see controlSpecs.ts's 'knob' entry) sits
+// at the body's center — where the rotating indicator pivots from — rather
+// than the generic per-kind dot column's corner position, which a knob has
+// no room for at this size.
+export function knobValueDotPosition(bounds: Rect): Point {
+  return { x: bounds.x, y: bounds.y };
+}
+
+const HANDLE_HIT_RADIUS = 10; // generous click target — bigger than the bump actually drawn
 
 export function hitTestWireHandle(
   graph: EntityGraph,
@@ -53,4 +65,13 @@ export function hitTestWireHandle(
 
 export function isControlEntity(entity: Entity): boolean {
   return entity.type === 'control';
+}
+
+// Circular hit-test against a control entity's actual drawn body (the
+// inscribed circle of `bounds`) — used for the tap entity's click-to-fire,
+// where the whole body is the button rather than a smaller inset pad
+// (contrast ui/pads.ts's TRIGGERED_KINDS pad, which is deliberately smaller
+// than its box).
+export function withinControlBody(bounds: Rect, point: Point): boolean {
+  return Math.hypot(point.x - bounds.x, point.y - bounds.y) <= knobRadius(bounds);
 }

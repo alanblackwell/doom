@@ -14,11 +14,21 @@ import {
 } from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds, hitTest, toRelative } from './layout';
 import type { DragContext, Point } from './layout';
-import { controlsFor, hitTestControl, trackGeometry, valueFromTrackPosition } from './controls';
+import { controlsFor, hitTestControl, trackGeometry, valueFraction, valueFromTrackPosition } from './controls';
 import type { ControlHit, ControlSpec, Track } from './controls';
 import { isWithinPad } from './pads';
-import { hitTestWireHandle } from './knobs';
-import { addWire, getWiresFrom, removeWireTo } from './wiring';
+import { hitTestWireHandle, withinControlBody } from './knobs';
+import { addWire, getAllWires, getWiresFrom, removeWireTo } from './wiring';
+import {
+  addEventWire,
+  getAllEventWires,
+  getEventWiresFrom,
+  removeEventWire,
+  removeEventWiresTo,
+} from './eventWiring';
+import { eventWireEndpoints, hitTestWireCurve, valueWireEndpoints } from './wireGeometry';
+import { bindKey, getEntityForKey } from './tapBindings';
+import { scheduleSoon } from '../audio/transport';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -34,6 +44,11 @@ export interface InteractionState {
   dragPointer: Point | null; // live target center position while dragging
   hoverTargetId: string | null; // entity the drag would drop into, if released now
   settleAnim: { id: string; startedAt: number; durationMs: number } | null;
+
+  // The tap entity the pointer is currently over (pure hover, nothing
+  // pressed) — while set, a keydown binds that key to this entity instead
+  // of firing whichever entity that key already fires. See attachKeyboard.
+  hoveredTapId: string | null;
 
   // Which control dot the pointer is currently over (pure hover, nothing
   // pressed) — drives the slider reveal in render.ts.
@@ -53,6 +68,11 @@ export interface InteractionState {
   wiringFrom: { entityId: string } | null;
   wireDragPoint: Point | null; // live rubber-band endpoint, following the pointer
   wireHoverTarget: ControlHit | null; // the control dot that would receive the wire if released now
+  // The TRIGGERED_KINDS entity whose pad would receive the wire if released
+  // now, when wiringFrom is an event source (see ui/eventWiring.ts) rather
+  // than a value source — mutually exclusive with wireHoverTarget, which of
+  // the two is ever used depends on the source's own kind.
+  eventWireHoverTarget: string | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -62,12 +82,14 @@ export function createInteractionState(): InteractionState {
     dragPointer: null,
     hoverTargetId: null,
     settleAnim: null,
+    hoveredTapId: null,
     hoverControl: null,
     draggingControl: null,
     triggerFlashes: new Map(),
     wiringFrom: null,
     wireDragPoint: null,
     wireHoverTarget: null,
+    eventWireHoverTarget: null,
   };
 }
 
@@ -87,12 +109,44 @@ function applyControlValue(graph: EntityGraph, entityId: string, param: string, 
   // — a knob can never itself be a target, so this recurses at most once.
   for (const wire of getWiresFrom(entityId)) {
     if (wire.sourceParam !== param) continue;
+    const sourceSpec = controlsFor(entity.kind).find((s) => s.param === param);
     const targetSpec = controlsFor(graph.get(wire.targetEntityId)?.kind ?? '').find(
       (s) => s.param === wire.targetParam
     );
-    if (!targetSpec) continue;
-    const mapped = targetSpec.min + value * (targetSpec.max - targetSpec.min);
+    if (!sourceSpec || !targetSpec) continue;
+    // Normalize against the SOURCE's own range first — value isn't always
+    // already a 0-1 fraction (a knob's is, by construction, but e.g. a
+    // clock's bpm is 20-300) — then remap that fraction onto the target's
+    // range, same as wireOpacity's mapping in ui/render.ts.
+    const mapped = targetSpec.min + valueFraction(sourceSpec, value) * (targetSpec.max - targetSpec.min);
     applyControlValue(graph, wire.targetEntityId, wire.targetParam, mapped);
+  }
+}
+
+// Fires a tap entity's single event, scheduled through the transport for
+// minimum jitter-free latency (audio/transport.ts's scheduleSoon) rather
+// than stamping the flash/triggering immediately — everything below should
+// visibly happen exactly when the event actually lands, not when the
+// tap/keypress happened. Reuses the existing triggerFlashes map (already
+// read by render.ts's drawPad/drawTap) rather than a parallel per-entity
+// flash store, for both the tap's own bump and any instrument it fires.
+function fireTap(entityId: string, state: InteractionState): void {
+  scheduleSoon(() => {
+    state.triggerFlashes.set(entityId, performance.now());
+    fireEventWireTargets(entityId, state);
+  });
+}
+
+// Fires every instrument wired from this event source's bump (right now,
+// not scheduled — callers that need scheduling, like fireTap above and
+// ui/clockPulse.ts's per-beat firing, already defer to the right moment
+// via scheduleSoon before calling this). Exported so the clock's own
+// recurring per-beat trigger can reuse the exact same firing path a tap's
+// one-off click/keypress uses, rather than duplicating it.
+export function fireEventWireTargets(entityId: string, state: InteractionState): void {
+  for (const wire of getEventWiresFrom(entityId)) {
+    triggerEntity(wire.targetEntityId);
+    state.triggerFlashes.set(wire.targetEntityId, performance.now());
   }
 }
 
@@ -107,6 +161,11 @@ export function attachInteraction(
   graph: EntityGraph,
   state: InteractionState
 ): void {
+  // Only needed for the contextmenu handler's wire-curve hit-test
+  // (ctx.isPointInStroke — see ui/wireGeometry.ts); getContext('2d') on an
+  // already-2d canvas just returns the same context main.ts already has.
+  const ctx2d = canvas.getContext('2d')!;
+
   let pressId: string | null = null;
   let pressStart: Point | null = null;
   let grabOffset: Point = { x: 0, y: 0 };
@@ -163,6 +222,11 @@ export function attachInteraction(
     if (TRIGGERED_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
       triggerEntity(hit.id);
       state.triggerFlashes.set(hit.id, performance.now());
+    } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
+      // Same "fires on press, still draggable" reasoning as a trigger pad
+      // above — a tap entity's whole body is its button (see
+      // withinControlBody), not a smaller inset pad.
+      fireTap(hit.id, state);
     }
 
     canvas.setPointerCapture(e.pointerId);
@@ -179,6 +243,30 @@ export function attachInteraction(
 
     if (state.wiringFrom) {
       state.wireDragPoint = point;
+      const source = graph.get(state.wiringFrom.entityId);
+
+      // A TRIGGERED_KINDS instrument's whole pad circle (see ui/pads.ts) is
+      // always a valid drop target from ANY control-type source's bump —
+      // not just an event-only source like tap. Whether anything actually
+      // fires through it depends on whether that source ever calls
+      // fireEventWireTargets (tap on click/keypress, the clock on every
+      // beat) — a knob dropped here would just sit inert, same as a tap
+      // dropped on a value dot already silently does nothing. Checked
+      // before dot-targeting since the pad is the bigger, more likely
+      // target when both are near the pointer.
+      const padHit = hitTest(graph, point, new Set());
+      const validPadHit =
+        source && padHit && padHit.id !== source.id && TRIGGERED_KINDS.has(padHit.kind) && isWithinPad(effectiveBounds(graph, padHit), point)
+          ? padHit
+          : null;
+
+      if (validPadHit) {
+        state.eventWireHoverTarget = validPadHit.id;
+        state.wireHoverTarget = null;
+        return;
+      }
+      state.eventWireHoverTarget = null;
+
       const hit = hitTestControl(graph, point);
       // A wire can't target its own source (self-connection is meaningless)
       // or any other control entity's dot — knobs are sources only for now,
@@ -204,6 +292,12 @@ export function attachInteraction(
       const hit = hitTestControl(graph, point);
       state.hoverControl = hit ? { entityId: hit.entityId, param: hit.spec.param } : null;
       canvas.style.cursor = hit ? 'ns-resize' : '';
+
+      // Separately, whether the pointer is over a tap entity's body at all
+      // (not just its control dots — it has none) — attachKeyboard reads
+      // this to decide whether the next keydown binds or fires.
+      const bodyHit = hitTest(graph, point, new Set());
+      state.hoveredTapId = bodyHit?.kind === 'tap' ? bodyHit.id : null;
       return;
     }
 
@@ -279,18 +373,27 @@ export function attachInteraction(
   function endPress(e: PointerEvent): void {
     if (state.wiringFrom) {
       canvas.releasePointerCapture(e.pointerId);
-      if (state.wireHoverTarget) {
-        addWire(state.wiringFrom.entityId, 'value', state.wireHoverTarget.entityId, state.wireHoverTarget.spec.param);
-        // Apply immediately rather than waiting for the knob to be turned
-        // again — connecting a wire should show its effect right away.
+      if (state.eventWireHoverTarget) {
+        addEventWire(state.wiringFrom.entityId, state.eventWireHoverTarget);
+      } else if (state.wireHoverTarget) {
+        // Every control-type entity currently exposes exactly one control
+        // spec (its own value/bpm/etc — see controlSpecs.ts) — that's the
+        // param a wire dragged from its bump always carries, whatever it's
+        // actually called for this particular kind (knob's 'value', clock's
+        // 'bpm', ...).
         const source = graph.get(state.wiringFrom.entityId);
-        if (source) {
-          applyControlValue(graph, source.id, 'value', source.params.value ?? 0);
+        const sourceSpec = source && controlsFor(source.kind)[0];
+        if (source && sourceSpec) {
+          addWire(source.id, sourceSpec.param, state.wireHoverTarget.entityId, state.wireHoverTarget.spec.param);
+          // Apply immediately rather than waiting for the source to change
+          // again — connecting a wire should show its effect right away.
+          applyControlValue(graph, source.id, sourceSpec.param, source.params[sourceSpec.param] ?? sourceSpec.min);
         }
       }
       state.wiringFrom = null;
       state.wireDragPoint = null;
       state.wireHoverTarget = null;
+      state.eventWireHoverTarget = null;
       return;
     }
 
@@ -317,15 +420,69 @@ export function attachInteraction(
   canvas.addEventListener('pointerup', endPress);
   canvas.addEventListener('pointercancel', endPress);
 
-  // Right-click a wired control dot to disconnect it — the only way to
-  // remove a wire once made otherwise would be overwriting it with another
-  // one, which isn't the same as "I want no wire here."
+  // Right-click any wire's drawn line, anywhere along it, to delete
+  // exactly that connection — checked first since it's the most direct
+  // "delete this" gesture. Right-clicking an endpoint still works too
+  // (below): a wired control dot disconnects it, and a drum's pad (which
+  // has no single dot to pick) clears everything feeding it.
   canvas.addEventListener('contextmenu', (e) => {
     const point = canvasPoint(e);
+
+    for (const wire of getAllWires()) {
+      const endpoints = valueWireEndpoints(graph, wire);
+      if (endpoints && hitTestWireCurve(ctx2d, endpoints, point)) {
+        e.preventDefault();
+        removeWireTo(wire.targetEntityId, wire.targetParam);
+        return;
+      }
+    }
+    for (const wire of getAllEventWires()) {
+      const endpoints = eventWireEndpoints(graph, wire);
+      if (endpoints && hitTestWireCurve(ctx2d, endpoints, point)) {
+        e.preventDefault();
+        removeEventWire(wire.sourceEntityId, wire.targetEntityId);
+        return;
+      }
+    }
+
     const hit = hitTestControl(graph, point);
     if (hit) {
       e.preventDefault();
       removeWireTo(hit.entityId, hit.spec.param);
+      return;
+    }
+
+    const bodyHit = hitTest(graph, point, new Set());
+    if (bodyHit && TRIGGERED_KINDS.has(bodyHit.kind) && isWithinPad(effectiveBounds(graph, bodyHit), point)) {
+      e.preventDefault();
+      removeEventWiresTo(bodyHit.id);
+    }
+  });
+}
+
+// Global keydown handling for tap entities — on `window`, not the canvas,
+// since a bound key should fire "from anywhere," not just while the canvas
+// has focus. Two mutually exclusive behaviors depending on hover state:
+// hovering a tap entity's body means "bind the next key I press to this
+// entity" (rebinding always overwrites, see ui/tapBindings.ts); otherwise a
+// keydown matching some entity's existing binding fires that entity's tap.
+export function attachKeyboard(graph: EntityGraph, state: InteractionState): void {
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return; // don't steal OS/browser shortcuts
+
+    if (state.hoveredTapId) {
+      const entity = graph.get(state.hoveredTapId);
+      if (entity?.kind === 'tap') {
+        bindKey(state.hoveredTapId, e.code);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    const entityId = getEntityForKey(e.code);
+    if (entityId) {
+      fireTap(entityId, state);
+      e.preventDefault();
     }
   });
 }

@@ -12,6 +12,7 @@
 
 import { getAudioContext } from './context';
 import { getMasterChain } from './master';
+import { getTempo, setTempo } from './transport';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -532,7 +533,20 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
     // only ever write into entity.params + a control setter, the same path
     // a manual slider drag already uses (see ui/wiring.ts). No AudioNodes,
     // no place in the mix.
-    if (entity.type === 'control') continue;
+    if (entity.type === 'control') {
+      // The master clock (audio/transport.ts) isn't a Web Audio node, but
+      // its tempo is still just a control-dot param like any other —
+      // registering a setter here reuses the exact same slider-drag path
+      // instead of needing bespoke UI wiring. Also syncs the transport to
+      // whatever the entity's param already holds (e.g. adjusted before
+      // "start audio" was first clicked), the same way every other kind's
+      // initial node state is read from entity.params at construction time.
+      if (entity.kind === 'clock') {
+        registerControls(entity.id, { bpm: setTempo });
+        setTempo(entity.params.bpm ?? getTempo());
+      }
+      continue;
+    }
 
     try {
       createNodes(entity);

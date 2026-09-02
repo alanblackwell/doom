@@ -5,11 +5,19 @@
 // by default: this should read as a couple of quiet indicator dots, not a
 // rack of visible knobs/faders.
 
-import type { EntityGraph } from '../audio/entityGraph';
+import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { effectiveBounds } from './layout';
 import type { DragContext, Point } from './layout';
 import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
 import type { ControlSpec } from './controlSpecs';
+import { isControlEntity, knobValueDotPosition } from './knobs';
+
+// A knob's own dot sits at its body's center (see knobs.ts), not at
+// controlSpecs.ts's generic per-kind column position — every other kind
+// keeps the plain column layout.
+export function dotPositionFor(entity: Entity, bounds: Point & { width: number; height: number }, index: number): Point {
+  return isControlEntity(entity) ? knobValueDotPosition(bounds) : dotPosition(bounds, index);
+}
 
 export type { ControlSpec } from './controlSpecs';
 export { controlsFor, dotPosition, CONTROL_DOT_RADIUS, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
@@ -74,7 +82,7 @@ export function hitTestControl(
 
     const bounds = effectiveBounds(graph, entity, drag);
     for (let i = 0; i < specs.length; i++) {
-      const dot = dotPosition(bounds, i);
+      const dot = dotPositionFor(entity, bounds, i);
       if (Math.hypot(point.x - dot.x, point.y - dot.y) <= CONTROL_HIT_RADIUS) {
         return { entityId: entity.id, spec: specs[i], dot };
       }
@@ -97,5 +105,5 @@ export function controlDotAbsolutePosition(
   const specs = controlsFor(entity.kind);
   const index = specs.findIndex((s) => s.param === param);
   if (index === -1) return null;
-  return dotPosition(effectiveBounds(graph, entity, drag), index);
+  return dotPositionFor(entity, effectiveBounds(graph, entity, drag), index);
 }

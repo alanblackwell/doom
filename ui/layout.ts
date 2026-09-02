@@ -81,8 +81,13 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // the same padding every child gets, something dropped in still has to
   // grow the box past the reserved corner rather than being able to land
   // exactly on top of it.
+  // Skipped for control-type entities (knobs): their one dot sits at the
+  // body's own center (see knobs.ts's knobValueDotPosition), not a column
+  // poking out past the edge, so there's nothing to reserve room for — and
+  // reserving it anyway would inflate the knob's drawn size well past its
+  // actual width/height.
   const specs = controlsFor(entity.kind);
-  if (specs.length > 0) {
+  if (specs.length > 0 && entity.type !== 'control') {
     const baseRect = { x: pos.x, y: pos.y, width: entity.width, height: entity.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);

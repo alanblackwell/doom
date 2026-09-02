@@ -13,15 +13,19 @@ import type { InteractionState } from './interaction';
 import {
   controlDotAbsolutePosition,
   controlsFor,
-  dotPosition,
+  dotPositionFor,
   restTrackGeometry,
   trackGeometry,
   valueFraction,
   CONTROL_DOT_RADIUS,
 } from './controls';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
-import { knobIndicatorAngle, wireHandlePosition } from './knobs';
+import { knobIndicatorAngle, wireHandlePosition, WIRE_BUMP_RADIUS } from './knobs';
 import { getAllWires, getWireTo } from './wiring';
+import { getAllEventWires } from './eventWiring';
+import { eventWireEndpoints, valueWireEndpoints, wireCurveControlPoint } from './wireGeometry';
+import { getBeatFlashGlow } from './clockPulse';
+import { formatKeyLabel, getBoundKey } from './tapBindings';
 
 const KIND_COLORS: Record<string, string> = {
   noise: '#4a4a4a',
@@ -135,7 +139,14 @@ function drawEntity(
   }
 
   if (entity.type === 'control') {
-    drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
+    if (entity.kind === 'clock') {
+      drawClock(ctx, entity, bounds, entity.id === interaction.selectedId, now);
+    } else if (entity.kind === 'tap') {
+      const highlighted = entity.id === interaction.selectedId || interaction.hoveredTapId === entity.id;
+      drawTap(ctx, entity, bounds, highlighted, now, interaction);
+    } else {
+      drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
+    }
   } else {
     drawBox(ctx, entity, bounds.x, bounds.y, bounds.width * scale, bounds.height * scale, depth, {
       selected: entity.id === interaction.selectedId,
@@ -187,7 +198,7 @@ function drawControls(
 
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i];
-    const dot = dotPosition(bounds, i);
+    const dot = dotPositionFor(entity, bounds, i);
     const isHovering = interaction.hoverControl?.entityId === entity.id && interaction.hoverControl.param === spec.param;
     const dragging = interaction.draggingControl?.entityId === entity.id && interaction.draggingControl.spec.param === spec.param;
     // A wire target whose feeding source is itself being hovered/dragged
@@ -196,10 +207,15 @@ function drawControls(
     // the pointer.
     const receivingLiveWire =
       !isHovering && !dragging && isReceivingFromActiveWire(graph, interaction, entity.id, spec.param);
+    // This dot is where a wire currently being dragged out would land if
+    // released right now — expand it a little as a "compatible drop site"
+    // cue, same accent used for a container's drop-target highlight.
+    const isWireDropTarget =
+      interaction.wireHoverTarget?.entityId === entity.id && interaction.wireHoverTarget.spec.param === spec.param;
 
     if (!isHovering && !dragging && !receivingLiveWire) {
       ctx.beginPath();
-      ctx.arc(dot.x, dot.y, CONTROL_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.arc(dot.x, dot.y, isWireDropTarget ? CONTROL_DOT_RADIUS * 1.3 : CONTROL_DOT_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = spec.color;
       ctx.fill();
       continue;
@@ -266,6 +282,17 @@ function drawPad(
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  // A wire being dragged from an event source (see ui/eventWiring.ts) that
+  // would land on THIS pad if released now — a low-alpha white wash over
+  // the whole circle, not an expansion like a control dot's drop-target
+  // grow (this is a fixed-size button, not something with room to grow).
+  if (interaction.eventWireHoverTarget === entity.id) {
+    ctx.beginPath();
+    ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.fill();
+  }
+
   // Small "play"-style triangle, subtle — enough to read as a button
   // without competing with the id/kind labels underneath it.
   ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
@@ -304,10 +331,11 @@ const WIRE_HANDLE_COLOR = '#c8a05a'; // warm brass — reads as "output jack"
 // separately below (see drawWires). Deliberately NOT the jittered-rect
 // treatment drawBox uses for audio sources — a clean circle reads at a
 // glance as "this is a different kind of object, not an instrument."
-function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+// Shared body for every control-type entity (knob, clock, ...): the
+// circular case, its shadow/gradient/selection border. Returns the radius
+// so callers can position their own center indicator and label off it.
+function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean): number {
   const radius = Math.min(bounds.width, bounds.height) / 2;
-  const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
-  const angle = knobIndicatorAngle(value);
 
   ctx.save();
   ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
@@ -333,7 +361,48 @@ function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, s
   ctx.lineWidth = selected ? 2.5 : 1.5;
   ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
   ctx.stroke();
+  ctx.restore();
 
+  return radius;
+}
+
+// Output connector: a round bump protruding from the body's right edge,
+// rather than a dot sitting flush on the boundary — reads as a jack stuck
+// onto the body rather than a mark on it. `glow` (0..1) brightens it with a
+// soft flash, used by drawClock to pulse the bump in time with the beat —
+// plain 0 for drawKnob, which has nothing to pulse to.
+function drawWireBump(ctx: CanvasRenderingContext2D, bounds: Rect, glow: number): void {
+  const handle = wireHandlePosition(bounds);
+
+  ctx.save();
+  if (glow > 0) {
+    ctx.shadowColor = `rgba(255, 210, 150, ${0.9 * glow})`;
+    ctx.shadowBlur = 10 * glow;
+  }
+  ctx.beginPath();
+  ctx.arc(handle.x, handle.y, WIRE_BUMP_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = glow > 0 ? shadeColor(WIRE_HANDLE_COLOR, 1 + glow) : WIRE_HANDLE_COLOR;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, radius: number): void {
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(entity.id, bounds.x, bounds.y + radius + 14);
+}
+
+function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+  const radius = drawControlBody(ctx, bounds, selected);
+  const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
+  const angle = knobIndicatorAngle(value);
+
+  ctx.save();
   ctx.beginPath();
   ctx.moveTo(bounds.x, bounds.y);
   ctx.lineTo(bounds.x + Math.sin(angle) * radius * 0.8, bounds.y - Math.cos(angle) * radius * 0.8);
@@ -341,22 +410,72 @@ function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, s
   ctx.lineWidth = 3;
   ctx.lineCap = 'round';
   ctx.stroke();
+  ctx.restore();
 
-  const handle = wireHandlePosition(bounds);
-  ctx.beginPath();
-  ctx.rect(handle.x - 4, handle.y - 4, 8, 8);
-  ctx.fillStyle = WIRE_HANDLE_COLOR;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  drawWireBump(ctx, bounds, 0);
+  drawControlLabel(ctx, entity, bounds, radius);
+}
 
+// The master clock (audio/transport.ts): same body as a knob, but its
+// tempo readout ("nn BPM", live as the slider drags) stands in for both the
+// rotating dial pointer a knob has (no single dial position means anything
+// for a tempo) and the entity.id label every other control gets — the
+// number already says what this is. Its output bump pulses in time with the
+// beat (ui/clockPulse.ts) rather than sitting at a flat color — both a
+// status readout and, since it's a normal control-type wire-output bump
+// underneath, a wireable connector.
+function drawClock(
+  ctx: CanvasRenderingContext2D,
+  entity: Entity,
+  bounds: Rect,
+  selected: boolean,
+  now: number
+): void {
+  const radius = drawControlBody(ctx, bounds, selected);
+  const bpm = Math.round(entity.params.bpm ?? 80);
+
+  drawWireBump(ctx, bounds, getBeatFlashGlow(now));
+
+  // Below the body, not at its center — the center is where the control
+  // dot/slider (drawn separately, in renderFrame's overlay pass) sits, and
+  // would otherwise cover the readout.
+  ctx.save();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
   ctx.font = '11px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(entity.id, bounds.x, bounds.y + radius + 14);
+  ctx.fillText(`${bpm} BPM`, bounds.x, bounds.y + radius + 14);
+  ctx.restore();
+}
 
+const TAP_FLASH_DURATION_MS = 150; // matches ui/clockPulse.ts's FLASH_DURATION_MS
+
+// A momentary trigger (ui/interaction.ts's fireTap): same body as a knob,
+// but its center shows the bound key ('TAP' until one is bound — see
+// ui/tapBindings.ts) instead of a dial pointer, and its output bump flashes
+// once per tap/keypress rather than pulsing on a recurring beat like the
+// clock's.
+function drawTap(
+  ctx: CanvasRenderingContext2D,
+  entity: Entity,
+  bounds: Rect,
+  highlighted: boolean,
+  now: number,
+  interaction: InteractionState
+): void {
+  drawControlBody(ctx, bounds, highlighted);
+
+  const flashAt = interaction.triggerFlashes.get(entity.id);
+  const elapsed = flashAt === undefined ? Infinity : now - flashAt;
+  const glow = elapsed >= 0 && elapsed <= TAP_FLASH_DURATION_MS ? 1 - elapsed / TAP_FLASH_DURATION_MS : 0;
+  drawWireBump(ctx, bounds, glow);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(formatKeyLabel(getBoundKey(entity.id)), bounds.x, bounds.y);
   ctx.restore();
 }
 
@@ -401,8 +520,7 @@ function drawWireLine(
   color: string,
   opacity: number
 ): void {
-  const midX = (from.x + to.x) / 2;
-  const midY = (from.y + to.y) / 2 + Math.min(40, Math.hypot(to.x - from.x, to.y - from.y) * 0.15);
+  const control = wireCurveControlPoint(from, to);
 
   ctx.save();
   ctx.strokeStyle = color;
@@ -410,7 +528,7 @@ function drawWireLine(
   ctx.globalAlpha = opacity;
   ctx.beginPath();
   ctx.moveTo(from.x, from.y);
-  ctx.quadraticCurveTo(midX, midY, to.x, to.y);
+  ctx.quadraticCurveTo(control.x, control.y, to.x, to.y);
   ctx.stroke();
   ctx.restore();
 }
@@ -418,6 +536,12 @@ function drawWireLine(
 // All committed wires, plus the live rubber band while one's being dragged
 // out. Drawn before controls/pads in the final overlay pass so a wire's end
 // looks like it plugs into the dot, not draws over it.
+// Event wires (ui/eventWiring.ts) carry no continuous value, so there's
+// nothing to fade proportionally the way wireOpacity does for value wires —
+// a flat, warm color/opacity, matching the palette trigger feedback already
+// uses elsewhere (the pad flash ring, the clock/tap bump glow).
+const EVENT_WIRE_COLOR = 'rgba(255, 210, 150, 0.75)';
+
 function drawWires(
   ctx: CanvasRenderingContext2D,
   graph: EntityGraph,
@@ -425,28 +549,50 @@ function drawWires(
   drag: DragContext | undefined
 ): void {
   for (const wire of getAllWires()) {
-    const source = graph.get(wire.sourceEntityId);
-    const target = graph.get(wire.targetEntityId);
-    if (!source || !target) continue;
+    const endpoints = valueWireEndpoints(graph, wire, drag);
+    if (!endpoints) continue;
 
-    const anchor = wireHandlePosition(effectiveBounds(graph, source, drag));
-    const dot = controlDotAbsolutePosition(graph, wire.targetEntityId, wire.targetParam, drag);
-    if (!dot) continue;
-
+    const target = graph.get(wire.targetEntityId)!;
     const spec = controlsFor(target.kind).find((s) => s.param === wire.targetParam);
     const opacity = wireOpacity(graph, interaction, wire.sourceEntityId, wire.sourceParam);
-    drawWireLine(ctx, anchor, dot, spec?.color ?? 'rgba(255, 255, 255, 0.4)', opacity);
+    drawWireLine(ctx, endpoints.from, endpoints.to, spec?.color ?? 'rgba(255, 255, 255, 0.4)', opacity);
+  }
+
+  for (const wire of getAllEventWires()) {
+    const endpoints = eventWireEndpoints(graph, wire, drag);
+    if (!endpoints) continue;
+    drawWireLine(ctx, endpoints.from, endpoints.to, EVENT_WIRE_COLOR, MAX_WIRE_OPACITY);
   }
 
   if (interaction.wiringFrom && interaction.wireDragPoint) {
     const source = graph.get(interaction.wiringFrom.entityId);
     if (source) {
       const anchor = wireHandlePosition(effectiveBounds(graph, source, drag));
+
+      // A valid pad hover (see ui/interaction.ts's pointermove — checked
+      // for ANY control-type source, not just an event-only one like tap)
+      // always wins the rubber band's styling: snap the endpoint to the
+      // pad's center and draw it event-style, regardless of what else this
+      // source might otherwise be able to wire to.
+      if (interaction.eventWireHoverTarget) {
+        const eventTarget = graph.get(interaction.eventWireHoverTarget);
+        const eventTargetBounds = eventTarget ? effectiveBounds(graph, eventTarget, drag) : undefined;
+        const endPoint = eventTargetBounds ? { x: eventTargetBounds.x, y: eventTargetBounds.y } : interaction.wireDragPoint;
+        drawWireLine(ctx, anchor, endPoint, EVENT_WIRE_COLOR, MAX_WIRE_OPACITY);
+        return;
+      }
+
       const target = interaction.wireHoverTarget;
       const endPoint = target
         ? (controlDotAbsolutePosition(graph, target.entityId, target.spec.param, drag) ?? interaction.wireDragPoint)
         : interaction.wireDragPoint;
-      const opacity = wireOpacity(graph, interaction, interaction.wiringFrom.entityId, 'value');
+      // A source with no control spec at all (tap) has no value to fade
+      // proportionally — full opacity, same as wireOpacity already falls
+      // back to when it can't find a spec.
+      const sourceSpec = controlsFor(source.kind)[0];
+      const opacity = sourceSpec
+        ? wireOpacity(graph, interaction, interaction.wiringFrom.entityId, sourceSpec.param)
+        : MAX_WIRE_OPACITY;
       drawWireLine(ctx, anchor, endPoint, target ? target.spec.color : 'rgba(255, 255, 255, 0.5)', opacity);
     }
   }

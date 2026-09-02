@@ -6,9 +6,11 @@
 
 import { resumeAudioContext, suspendAudioContext } from '../audio/context';
 import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
+import { getTempo, start as startTransport, stop as stopTransport } from '../audio/transport';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
-import { attachInteraction, createInteractionState } from './interaction';
+import { attachInteraction, attachKeyboard, createInteractionState } from './interaction';
+import { attachClockPulse } from './clockPulse';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -125,9 +127,9 @@ graph.add({
 });
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
-// any control dot on another entity. Drag from its small square handle
-// (bottom-left) onto e.g. bow-1's pitch dot to try it; right-click a wired
-// dot to disconnect. Left unwired by default.
+// any control dot on another entity. Drag from its small round bump
+// (protruding from the right side) onto e.g. bow-1's pitch dot to try it;
+// right-click a wired dot to disconnect. Left unwired by default.
 graph.add({
   id: 'knob-1',
   type: 'control',
@@ -135,11 +137,49 @@ graph.add({
   parentId: null,
   children: [],
   params: { value: 0.5 },
-  x: 350,
-  y: 740,
-  width: 60,
-  height: 60,
+  x: 60,
+  y: 90,
+  width: 30,
+  height: 30,
   seed: 8,
+});
+// The master clock (audio/transport.ts), as a Control entity like knob-1
+// above — same drag-a-wire-from-the-bump mechanism, just carrying bpm
+// (20-300) instead of a normalized 0-1 value. See ui/render.ts's drawClock
+// for why it looks different (a live number instead of a rotating dial) and
+// ui/clockPulse.ts for the beat-synced glow on its output bump.
+graph.add({
+  id: 'clock-1',
+  type: 'control',
+  kind: 'clock',
+  parentId: null,
+  children: [],
+  params: { bpm: getTempo() },
+  x: 60,
+  y: 160,
+  width: 30,
+  height: 30,
+  seed: 9,
+});
+// A momentary trigger, also a Control entity — no continuous value (no
+// entry in controlSpecs.ts's CONTROL_SPECS, so no dot/slider at all),
+// just a single event fired by clicking its body or pressing a bound key.
+// Hover it and press any key to bind that key (shown at its center in
+// place of the usual "TAP" placeholder); once bound, that key fires it
+// from anywhere. See ui/interaction.ts's fireTap/attachKeyboard and
+// ui/tapBindings.ts.
+graph.add({
+  id: 'tap-1',
+  type: 'control',
+  kind: 'tap',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 60,
+  y: 230,
+  width: 30,
+  height: 30,
+  seed: 10,
 });
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
@@ -173,6 +213,8 @@ resize();
 
 const interaction = createInteractionState();
 attachInteraction(canvas, graph, interaction);
+attachKeyboard(graph, interaction);
+attachClockPulse('clock-1', interaction);
 
 // Two independent states: whether the engine/graph has been built at all
 // (one-time — worklets registered, WASM compiled, nodes created), and
@@ -214,6 +256,7 @@ async function toggleAudio(): Promise<void> {
 
     startButton.disabled = false;
     running = true;
+    startTransport();
     setButtonState();
     return;
   }
@@ -221,9 +264,11 @@ async function toggleAudio(): Promise<void> {
   if (running) {
     await suspendAudioContext();
     running = false;
+    stopTransport();
   } else {
     await resumeAudioContext();
     running = true;
+    startTransport();
   }
   setButtonState();
 }
