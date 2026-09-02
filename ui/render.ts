@@ -559,8 +559,23 @@ function drawWires(
   ctx: CanvasRenderingContext2D,
   graph: EntityGraph,
   interaction: InteractionState,
-  drag: DragContext | undefined
+  drag: DragContext | undefined,
+  dragDelta: { x: number; y: number } | null,
+  draggedSubtreeIds: Set<string>
 ): void {
+  // A wire's endpoint follows the live drag position throughout, not just
+  // once the drop commits it to entity.x/y — same delta-translation the
+  // final controls/pads pass below already applies, so a wire never visibly
+  // detaches from the box it's plugged into while that box is being dragged.
+  // draggedSubtreeIds (see below) is descendants only, not the dragged
+  // entity itself — checked separately here since a wire is just as likely
+  // to be plugged directly into the entity actually being dragged as into
+  // one of its children.
+  const translate = (p: Point, entityId: string): Point =>
+    dragDelta && (entityId === interaction.draggingId || draggedSubtreeIds.has(entityId))
+      ? { x: p.x + dragDelta.x, y: p.y + dragDelta.y }
+      : p;
+
   for (const wire of getAllWires()) {
     const endpoints = valueWireEndpoints(graph, wire, drag);
     if (!endpoints) continue;
@@ -568,13 +583,17 @@ function drawWires(
     const target = graph.get(wire.targetEntityId)!;
     const spec = controlsFor(target.kind).find((s) => s.param === wire.targetParam);
     const opacity = wireOpacity(graph, interaction, wire.sourceEntityId, wire.sourceParam);
-    drawWireLine(ctx, endpoints.from, endpoints.to, spec?.color ?? 'rgba(255, 255, 255, 0.4)', opacity);
+    const from = translate(endpoints.from, wire.sourceEntityId);
+    const to = translate(endpoints.to, wire.targetEntityId);
+    drawWireLine(ctx, from, to, spec?.color ?? 'rgba(255, 255, 255, 0.4)', opacity);
   }
 
   for (const wire of getAllEventWires()) {
     const endpoints = eventWireEndpoints(graph, wire, drag);
     if (!endpoints) continue;
-    drawWireLine(ctx, endpoints.from, endpoints.to, EVENT_WIRE_COLOR, MAX_WIRE_OPACITY);
+    const from = translate(endpoints.from, wire.sourceEntityId);
+    const to = translate(endpoints.to, wire.targetEntityId);
+    drawWireLine(ctx, from, to, EVENT_WIRE_COLOR, MAX_WIRE_OPACITY);
   }
 
   if (interaction.wiringFrom && interaction.wireDragPoint) {
@@ -763,8 +782,10 @@ export function renderFrame(
     : new Set<string>();
 
   // Wires drawn before controls/pads so a wire's end looks plugged into its
-  // dot rather than drawn over it.
-  drawWires(ctx, graph, interaction, drag);
+  // dot rather than drawn over it. Needs dragDelta/draggedSubtreeIds (just
+  // above) so a wire's endpoint tracks the live drag too, not just the
+  // eventual dropped position.
+  drawWires(ctx, graph, interaction, drag, dragDelta, draggedSubtreeIds);
 
   for (const entity of graph.all()) {
     if (entity.id === interaction.draggingId) continue;
