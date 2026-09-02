@@ -86,6 +86,7 @@ export function hitTestControl(
   drag?: DragContext
 ): ControlHit | null {
   for (const entity of graph.all()) {
+    if (entity.docked) continue; // no dots while parked in the dock — see ui/dock.ts
     const specs = controlsFor(entity.kind);
     if (specs.length === 0) continue;
     // Matches render.ts's drawControls: an empty filter's dots aren't

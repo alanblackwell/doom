@@ -26,6 +26,17 @@ export interface Entity {
   // Seeds the boundary-jitter noise (ui/render.ts) so an entity's silhouette
   // is stable across redraws/reloads rather than re-randomizing every frame.
   seed: number;
+
+  // True while this entity sits in the instrument dock (ui/dock.ts) rather
+  // than on the canvas: silent (no audio nodes connected — see
+  // audio/graph.ts's activateEntity/deactivateEntity), drawn as a small
+  // icon with no controls, and excluded from topLevel()/containment. Always
+  // false for control-type entities (knob/clock/tap) — they never dock, see
+  // ui/docking.ts's isDockable. x/y are meaningless while docked (the dock's
+  // own layout is index-based, see ui/dock.ts) — whatever they were last
+  // set to is harmless leftover, not read until the entity is dropped back
+  // onto the canvas and given a fresh position there.
+  docked: boolean;
 }
 
 export class EntityGraph {
@@ -49,8 +60,15 @@ export class EntityGraph {
     return [...this.entities.values()];
   }
 
+  // Excludes docked entities (see Entity.docked) — they're not part of the
+  // canvas tree at all while parked in the dock, just a separate list
+  // ui/dock.ts renders and hit-tests on its own.
   topLevel(): Entity[] {
-    return this.all().filter((e) => e.parentId === null);
+    return this.all().filter((e) => e.parentId === null && !e.docked);
+  }
+
+  dockedEntities(): Entity[] {
+    return this.all().filter((e) => e.docked);
   }
 
   childrenOf(id: string): Entity[] {

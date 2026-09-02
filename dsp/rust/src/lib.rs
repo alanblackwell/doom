@@ -370,3 +370,154 @@ pub extern "C" fn bow_render() {
         BRIDGE_LAST_OUT = bridge_last_out;
     }
 }
+
+// --- Plucked string (Karplus-Strong) ---
+//
+// The classic algorithm (Karplus & Strong 1983 / Jaffe & Smith's extensions):
+// a circular delay line sized to one period of the target pitch, refilled
+// with lowpass-shaped noise on every pluck (pluck_excite()), then
+// continuously read-and-written-back in place (pluck_render(), called every
+// process() like bow_render/bass_render) through an averaging filter — it's
+// that averaging (`s0`/`s1` below) that makes higher harmonics decay faster
+// than the fundamental, which is the entire "plucked string" character; a
+// naive one-tap delay loop would just repeat forever unchanged.
+//
+// Two controls layer on top of the bare algorithm, per the "thumb plucking
+// a bass E string" brief: PLUCK_RESPONSE shapes only the initial excitation
+// burst's brightness (a thumb's attack is far more lowpassed than a pick's —
+// low response reads as a muted thumb pluck, high as a sharper, more
+// percussive one), while PLUCK_DAMPING adds an extra one-pole lowpass *and*
+// a per-sample loop-gain trim to the ongoing feedback loop, so higher
+// damping both dulls the tone and shortens the decay together — like palm-
+// muting a string, not just an EQ move. Both are tune-by-ear controls (no
+// physical ground truth to derive the mapping from), wired to the 'pluck'
+// entity's params.damping/response in audio/graph.ts.
+//
+// Deliberately no fractional-delay interpolation (contrast bow_render's
+// delay_tick): classic Karplus-Strong just rounds the period to the nearest
+// sample and accepts the resulting small tuning error, which is inaudible
+// for a decaying plucked note. A live pitch change (pluck_set_frequency)
+// follows bow_set_frequency's approach — recompute the length, let the
+// existing buffer content carry over rather than resetting it — so a pluck
+// already ringing glides slightly instead of clicking.
+
+const PLUCK_MAX_LEN: usize = 8192; // supports down to ~6Hz at 48kHz — ample headroom under this voice's tuned pitch range
+const PLUCK_MIN_SAMPLES: usize = 8;
+
+static mut PLUCK_DELAY: [f32; PLUCK_MAX_LEN] = [0.0; PLUCK_MAX_LEN];
+static mut PLUCK_WRITE_IDX: usize = 0;
+static mut PLUCK_LEN_SAMPLES: usize = 1024;
+static mut PLUCK_SAMPLE_RATE: f32 = 48000.0;
+// Overwritten by pluck_init() on every real instantiation (see
+// dsp/worklets/pluck-processor.js) — these are just the pre-init values.
+// Tuned by ear to a heavily muted thumb attack and a long, dark decay; see
+// ui/main.ts's pluck-1 for where the authoritative defaults now live.
+static mut PLUCK_DAMPING: f32 = 0.91;
+static mut PLUCK_RESPONSE: f32 = 0.21;
+static mut PLUCK_FILTER_STATE: f32 = 0.0;
+
+fn pluck_len_for(sample_rate: f32, freq: f32) -> usize {
+    let n = (sample_rate / freq.max(1.0)).round() as usize;
+    n.clamp(PLUCK_MIN_SAMPLES, PLUCK_MAX_LEN - 1)
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_init(sample_rate: f32, freq: f32, damping: f32, response: f32) {
+    unsafe {
+        PLUCK_SAMPLE_RATE = sample_rate;
+        PLUCK_DAMPING = damping.clamp(0.0, 1.0);
+        PLUCK_RESPONSE = response.clamp(0.0, 1.0);
+        PLUCK_LEN_SAMPLES = pluck_len_for(sample_rate, freq);
+        PLUCK_WRITE_IDX = 0;
+        PLUCK_FILTER_STATE = 0.0;
+        let buf = (&raw mut PLUCK_DELAY) as *mut f32;
+        for i in 0..PLUCK_MAX_LEN {
+            *buf.add(i) = 0.0;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_frequency(freq: f32) {
+    unsafe {
+        PLUCK_LEN_SAMPLES = pluck_len_for(PLUCK_SAMPLE_RATE, freq);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_damping(value: f32) {
+    unsafe {
+        PLUCK_DAMPING = value.clamp(0.0, 1.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_response(value: f32) {
+    unsafe {
+        PLUCK_RESPONSE = value.clamp(0.0, 1.0);
+    }
+}
+
+// Re-excites the string: refills the active delay line with lowpass-shaped
+// noise (see PLUCK_RESPONSE above) and resets the feedback filter and write
+// pointer, so every trigger gets a clean, identically-shaped attack rather
+// than inheriting whatever state the previous pluck's decay happened to
+// leave behind — the same "fresh hit every time" reasoning as kick's
+// per-trigger envelope in audio/graph.ts. Reuses RNG_STATE/xorshift32 above
+// rather than a second RNG — safe because a WASM instance only ever drives
+// one voice (each entity gets its own instance/state; see audio/graph.ts's
+// dspModule comment), so there's no cross-voice interference.
+#[no_mangle]
+pub extern "C" fn pluck_excite() {
+    let buf = (&raw mut PLUCK_DELAY) as *mut f32;
+    let rng = &raw mut RNG_STATE;
+    unsafe {
+        let n = PLUCK_LEN_SAMPLES;
+        // Lower response = heavier smoothing = a duller, more muted attack
+        // (thumb); higher = closer to the raw noise burst (pick-like).
+        let excite_pole = 0.92 - 0.87 * PLUCK_RESPONSE;
+        let mut state = 0.0f32;
+        for i in 0..n {
+            let r = xorshift32(rng);
+            let noise = (r as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            state = excite_pole * state + (1.0 - excite_pole) * noise;
+            *buf.add(i) = state;
+        }
+        for i in n..PLUCK_MAX_LEN {
+            *buf.add(i) = 0.0;
+        }
+        PLUCK_WRITE_IDX = 0;
+        PLUCK_FILTER_STATE = 0.0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_render() {
+    let out = (&raw mut BUFFER) as *mut f32;
+    let buf = (&raw mut PLUCK_DELAY) as *mut f32;
+    unsafe {
+        let n = PLUCK_LEN_SAMPLES.max(1);
+        // Higher damping = a darker filter pole AND a slightly leakier loop
+        // gain, so the string both dulls and dies out faster — matching a
+        // palm-muted/heavily-damped string rather than just a tone change.
+        let damping = PLUCK_DAMPING;
+        let pole = 0.1 + 0.85 * damping;
+        let loop_gain = 0.999 - 0.03 * damping;
+        let mut filter_state = PLUCK_FILTER_STATE;
+        let mut idx = PLUCK_WRITE_IDX % n;
+
+        for i in 0..QUANTUM {
+            let idx_next = if idx + 1 >= n { 0 } else { idx + 1 };
+            let s0 = *buf.add(idx);
+            let s1 = *buf.add(idx_next);
+            let avg = 0.5 * (s0 + s1);
+            filter_state = pole * filter_state + (1.0 - pole) * avg;
+            *buf.add(idx) = filter_state * loop_gain;
+            *out.add(i) = s0;
+            idx = idx_next;
+        }
+
+        PLUCK_FILTER_STATE = filter_state;
+        PLUCK_WRITE_IDX = idx;
+    }
+}

@@ -28,19 +28,9 @@ import { getAllEventWires } from './eventWiring';
 import { eventWireEndpoints, valueWireEndpoints, wireCurveControlPoint } from './wireGeometry';
 import { getBeatFlashGlow } from './clockPulse';
 import { formatKeyLabel, getBoundKey } from './tapBindings';
+import { drawDock } from './dock';
+import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 
-const KIND_COLORS: Record<string, string> = {
-  noise: '#4a4a4a',
-  bass: '#5b3a24',
-  bow: '#6b4630',
-  overdrive: '#8a5a1c',
-  reverb: '#2f4a52',
-  chorus: '#2c4a3c',
-  flanger: '#3a3a52',
-  kick: '#5a2020',
-};
-const DEFAULT_COLOR = '#3a3a3a';
-const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
 // resting at its center (see drawControls), a little lighter than the
 // canvas's own #111 backdrop, matching the app's existing dark
@@ -192,6 +182,16 @@ function isReceivingFromActiveWire(
   return wire !== undefined && isControlActive(interaction, wire.sourceEntityId, wire.sourceParam);
 }
 
+// Decimal places scaled to the value's own magnitude — enough precision to
+// read back and report as a new default (see drawControls's readout below)
+// without a flood of meaningless digits on a 0-1 param.
+function formatControlValue(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 100) return value.toFixed(0);
+  if (magnitude >= 10) return value.toFixed(1);
+  return value.toFixed(2);
+}
+
 function drawControls(
   ctx: CanvasRenderingContext2D,
   graph: EntityGraph,
@@ -268,11 +268,18 @@ function drawControls(
     ctx.lineTo(track.x + 7, thumbY);
     ctx.stroke();
 
+    // Label + numeric readout together, e.g. "damping 0.62" — precise
+    // enough to read back and report as a new default (e.g. in
+    // dsp/rust/src/lib.rs's tune-by-ear params, or ui/main.ts's initial
+    // params), not just the dot's rough visual position. Kept on the same
+    // side as the dot column (left, outside the box — see controlSpecs.ts's
+    // DOT_OUTSET) rather than next to the thumb, which would run the text
+    // into the box itself.
     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.font = '10px monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(spec.label, track.x - 12, track.top - 6);
+    ctx.fillText(`${spec.label} ${formatControlValue(currentValue)}`, track.x - 12, track.top - 6);
     ctx.restore();
   }
 }
@@ -718,14 +725,6 @@ function drawBox(
   ctx.restore();
 }
 
-function shadeColor(hex: string, factor: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const r = Math.min(255, Math.round(((n >> 16) & 0xff) * factor));
-  const g = Math.min(255, Math.round(((n >> 8) & 0xff) * factor));
-  const b = Math.min(255, Math.round((n & 0xff) * factor));
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -798,6 +797,7 @@ export function renderFrame(
 
   for (const entity of graph.all()) {
     if (entity.id === interaction.draggingId) continue;
+    if (entity.docked) continue; // no controls/pad while parked in the dock — see ui/dock.ts
 
     const bounds = effectiveBounds(graph, entity, drag);
     const drawAt =
@@ -807,6 +807,11 @@ export function renderFrame(
     drawControls(ctx, graph, entity, drawAt, interaction);
     drawPad(ctx, entity, drawAt, interaction, now);
   }
+
+  // Topmost of all — a fixed HUD panel pinned to the viewport's right edge
+  // (see ui/dock.ts), not part of the scrollable canvas content, so it
+  // always sits in front regardless of what's been scrolled underneath it.
+  drawDock(ctx, canvas, graph, interaction, now);
 }
 
 function drawDraggedSubtree(

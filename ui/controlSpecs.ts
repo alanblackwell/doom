@@ -69,6 +69,18 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
     { param: 'decay', label: 'decay', min: 0.1, max: 1.5, color: '#8a7ec8' },
     { param: 'click', label: 'click', min: 0, max: 1, color: '#a0d8e0' },
   ],
+  // Karplus-Strong plucked string (dsp/rust/src/lib.rs) — a one-shot
+  // TRIGGERED_KINDS instrument like kick, not a drone: click its pad to
+  // pluck it. Bass-guitar pitch range, matching 'bass' above.
+  pluck: [
+    { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
+    { param: 'pitch', label: 'pitch', min: 20, max: 200, color: '#5aa0c8' },
+    // Same purple-blue as kick/reverb's decay — how fast the string dies out.
+    { param: 'damping', label: 'damping', min: 0, max: 1, color: '#8a7ec8' },
+    // Same magenta as overdrive/reverb's tone — brightness of the pluck's
+    // initial attack (see dsp/rust/src/lib.rs's PLUCK_RESPONSE comment).
+    { param: 'response', label: 'response', min: 0, max: 1, color: '#c85ac8' },
+  ],
   // A knob's own value — reuses the same dot+slider mechanism as every
   // other parameter (see ui/controls.ts), rather than needing bespoke
   // interaction code. Color matches the knob's rotating indicator (see

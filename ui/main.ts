@@ -20,7 +20,11 @@ const startButton = document.querySelector<HTMLButtonElement>('#start-audio')!;
 // Demo composition: a sub-bass drone, a bowed-string voice, and an overdrive
 // pedal (sink+source — drag bass-1 or bow-1 onto it to route their audio
 // through it, rather than just mixing). Swap this out once there's UI for
-// adding entities.
+// adding entities. All start docked (ui/dock.ts) — silent, parked in the
+// right-hand dock — rather than already sounding on the canvas; drag one out
+// to bring it in. x/y below are only where each one lands the very first
+// time it's dragged out (or if docked: true is ever flipped off here) —
+// meaningless while docked, see Entity.docked's comment.
 const graph = new EntityGraph();
 graph.add({
   id: 'bass-1',
@@ -34,6 +38,7 @@ graph.add({
   width: 110,
   height: 70,
   seed: 1,
+  docked: true,
 });
 graph.add({
   id: 'bow-1',
@@ -50,6 +55,7 @@ graph.add({
   width: 110,
   height: 70,
   seed: 2,
+  docked: true,
 });
 // One-shot, not a drone — click the pad at its center to fire a hit rather
 // than it playing continuously once audio starts. See audio/graph.ts's
@@ -67,6 +73,25 @@ graph.add({
   width: 110,
   height: 70,
   seed: 7,
+  docked: true,
+});
+// Karplus-Strong plucked string (dsp/rust/src/lib.rs) — also one-shot/pad-
+// triggered like kick-1 above, tuned by ear (via ui/render.ts's per-slider
+// value readout) for a thumb-plucked bass string: a heavily muted attack
+// (low response) and a long, dark decay (high damping).
+graph.add({
+  id: 'pluck-1',
+  type: 'source',
+  kind: 'pluck',
+  parentId: null,
+  children: [],
+  params: { level: 0.89, pitch: 34.4, damping: 0.91, response: 0.21 },
+  x: 1080,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 11,
+  docked: true,
 });
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
@@ -88,6 +113,7 @@ graph.add({
   width: 64,
   height: 44,
   seed: 3,
+  docked: true,
 });
 graph.add({
   id: 'reverb-1',
@@ -101,6 +127,7 @@ graph.add({
   width: 64,
   height: 44,
   seed: 4,
+  docked: true,
 });
 graph.add({
   id: 'chorus-1',
@@ -114,6 +141,7 @@ graph.add({
   width: 64,
   height: 44,
   seed: 5,
+  docked: true,
 });
 graph.add({
   id: 'flanger-1',
@@ -127,6 +155,7 @@ graph.add({
   width: 64,
   height: 44,
   seed: 6,
+  docked: true,
 });
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
@@ -145,6 +174,7 @@ graph.add({
   width: 30,
   height: 30,
   seed: 8,
+  docked: false, // controls never dock — see ui/docking.ts's isDockable
 });
 // The master clock (audio/transport.ts), as a Control entity like knob-1
 // above — same drag-a-wire-from-the-bump mechanism, just carrying bpm
@@ -163,6 +193,7 @@ graph.add({
   width: 30,
   height: 30,
   seed: 9,
+  docked: false,
 });
 // A momentary trigger, also a Control entity — no continuous value (no
 // entry in controlSpecs.ts's CONTROL_SPECS, so no dot/slider at all),
@@ -183,6 +214,7 @@ graph.add({
   width: 30,
   height: 30,
   seed: 10,
+  docked: false,
 });
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush

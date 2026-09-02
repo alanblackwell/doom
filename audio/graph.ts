@@ -49,7 +49,7 @@ export function getControlSetter(
 // the graph is built. There's no event transport yet (ARCHITECTURE.md
 // §5.3) — this is the manual/interactive way to fire a hit until that
 // exists.
-export const TRIGGERED_KINDS = new Set(['kick']);
+export const TRIGGERED_KINDS = new Set(['kick', 'pluck']);
 
 // Registered by createGenerator() for triggered kinds — one no-argument
 // function per entity that fires a single hit, reading whatever's currently
@@ -74,6 +74,11 @@ export function triggerEntity(entityId: string): void {
 // dsp/rust module (see ARCHITECTURE.md §5.2), just calling different exports.
 let dspModule: WebAssembly.Module | null = null;
 
+// True once initAudioEngine() has completed — guards activateEntity() below,
+// called when an instrument is dragged out of the dock (ui/docking.ts),
+// which may happen before "start audio" has ever been pressed.
+let engineReady = false;
+
 // Loads any AudioWorklet modules and WASM DSP the graph depends on. Call once
 // before buildFromEntityGraph(). Safe to extend with more addModule() calls
 // as more worklet-backed DSP kinds are added.
@@ -81,7 +86,7 @@ export async function initAudioEngine(): Promise<void> {
   const ctx = getAudioContext();
 
   const wasmUrl = new URL('../dsp/rust/pkg/doom_dsp.wasm', import.meta.url);
-  const [, , , wasmModule] = await Promise.all([
+  const [, , , , wasmModule] = await Promise.all([
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/noise-processor.js', import.meta.url)
     ),
@@ -91,14 +96,18 @@ export async function initAudioEngine(): Promise<void> {
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/bow-processor.js', import.meta.url)
     ),
+    ctx.audioWorklet.addModule(
+      new URL('../dsp/worklets/pluck-processor.js', import.meta.url)
+    ),
     WebAssembly.compileStreaming(fetch(wasmUrl)),
   ]);
   dspModule = wasmModule;
 
   getMasterChain();
+  engineReady = true;
 }
 
-const WASM_KINDS = new Set(['noise', 'bass', 'bow']);
+const WASM_KINDS = new Set(['noise', 'bass', 'bow', 'pluck']);
 
 // Creates the node(s) that make an entity's own sound, if it has any.
 // A plain group/mixer entity (no matching case) returns undefined — it
@@ -235,6 +244,42 @@ function createGenerator(entity: Entity): AudioNode | undefined {
       });
 
       return voiceOutput;
+    }
+    case 'pluck': {
+      // Unlike kick above, a Karplus-Strong voice needs its delay-line state
+      // to persist across the whole render loop (not just one hit's
+      // duration), so this is one long-lived AudioWorkletNode — always
+      // connected through `level`, like bow/bass — re-excited per trigger
+      // via the worklet's port rather than rebuilt per hit. See
+      // dsp/rust/src/lib.rs's Karplus-Strong section and
+      // dsp/worklets/pluck-processor.js.
+      const pluck = new AudioWorkletNode(ctx, 'pluck-processor', {
+        processorOptions: {
+          wasmModule: dspModule,
+          // Tuned by ear (see ui/main.ts's pluck-1) — a heavily muted thumb
+          // attack and a long, dark decay.
+          frequency: entity.params.pitch ?? 34.4,
+          damping: entity.params.damping ?? 0.91,
+          response: entity.params.response ?? 0.21,
+        },
+      });
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.89;
+      pluck.connect(level);
+
+      // None of these are native AudioParams — same reasoning as bow above.
+      registerControls(entity.id, {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+        pitch: (value) => pluck.port.postMessage({ type: 'setFrequency', value }),
+        damping: (value) => pluck.port.postMessage({ type: 'setDamping', value }),
+        response: (value) => pluck.port.postMessage({ type: 'setResponse', value }),
+      });
+
+      registerTrigger(entity.id, () => {
+        pluck.port.postMessage({ type: 'excite' });
+      });
+
+      return level;
     }
     default:
       return undefined;
@@ -548,6 +593,11 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
       continue;
     }
 
+    // Docked instruments (ui/dock.ts) get no audio nodes at all until
+    // they're dragged out onto the canvas — see activateEntity() below,
+    // which builds them lazily at that point instead.
+    if (entity.docked) continue;
+
     try {
       createNodes(entity);
     } catch (err) {
@@ -593,4 +643,47 @@ export function reparentEntity(id: string, newParentId: string | null): void {
   } else {
     nodes.output.connect(getMasterChain());
   }
+}
+
+// Drag an instrument out of the dock (ui/docking.ts) onto the canvas: build
+// its audio nodes the first time this happens (nothing was built while it
+// sat docked — see buildFromEntityGraph's skip above), then connect it to
+// whatever it landed on (a parent's input, or straight to master), same as
+// buildFromEntityGraph's own connect pass. A no-op before "start audio" has
+// ever been pressed — buildFromEntityGraph() picks the entity up normally
+// once it does, since it's no longer docked by then.
+export function activateEntity(entity: Entity): void {
+  if (!engineReady) return;
+
+  let nodes = nodesByEntity.get(entity.id);
+  if (!nodes) {
+    try {
+      nodes = createNodes(entity);
+    } catch (err) {
+      console.error(
+        `Failed to build audio for entity "${entity.id}" (kind: ${entity.kind}) — it will be silent.`,
+        err
+      );
+      return;
+    }
+  }
+
+  nodes.output.disconnect(); // in case it was already connected somewhere
+  const parentNodes = entity.parentId ? nodesByEntity.get(entity.parentId) : undefined;
+  if (parentNodes) {
+    nodes.output.connect(parentNodes.input);
+  } else {
+    nodes.output.connect(getMasterChain());
+  }
+}
+
+// Drag an instrument from the canvas into the dock: silence it by
+// disconnecting its output from wherever it currently feeds — its nodes
+// are kept around (not torn down), so dragging it back out later is a cheap
+// reconnect via activateEntity() above rather than a rebuild. A no-op if it
+// was never built (docked before "start audio" was ever pressed).
+export function deactivateEntity(id: string): void {
+  const nodes = nodesByEntity.get(id);
+  if (!nodes) return;
+  nodes.output.disconnect();
 }

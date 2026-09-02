@@ -7,6 +7,7 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import {
   reparentEntity as reparentAudio,
+  activateEntity,
   getControlSetter,
   triggerEntity,
   PROCESSOR_KINDS,
@@ -29,6 +30,8 @@ import {
 import { eventWireEndpoints, hitTestWireCurve, valueWireEndpoints } from './wireGeometry';
 import { bindKey, getEntityForKey } from './tapBindings';
 import { scheduleSoon } from '../audio/transport';
+import { isOverDock, hitTestDockIcon } from './dock';
+import { isDockable, dockEntity } from './docking';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -43,6 +46,10 @@ export interface InteractionState {
   draggingId: string | null;
   dragPointer: Point | null; // live target center position while dragging
   hoverTargetId: string | null; // entity the drag would drop into, if released now
+  // True while the current drag's pointer is over the dock panel (ui/dock.ts)
+  // and the dragged entity is dockable (ui/docking.ts) — mutually exclusive
+  // with hoverTargetId, same "one drop-target cue at a time" reasoning.
+  hoverDock: boolean;
   settleAnim: { id: string; startedAt: number; durationMs: number } | null;
 
   // The tap entity the pointer is currently over (pure hover, nothing
@@ -81,6 +88,7 @@ export function createInteractionState(): InteractionState {
     draggingId: null,
     dragPointer: null,
     hoverTargetId: null,
+    hoverDock: false,
     settleAnim: null,
     hoveredTapId: null,
     hoverControl: null,
@@ -207,6 +215,20 @@ export function attachInteraction(
       return;
     }
 
+    // A docked instrument's icon (ui/dock.ts) — checked before the normal
+    // canvas hitTest below since the dock panel visually sits on top of
+    // everything else. Pressing it can only ever lead to a drag (undocking,
+    // see finalizeDrop) or a plain select; it has no pad/controls to fire.
+    const dockHit = hitTestDockIcon(graph, canvas, point);
+    if (dockHit) {
+      canvas.setPointerCapture(e.pointerId);
+      pressId = dockHit.id;
+      pressStart = point;
+      state.selectedId = dockHit.id;
+      grabOffset = { x: 0, y: 0 }; // pointer becomes the entity's center the moment it's dragged out
+      return;
+    }
+
     const hit = hitTest(graph, point, new Set());
 
     if (!hit) {
@@ -322,8 +344,16 @@ export function attachInteraction(
     // (the wire), never by nesting.
     if (entity.type === 'control') {
       state.hoverTargetId = null;
+      state.hoverDock = false; // controls never dock — see ui/docking.ts's isDockable
       return;
     }
+
+    if (isDockable(entity) && isOverDock(canvas, target)) {
+      state.hoverDock = true;
+      state.hoverTargetId = null;
+      return;
+    }
+    state.hoverDock = false;
 
     const exclude = descendantIds(graph, entity.id);
     exclude.add(entity.id);
@@ -415,6 +445,7 @@ export function attachInteraction(
     state.draggingId = null;
     state.dragPointer = null;
     state.hoverTargetId = null;
+    state.hoverDock = false;
   }
 
   canvas.addEventListener('pointerup', endPress);
@@ -491,6 +522,18 @@ function finalizeDrop(graph: EntityGraph, state: InteractionState, entityId: str
   const entity = graph.get(entityId);
   if (!entity || !state.dragPointer) return;
 
+  // Dropped on the dock (ui/dock.ts) — park it there instead of placing it
+  // on the canvas. No settle animation: it's no longer part of the canvas
+  // tree at all once docked (see EntityGraph.topLevel), so there's nothing
+  // left there to animate.
+  if (state.hoverDock) {
+    dockEntity(graph, entity);
+    return;
+  }
+
+  const wasDocked = entity.docked;
+  entity.docked = false;
+
   // Trust hoverTargetId rather than re-deriving the drop target from
   // scratch here — it's already been maintained continuously (and stickily,
   // see pointermove above) throughout the drag, and is exactly what was
@@ -505,6 +548,14 @@ function finalizeDrop(graph: EntityGraph, state: InteractionState, entityId: str
   if (entity.parentId !== newParentId) {
     graph.reparent(entityId, newParentId);
     reparentAudio(entityId, newParentId);
+  }
+
+  // Dragged out of the dock: build (first time) or reconnect (it was docked
+  // before, so its nodes — if any already existed — are currently
+  // disconnected) its audio, now that it has a resolved parent (possibly
+  // just set above) to connect into.
+  if (wasDocked) {
+    activateEntity(entity);
   }
 
   // Independent of whether reparenting happened — dropping one instrument
