@@ -129,6 +129,48 @@ graph.add({
   ownerId: 'pluck-1',
   expanded: false,
 });
+// Same Karplus-Strong voice as pluck-1 (audio/graph.ts's createPluckVoice),
+// tuned the opposite way: bright pick attack, little natural damping, and
+// positive feedback (dsp/rust/src/lib.rs's PLUCK_FEEDBACK) so the string
+// sustains and squeals instead of decaying — a doom/metal guitar starting
+// point, not a finished amp tone. Drag it into overdrive-1 for distortion;
+// this voice only supplies the string/feedback side.
+graph.add({
+  id: 'metal-1',
+  type: 'source',
+  kind: 'metal',
+  parentId: null,
+  children: [],
+  params: { level: 0.8, pitch: 82.4, damping: 0.25, response: 0.85, feedback: 0.45, feedbackFreq: 1200 },
+  x: 1380,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 13,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// metal-1's own ADSR envelope organelle — same mechanism as pluck-1-
+// envelope above, tuned for a note that rings out rather than plucks and
+// stops: a high sustain level (feedback is already keeping the string loud)
+// and a long release so the squeal actually has room to fade.
+graph.add({
+  id: 'metal-1-envelope',
+  type: 'feature',
+  kind: 'envelope',
+  parentId: null,
+  children: [],
+  params: { attack: 0.02, decay: 0.15, sustain: 0.85, release: 1.5, timeScale: 3 },
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 14,
+  docked: false,
+  ownerId: 'metal-1',
+  expanded: false,
+});
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
 // canvas (they grow to fit on drop, and live-preview that growth while a
@@ -197,6 +239,25 @@ graph.add({
   width: 64,
   height: 44,
   seed: 6,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// A harder-clipping cousin of overdrive-1 (audio/graph.ts's makeFuzzCurve)
+// — drag metal-1 in here (or any source) for a fuzzbox tone rather than
+// overdrive's smoother saturation.
+graph.add({
+  id: 'fuzz-1',
+  type: 'source',
+  kind: 'fuzz',
+  parentId: null,
+  children: [],
+  params: { fuzz: 10, tone: 2500, level: 0.7 },
+  x: 780,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 15,
   docked: true,
   ownerId: null,
   expanded: false,

@@ -8,11 +8,13 @@ export const KIND_COLORS: Record<string, string> = {
   bass: '#5b3a24',
   bow: '#6b4630',
   overdrive: '#8a5a1c',
+  fuzz: '#7a2e1c', // hotter/redder than overdrive's amber-brown — a harder-clipping cousin
   reverb: '#2f4a52',
   chorus: '#2c4a3c',
   flanger: '#3a3a52',
   kick: '#5a2020',
   pluck: '#4a3428',
+  metal: '#3f464e', // cold steel, distinct from the warm wood/brown strings above
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

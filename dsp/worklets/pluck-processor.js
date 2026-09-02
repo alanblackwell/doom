@@ -2,6 +2,13 @@
 // (dsp/rust, pluck_render()). Same shared-memory pattern as the other
 // processors — see noise-processor.js and ARCHITECTURE.md §5.2.
 //
+// Shared by both the 'pluck' and 'metal' entity kinds (audio/graph.ts) —
+// same underlying string model, just different default params; 'metal'
+// additionally drives `feedback` above 0, which pluck_render only engages
+// (a resonant band-pass tapped back into the string, soft-clipped into a
+// stable squeal — see that function's comment) when it's actually nonzero,
+// so this is a genuinely shared voice, not a fork.
+//
 // Unlike kick (audio/graph.ts's TRIGGERED_KINDS, but built from fresh native
 // nodes per hit), this is a persistent AudioWorkletNode like bow/bass — a
 // Karplus-Strong voice needs its delay-line state to live across the whole
@@ -14,13 +21,20 @@ class PluckProcessor extends AudioWorkletProcessor {
     super();
     this.ready = false;
 
-    const { wasmModule, frequency, damping, response } = options.processorOptions;
+    const { wasmModule, frequency, damping, response, feedback, feedbackFreq } = options.processorOptions;
     WebAssembly.instantiate(wasmModule).then((instance) => {
       this.exports = instance.exports;
       // Seeded per-instance, same reasoning as noise-processor.js — without
       // it every pluck entity's very first hit would use identical noise.
       this.exports.seed((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0);
-      this.exports.pluck_init(sampleRate, frequency, damping ?? 0.91, response ?? 0.21);
+      this.exports.pluck_init(
+        sampleRate,
+        frequency,
+        damping ?? 0.91,
+        response ?? 0.21,
+        feedback ?? 0,
+        feedbackFreq ?? 1200
+      );
       this.ready = true;
     });
 
@@ -37,6 +51,10 @@ class PluckProcessor extends AudioWorkletProcessor {
         this.exports.pluck_set_damping(value);
       } else if (type === 'setResponse') {
         this.exports.pluck_set_response(value);
+      } else if (type === 'setFeedback') {
+        this.exports.pluck_set_feedback(value);
+      } else if (type === 'setFeedbackFreq') {
+        this.exports.pluck_set_feedback_freq(value);
       } else if (type === 'excite') {
         this.exports.pluck_excite();
       }

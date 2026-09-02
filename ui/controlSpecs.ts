@@ -37,6 +37,15 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
     { param: 'tone', label: 'tone', min: 200, max: 8000, color: '#c85ac8' },
     { param: 'drive', label: 'drive', min: 0, max: 20, color: '#e0883c' },
   ],
+  // Same shape as overdrive above (level/tone/one drive-ish knob), but
+  // audio/graph.ts's makeFuzzCurve is a genuinely harder clip — reuses
+  // overdrive's drive orange since it's the same "how hard is it clipping"
+  // concept, just with a buzzier result.
+  fuzz: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'tone', label: 'tone', min: 200, max: 8000, color: '#c85ac8' },
+    { param: 'fuzz', label: 'fuzz', min: 0, max: 20, color: '#e0883c' },
+  ],
   reverb: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
     { param: 'tone', label: 'tone', min: 200, max: 8000, color: '#c85ac8' },
@@ -80,6 +89,29 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
     // Same magenta as overdrive/reverb's tone — brightness of the pluck's
     // initial attack (see dsp/rust/src/lib.rs's PLUCK_RESPONSE comment).
     { param: 'response', label: 'response', min: 0, max: 1, color: '#c85ac8' },
+  ],
+  // Same Karplus-Strong voice as 'pluck' (audio/graph.ts's createPluckVoice),
+  // tuned for a bright, aggressive pick attack with positive string
+  // feedback instead of a muted decay — guitar pitch range, and a 'feedback'
+  // knob 'pluck' doesn't expose.
+  metal: [
+    { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
+    { param: 'pitch', label: 'pitch', min: 60, max: 400, color: '#5aa0c8' },
+    { param: 'damping', label: 'damping', min: 0, max: 1, color: '#8a7ec8' },
+    { param: 'response', label: 'response', min: 0, max: 1, color: '#c85ac8' },
+    // Reuses bow pressure's red — "intensity/risk knob," same convention as
+    // flanger's feedback (ui/controlSpecs.ts's own comment on that entry):
+    // past a certain point this is what pushes the string into runaway
+    // self-oscillating squeal rather than a stable sustain.
+    { param: 'feedback', label: 'feedback', min: 0, max: 1, color: '#c85a5a' },
+    // Where the squeal locks on — a fixed frequency standing in for the
+    // amp/room's own resonance (dsp/rust/src/lib.rs's PLUCK_FEEDBACK_FREQ),
+    // not the note's own pitch, so different notes squeal more or less
+    // readily depending how close one of their own partials lands here —
+    // the same "move the guitar to find the sweet spot" tuning a real amp
+    // needs. Reuses chorus/flanger's rate teal — same concept, a frequency
+    // you're dialing in by ear rather than a fixed physical quantity.
+    { param: 'feedbackFreq', label: 'squeal', min: 200, max: 3000, color: '#5ac8a0' },
   ],
   // A knob's own value — reuses the same dot+slider mechanism as every
   // other parameter (see ui/controls.ts), rather than needing bespoke

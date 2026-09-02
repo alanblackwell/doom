@@ -414,7 +414,38 @@ static mut PLUCK_SAMPLE_RATE: f32 = 48000.0;
 // ui/main.ts's pluck-1 for where the authoritative defaults now live.
 static mut PLUCK_DAMPING: f32 = 0.91;
 static mut PLUCK_RESPONSE: f32 = 0.21;
+// 0 (the 'pluck' kind's only value — see audio/graph.ts) leaves
+// pluck_render's original decay-only math completely untouched, so this
+// can't regress that already-tuned voice. >0 (the 'metal' kind) is real
+// amp/pickup-style feedback: see the comment on svf_bandpass below for why
+// this isn't just a blanket per-cycle gain boost.
+static mut PLUCK_FEEDBACK: f32 = 0.0;
+// The fixed frequency feedback locks onto — stands in for the amp/room's
+// own resonance, NOT the string's pitch (see svf_bandpass). Independently
+// controllable (pluck_set_feedback_freq) so different notes can be tuned to
+// squeal more or less readily, the way moving a real guitar around the room
+// does.
+static mut PLUCK_FEEDBACK_FREQ: f32 = 1200.0;
+static mut PLUCK_SVF_LOW: f32 = 0.0;
+static mut PLUCK_SVF_BAND: f32 = 0.0;
 static mut PLUCK_FILTER_STATE: f32 = 0.0;
+
+// Q of the feedback resonance below — narrow enough to genuinely pick out
+// one partial rather than reinforcing a broad swath of the spectrum, but
+// not so narrow it needs an exact frequency match to excite.
+const FEEDBACK_Q: f32 = 4.0;
+
+// Chamberlin state-variable filter, band-pass output. Standard/stable
+// direct-form design (not derived from anything else in this file) — `f`
+// is the usual `2*sin(pi*freq/sampleRate)` coefficient, clamped so it stays
+// well-behaved even at this voice's highest playable pitches.
+fn svf_bandpass(input: f32, freq: f32, sample_rate: f32, low: &mut f32, band: &mut f32) -> f32 {
+    let f = (2.0 * (std::f32::consts::PI * freq / sample_rate).sin()).clamp(0.0, 1.0);
+    *low += f * *band;
+    let high = input - *low - *band / FEEDBACK_Q;
+    *band += f * high;
+    *band
+}
 
 fn pluck_len_for(sample_rate: f32, freq: f32) -> usize {
     let n = (sample_rate / freq.max(1.0)).round() as usize;
@@ -422,11 +453,22 @@ fn pluck_len_for(sample_rate: f32, freq: f32) -> usize {
 }
 
 #[no_mangle]
-pub extern "C" fn pluck_init(sample_rate: f32, freq: f32, damping: f32, response: f32) {
+pub extern "C" fn pluck_init(
+    sample_rate: f32,
+    freq: f32,
+    damping: f32,
+    response: f32,
+    feedback: f32,
+    feedback_freq: f32,
+) {
     unsafe {
         PLUCK_SAMPLE_RATE = sample_rate;
         PLUCK_DAMPING = damping.clamp(0.0, 1.0);
         PLUCK_RESPONSE = response.clamp(0.0, 1.0);
+        PLUCK_FEEDBACK = feedback.clamp(0.0, 1.0);
+        PLUCK_FEEDBACK_FREQ = feedback_freq.max(20.0);
+        PLUCK_SVF_LOW = 0.0;
+        PLUCK_SVF_BAND = 0.0;
         PLUCK_LEN_SAMPLES = pluck_len_for(sample_rate, freq);
         PLUCK_WRITE_IDX = 0;
         PLUCK_FILTER_STATE = 0.0;
@@ -455,6 +497,20 @@ pub extern "C" fn pluck_set_damping(value: f32) {
 pub extern "C" fn pluck_set_response(value: f32) {
     unsafe {
         PLUCK_RESPONSE = value.clamp(0.0, 1.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_feedback(value: f32) {
+    unsafe {
+        PLUCK_FEEDBACK = value.clamp(0.0, 1.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_feedback_freq(value: f32) {
+    unsafe {
+        PLUCK_FEEDBACK_FREQ = value.max(20.0);
     }
 }
 
@@ -488,6 +544,8 @@ pub extern "C" fn pluck_excite() {
         }
         PLUCK_WRITE_IDX = 0;
         PLUCK_FILTER_STATE = 0.0;
+        PLUCK_SVF_LOW = 0.0;
+        PLUCK_SVF_BAND = 0.0;
     }
 }
 
@@ -501,9 +559,14 @@ pub extern "C" fn pluck_render() {
         // gain, so the string both dulls and dies out faster — matching a
         // palm-muted/heavily-damped string rather than just a tone change.
         let damping = PLUCK_DAMPING;
+        let feedback = PLUCK_FEEDBACK;
+        let feedback_freq = PLUCK_FEEDBACK_FREQ;
+        let sample_rate = PLUCK_SAMPLE_RATE;
         let pole = 0.1 + 0.85 * damping;
         let loop_gain = 0.999 - 0.03 * damping;
         let mut filter_state = PLUCK_FILTER_STATE;
+        let mut svf_low = PLUCK_SVF_LOW;
+        let mut svf_band = PLUCK_SVF_BAND;
         let mut idx = PLUCK_WRITE_IDX % n;
 
         for i in 0..QUANTUM {
@@ -512,12 +575,36 @@ pub extern "C" fn pluck_render() {
             let s1 = *buf.add(idx_next);
             let avg = 0.5 * (s0 + s1);
             filter_state = pole * filter_state + (1.0 - pole) * avg;
-            *buf.add(idx) = filter_state * loop_gain;
+
+            if feedback > 0.0001 {
+                // Real amp/pickup feedback is frequency-selective — it picks
+                // out whichever of the string's own partials happens to sit
+                // near the amp/room's own resonance and grows THAT one, while
+                // the rest of the note keeps decaying normally (see
+                // svf_bandpass's comment). Injecting a resonant band-pass tap
+                // back into the string, scaled by feedback, reproduces that:
+                // unlike a blanket gain boost (which just makes the whole
+                // note louder/longer), only the partial near feedback_freq
+                // gets reinforced enough to actually squeal — which partial
+                // that is depends on which note is fretted, same as on a
+                // real amp. soft_clip on the combined result is what keeps
+                // this genuine positive-feedback loop bounded rather than
+                // diverging once the targeted partial starts to run away.
+                let injected = svf_bandpass(filter_state, feedback_freq, sample_rate, &mut svf_low, &mut svf_band);
+                let driven = filter_state * loop_gain + injected * feedback * 3.0;
+                let drive = 1.0 + feedback * 4.0;
+                *buf.add(idx) = soft_clip(driven * drive) / drive;
+            } else {
+                *buf.add(idx) = filter_state * loop_gain;
+            }
+
             *out.add(i) = s0;
             idx = idx_next;
         }
 
         PLUCK_FILTER_STATE = filter_state;
+        PLUCK_SVF_LOW = svf_low;
+        PLUCK_SVF_BAND = svf_band;
         PLUCK_WRITE_IDX = idx;
     }
 }

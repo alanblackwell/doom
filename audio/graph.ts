@@ -49,7 +49,7 @@ export function getControlSetter(
 // the graph is built. There's no event transport yet (ARCHITECTURE.md
 // §5.3) — this is the manual/interactive way to fire a hit until that
 // exists.
-export const TRIGGERED_KINDS = new Set(['kick', 'pluck']);
+export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal']);
 
 // Registered by createGenerator() for triggered kinds — one no-argument
 // function per entity that fires a single hit, reading whatever's currently
@@ -149,7 +149,7 @@ export async function initAudioEngine(): Promise<void> {
   engineReady = true;
 }
 
-const WASM_KINDS = new Set(['noise', 'bass', 'bow', 'pluck']);
+const WASM_KINDS = new Set(['noise', 'bass', 'bow', 'pluck', 'metal']);
 
 // Creates the node(s) that make an entity's own sound, if it has any.
 // A plain group/mixer entity (no matching case) returns undefined — it
@@ -290,104 +290,159 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
 
       return voiceOutput;
     }
-    case 'pluck': {
-      // Unlike kick above, a Karplus-Strong voice needs its delay-line state
-      // to persist across the whole render loop (not just one hit's
-      // duration), so this is one long-lived AudioWorkletNode — always
-      // connected through `level`, like bow/bass — re-excited per trigger
-      // via the worklet's port rather than rebuilt per hit. See
-      // dsp/rust/src/lib.rs's Karplus-Strong section and
-      // dsp/worklets/pluck-processor.js.
-      const pluck = new AudioWorkletNode(ctx, 'pluck-processor', {
-        processorOptions: {
-          wasmModule: dspModule,
-          // Tuned by ear (see ui/main.ts's pluck-1) — a heavily muted thumb
-          // attack and a long, dark decay.
-          frequency: entity.params.pitch ?? 34.4,
-          damping: entity.params.damping ?? 0.91,
-          response: entity.params.response ?? 0.21,
-        },
+    // Same Karplus-Strong voice as 'pluck' (see createPluckVoice below),
+    // tuned by ear the opposite way: a heavily muted thumb attack and a
+    // long, dark decay, and no feedback control — a fingerstyle bass note
+    // doesn't self-sustain via amp feedback the way a loud electric guitar
+    // does (see 'metal' below).
+    case 'pluck':
+      return createPluckVoice(entity, graph, {
+        pitch: 34.4,
+        damping: 0.91,
+        response: 0.21,
+        feedback: 0,
+        feedbackFreq: 1200,
+        level: 0.89,
+        exposeFeedback: false,
       });
-      const level = ctx.createGain();
-      level.gain.value = entity.params.level ?? 0.89;
-
-      // An attached ADSR envelope organelle (audio/entityGraph.ts's
-      // EntityType 'feature', ui/organelle.ts) inserts an extra gain stage
-      // between the raw voice and `level` — `level` stays the user-facing
-      // volume knob, this is what the envelope's Attack/Decay/Sustain/
-      // Release ramps actually drive. Silent (gain 0) until gated on.
-      const envelope = graph.featuresOf(entity.id).find((f) => f.kind === 'envelope');
-      let tail: AudioNode = pluck;
-      let envelopeGain: GainNode | undefined;
-      if (envelope) {
-        const gain = ctx.createGain();
-        gain.gain.value = 0;
-        pluck.connect(gain);
-        tail = gain;
-        envelopeGain = gain;
-
-        // Gate-off (ui/interaction.ts's pad-release, via releaseEntity) —
-        // ramp down to silence from wherever the envelope currently sits,
-        // not just from Sustain, so releasing mid-Attack/Decay doesn't
-        // jump/click. Reads envelope.params fresh each call, same "no
-        // baked-in values" reasoning as kick's registerTrigger below.
-        registerRelease(entity.id, () => {
-          const now = ctx.currentTime;
-          const release = Math.max(0.001, envelope.params.release ?? 0.3);
-          gain.gain.cancelScheduledValues(now);
-          gain.gain.setValueAtTime(gain.gain.value, now);
-          gain.gain.linearRampToValueAtTime(0, now + release);
-
-          const playback = envelopePlaybackByFeature.get(envelope.id);
-          if (playback) {
-            playback.gateOffAt = performance.now();
-            playback.release = release;
-          }
-        });
-      }
-      tail.connect(level);
-
-      // None of these are native AudioParams — same reasoning as bow above.
-      registerControls(entity.id, {
-        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
-        pitch: (value) => pluck.port.postMessage({ type: 'setFrequency', value }),
-        damping: (value) => pluck.port.postMessage({ type: 'setDamping', value }),
-        response: (value) => pluck.port.postMessage({ type: 'setResponse', value }),
+    // A bright, aggressive pick attack (high response) and comparatively
+    // little natural damping, plus positive feedback (dsp/rust/src/lib.rs's
+    // PLUCK_FEEDBACK/PLUCK_FEEDBACK_FREQ) driving the string into a
+    // sustained squeal instead of decaying away — the same string model as
+    // 'pluck', just leaning on the parameters that voice deliberately
+    // doesn't use. feedbackFreq is where that squeal locks on (a fixed
+    // frequency, standing in for the amp/room's own resonance rather than
+    // tracking the note's own pitch — see svf_bandpass's comment in
+    // dsp/rust/src/lib.rs for why that's what makes it sound like real
+    // feedback rather than just a longer decay), so which notes squeal most
+    // readily genuinely depends on pitch, the same as on a real amp. Route
+    // this into the overdrive pedal (drag it in) for the full "screaming
+    // metal guitar" tone; this voice only supplies the string/feedback side.
+    case 'metal':
+      return createPluckVoice(entity, graph, {
+        pitch: 82.4, // standard guitar low E
+        damping: 0.25,
+        response: 0.85,
+        feedback: 0.45,
+        feedbackFreq: 1200,
+        level: 0.8,
+        exposeFeedback: true,
       });
-
-      registerTrigger(entity.id, () => {
-        pluck.port.postMessage({ type: 'excite' });
-
-        // Gate-on: Attack up to full, then Decay down to Sustain — the
-        // Release half lives in the registerRelease closure above, fired
-        // separately on pad-release. Only when an envelope is actually
-        // attached; otherwise this is a plain momentary trigger exactly as
-        // before, no envelope machinery involved at all.
-        if (envelope && envelopeGain) {
-          const now = ctx.currentTime;
-          const attack = Math.max(0.001, envelope.params.attack ?? 0.01);
-          const decay = Math.max(0.001, envelope.params.decay ?? 0.2);
-          const sustain = Math.min(1, Math.max(0, envelope.params.sustain ?? 0.6));
-          envelopeGain.gain.cancelScheduledValues(now);
-          envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
-          envelopeGain.gain.linearRampToValueAtTime(1, now + attack);
-          envelopeGain.gain.linearRampToValueAtTime(sustain, now + attack + decay);
-
-          envelopePlaybackByFeature.set(envelope.id, {
-            gateOnAt: performance.now(),
-            attack,
-            decay,
-            gateOffAt: null,
-            release: 0,
-          });
-        }
-      });
-
-      return level;
-    }
     default:
       return undefined;
   }
+}
+
+interface PluckVoiceDefaults {
+  pitch: number;
+  damping: number;
+  response: number;
+  feedback: number;
+  feedbackFreq: number;
+  level: number;
+  exposeFeedback: boolean; // whether this kind's controlsFor entry includes feedback/feedbackFreq at all (ui/controlSpecs.ts)
+}
+
+// Shared by the 'pluck' and 'metal' cases above — same Karplus-Strong voice
+// (dsp/rust/src/lib.rs, dsp/worklets/pluck-processor.js) and the same
+// envelope-organelle wiring (audio/entityGraph.ts's EntityType 'feature'),
+// just different tunings and whether `feedback` is exposed as a live
+// control. Unlike kick, this is one long-lived AudioWorkletNode — always
+// connected through `level` — re-excited per trigger via the worklet's port
+// rather than rebuilt per hit, since a Karplus-Strong voice needs its
+// delay-line state to persist across the whole render loop.
+function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoiceDefaults): AudioNode {
+  const ctx = getAudioContext();
+
+  const pluck = new AudioWorkletNode(ctx, 'pluck-processor', {
+    processorOptions: {
+      wasmModule: dspModule,
+      frequency: entity.params.pitch ?? defaults.pitch,
+      damping: entity.params.damping ?? defaults.damping,
+      response: entity.params.response ?? defaults.response,
+      feedback: entity.params.feedback ?? defaults.feedback,
+      feedbackFreq: entity.params.feedbackFreq ?? defaults.feedbackFreq,
+    },
+  });
+  const level = ctx.createGain();
+  level.gain.value = entity.params.level ?? defaults.level;
+
+  // An attached ADSR envelope organelle inserts an extra gain stage between
+  // the raw voice and `level` — `level` stays the user-facing volume knob,
+  // this is what the envelope's Attack/Decay/Sustain/Release ramps actually
+  // drive. Silent (gain 0) until gated on.
+  const envelope = graph.featuresOf(entity.id).find((f) => f.kind === 'envelope');
+  let tail: AudioNode = pluck;
+  let envelopeGain: GainNode | undefined;
+  if (envelope) {
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    pluck.connect(gain);
+    tail = gain;
+    envelopeGain = gain;
+
+    // Gate-off (ui/interaction.ts's pad-release, via releaseEntity) — ramp
+    // down to silence from wherever the envelope currently sits, not just
+    // from Sustain, so releasing mid-Attack/Decay doesn't jump/click. Reads
+    // envelope.params fresh each call, same "no baked-in values" reasoning
+    // as kick's registerTrigger.
+    registerRelease(entity.id, () => {
+      const now = ctx.currentTime;
+      const release = Math.max(0.001, envelope.params.release ?? 0.3);
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + release);
+
+      const playback = envelopePlaybackByFeature.get(envelope.id);
+      if (playback) {
+        playback.gateOffAt = performance.now();
+        playback.release = release;
+      }
+    });
+  }
+  tail.connect(level);
+
+  // None of these are native AudioParams — same reasoning as bow's controls.
+  const controls: Record<string, (value: number) => void> = {
+    level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    pitch: (value) => pluck.port.postMessage({ type: 'setFrequency', value }),
+    damping: (value) => pluck.port.postMessage({ type: 'setDamping', value }),
+    response: (value) => pluck.port.postMessage({ type: 'setResponse', value }),
+  };
+  if (defaults.exposeFeedback) {
+    controls.feedback = (value) => pluck.port.postMessage({ type: 'setFeedback', value });
+    controls.feedbackFreq = (value) => pluck.port.postMessage({ type: 'setFeedbackFreq', value });
+  }
+  registerControls(entity.id, controls);
+
+  registerTrigger(entity.id, () => {
+    pluck.port.postMessage({ type: 'excite' });
+
+    // Gate-on: Attack up to full, then Decay down to Sustain — the Release
+    // half lives in the registerRelease closure above, fired separately on
+    // pad-release. Only when an envelope is actually attached; otherwise
+    // this is a plain momentary trigger, no envelope machinery involved.
+    if (envelope && envelopeGain) {
+      const now = ctx.currentTime;
+      const attack = Math.max(0.001, envelope.params.attack ?? 0.01);
+      const decay = Math.max(0.001, envelope.params.decay ?? 0.2);
+      const sustain = Math.min(1, Math.max(0, envelope.params.sustain ?? 0.6));
+      envelopeGain.gain.cancelScheduledValues(now);
+      envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
+      envelopeGain.gain.linearRampToValueAtTime(1, now + attack);
+      envelopeGain.gain.linearRampToValueAtTime(sustain, now + attack + decay);
+
+      envelopePlaybackByFeature.set(envelope.id, {
+        gateOnAt: performance.now(),
+        attack,
+        decay,
+        gateOffAt: null,
+        release: 0,
+      });
+    }
+  });
+
+  return level;
 }
 
 // Reusable short noise buffer for one-shot click/attack transients — plain
@@ -405,7 +460,7 @@ function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
 // Kinds that process `input` into `output` rather than just mixing it
 // through — exported so the renderer can mark these visually as sink+source
 // ("pedal") entities rather than plain sources/containers.
-export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger']);
+export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz']);
 
 // Classic WaveShaperNode distortion curve (the one widely cited from
 // Kevin Ennis's WebAudio overdrive example) — soft-to-hard clipping
@@ -418,6 +473,25 @@ function makeOverdriveCurve(amount: number): Float32Array<ArrayBuffer> {
   for (let i = 0; i < samples; i++) {
     const x = (i * 2) / samples - 1;
     curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+  }
+  return curve;
+}
+
+// tanh-based hard clip — a genuinely different curve shape from
+// makeOverdriveCurve above, not just a bigger `amount`: overdrive's rational
+// function saturates gently and stays fairly smooth even at its max, where
+// this saturates fast and hard, approaching a square wave well before
+// `amount`'s top end. That harder, buzzier clip is what actually
+// distinguishes a fuzzbox from an overdrive pedal — a bigger `amount` on
+// the same curve shape wouldn't get there.
+function makeFuzzCurve(amount: number): Float32Array<ArrayBuffer> {
+  const samples = 1024;
+  const curve = new Float32Array(samples);
+  const drive = 1 + amount * 1.5;
+  const norm = Math.tanh(drive) || 1; // keeps full-scale input still reaching close to ±1
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2) / samples - 1;
+    curve[i] = Math.tanh(drive * x) / norm;
   }
   return curve;
 }
@@ -482,6 +556,41 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
         drive: (value) => {
           drive.gain.setTargetAtTime(value, ctx.currentTime, 0.01);
           shaper.curve = makeOverdriveCurve(value);
+        },
+      });
+
+      return level;
+    }
+    case 'fuzz': {
+      // Same overall shape as overdrive above (pre-shaper boost + a
+      // WaveShaper curve both driven by one param, then a post tone
+      // lowpass) — what's different is makeFuzzCurve's much harder clip,
+      // which is the actual "fuzzbox vs overdrive pedal" distinction.
+      const drive = ctx.createGain();
+      drive.gain.value = entity.params.fuzz ?? 10;
+
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = makeFuzzCurve(entity.params.fuzz ?? 10);
+      shaper.oversample = '4x';
+
+      const tone = ctx.createBiquadFilter();
+      tone.type = 'lowpass';
+      tone.frequency.value = entity.params.tone ?? 2500;
+
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.7;
+
+      input.connect(drive);
+      drive.connect(shaper);
+      shaper.connect(tone);
+      tone.connect(level);
+
+      registerControls(entity.id, {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+        tone: (value) => tone.frequency.setTargetAtTime(value, ctx.currentTime, 0.01),
+        fuzz: (value) => {
+          drive.gain.setTargetAtTime(value, ctx.currentTime, 0.01);
+          shaper.curve = makeFuzzCurve(value);
         },
       });
 
