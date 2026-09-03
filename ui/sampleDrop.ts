@@ -34,12 +34,34 @@ function shortLabel(fileName: string): string {
 
 let nextSeed = 1000; // clear of ui/main.ts's hand-picked demo seeds (1-15)
 
+export interface LoadedSampleFile {
+  fileName: string; // original dropped filename, untruncated (contrast Entity.label's shortLabel)
+  bytes: Uint8Array; // the untouched original file bytes, not the decoded AudioBuffer — keeps
+  // a later archive export (ui/sampleArchive.ts) byte-identical to what was actually dropped,
+  // regardless of what decodeAudioData did to it.
+}
+
+// Keyed by entity id, one entry per 'sample' entity ever dropped — read by
+// ui/sampleArchive.ts's exportSamplesZip to bundle the originals for
+// download. Entries are never removed (there's no entity-delete feature yet
+// to prompt it — see audio/entityGraph.ts).
+const loadedSampleFiles = new Map<string, LoadedSampleFile>();
+
+export function getLoadedSampleFiles(): ReadonlyMap<string, LoadedSampleFile> {
+  return loadedSampleFiles;
+}
+
 async function addSampleEntity(
   graph: EntityGraph,
   file: File,
   point: { x: number; y: number }
 ): Promise<void> {
   const arrayBuffer = await file.arrayBuffer();
+  // A copy, independent of whatever decodeAudioData below does to
+  // arrayBuffer — older WebKit neuters (detaches) the buffer it's handed,
+  // and this needs to survive that to be archived later.
+  const bytes = new Uint8Array(arrayBuffer.slice(0));
+
   // decodeAudioData is the "any necessary file conversion" step — it
   // demuxes/decodes whatever container+codec the browser supports (wav,
   // mp3, ogg, m4a/aac, flac, ...) and always hands back a native-samplerate
@@ -72,6 +94,7 @@ async function addSampleEntity(
   // finds the buffer waiting for it — see audio/graph.ts's createGenerator
   // 'sample' case.
   registerSampleBuffer(id, buffer);
+  loadedSampleFiles.set(id, { fileName: file.name, bytes });
   graph.add(entity);
   // No-ops if the engine hasn't started yet (same guard docking.ts's own
   // undock-from-dock call relies on) — buildFromEntityGraph picks the

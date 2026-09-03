@@ -12,11 +12,13 @@ import { renderFrame } from './render';
 import { attachInteraction, attachKeyboard, createInteractionState } from './interaction';
 import { attachClockPulse } from './clockPulse';
 import { attachSampleDrop } from './sampleDrop';
+import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
 const ctx2d = canvas.getContext('2d')!;
 const startButton = document.querySelector<HTMLButtonElement>('#start-audio')!;
+const exportButton = document.querySelector<HTMLButtonElement>('#export-samples')!;
 
 // Demo composition: a sub-bass drone, a bowed-string voice, and an overdrive
 // pedal (sink+source — drag bass-1 or bow-1 onto it to route their audio
@@ -425,8 +427,16 @@ startButton.addEventListener('click', () => {
   toggleAudio();
 });
 
+exportButton.addEventListener('click', () => {
+  exportSamplesZip(graph);
+});
+
 function draw(now: number): void {
   resize();
+  // Cheap enough (a handful of entities, one Map lookup each) to just
+  // recompute every frame rather than threading an update call through
+  // every place a sample can be added/removed.
+  exportButton.disabled = !hasExportableSamples(graph);
   renderFrame(ctx2d, canvas, graph, interaction, now);
   requestAnimationFrame(draw);
 }
