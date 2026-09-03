@@ -8,6 +8,7 @@
 import type { EntityGraph } from '../audio/entityGraph';
 import { getAudioContext } from '../audio/context';
 import { activateEntity, registerSampleBuffer } from '../audio/graph';
+import { applyPositionToMix } from './stereoMix';
 
 const BOX_WIDTH = 110;
 const BOX_HEIGHT = 70; // matches kick-1/pluck-1's TRIGGERED_KINDS box size in ui/main.ts
@@ -53,6 +54,7 @@ export function getLoadedSampleFiles(): ReadonlyMap<string, LoadedSampleFile> {
 
 async function addSampleEntity(
   graph: EntityGraph,
+  canvas: HTMLCanvasElement,
   file: File,
   point: { x: number; y: number }
 ): Promise<void> {
@@ -100,6 +102,10 @@ async function addSampleEntity(
   // undock-from-dock call relies on) — buildFromEntityGraph picks the
   // entity up normally the first time "start audio" is pressed instead.
   activateEntity(entity, graph);
+  // Where it landed determines its initial pan/volume too (ui/stereoMix.ts)
+  // — no reason a freshly-dropped file should default to center/some
+  // fallback level rather than reflecting where it was actually dropped.
+  applyPositionToMix(graph, canvas, id, point);
 }
 
 export function attachSampleDrop(canvas: HTMLCanvasElement, graph: EntityGraph): void {
@@ -119,7 +125,7 @@ export function attachSampleDrop(canvas: HTMLCanvasElement, graph: EntityGraph):
 
     for (const file of Array.from(files)) {
       if (!looksLikeAudioFile(file)) continue;
-      addSampleEntity(graph, file, point).catch((err) => {
+      addSampleEntity(graph, canvas, file, point).catch((err) => {
         console.error(`Failed to load dropped audio file "${file.name}":`, err);
       });
       point = { x: point.x + MULTI_DROP_OFFSET, y: point.y };

@@ -35,6 +35,7 @@ import { bindKey, getEntityForKey } from './tapBindings';
 import { scheduleSoon } from '../audio/transport';
 import { isOverDock, hitTestDockIcon } from './dock';
 import { isDockable, dockEntity } from './docking';
+import { applyPositionToMix, clearLevelOverride, markLevelOverridden } from './stereoMix';
 import {
   envelopeValuesFromHandle,
   hitTestFeatureDot,
@@ -428,6 +429,11 @@ export function attachInteraction(
     if (state.draggingControl) {
       const { entityId, spec, track } = state.draggingControl;
       applyControlValue(graph, entityId, spec.param, valueFromTrackPosition(track, spec, point.y));
+      // A direct manual drag of the volume dot — sticks (canvas y stops
+      // driving it) until this entity is dragged again on the canvas
+      // itself (see stereoMix.ts's clearLevelOverride, called below at
+      // drag-start).
+      if (spec.param === 'level') markLevelOverridden(entityId);
       return;
     }
 
@@ -450,6 +456,10 @@ export function attachInteraction(
       const dy = point.y - pressStart.y;
       if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
       state.draggingId = pressId;
+      // Dragging the box again is what re-engages canvas-position-driven
+      // volume after a manual slider override (see stereoMix.ts) — a no-op
+      // for anything that was never overridden.
+      clearLevelOverride(pressId);
     }
 
     const entity = graph.get(pressId);
@@ -457,6 +467,10 @@ export function attachInteraction(
 
     const target = { x: point.x - grabOffset.x, y: point.y - grabOffset.y };
     state.dragPointer = target;
+    // Live "canvas space as a stereo mixing surface" feedback (ui/stereoMix.ts)
+    // — pan/volume follow the box as it's dragged, not just once it's
+    // dropped. No-op for a Control entity (knob/clock/tap — checked inside).
+    applyPositionToMix(graph, canvas, entity.id, target);
 
     // Control entities (knobs) never participate in containment — they're
     // never a valid drop target for anything else (already excluded via
@@ -571,7 +585,7 @@ export function attachInteraction(
     canvas.releasePointerCapture(e.pointerId);
 
     if (state.draggingId === pressId) {
-      finalizeDrop(graph, state, pressId);
+      finalizeDrop(graph, canvas, state, pressId);
     }
 
     pressId = null;
@@ -660,7 +674,12 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
   });
 }
 
-function finalizeDrop(graph: EntityGraph, state: InteractionState, entityId: string): void {
+function finalizeDrop(
+  graph: EntityGraph,
+  canvas: HTMLCanvasElement,
+  state: InteractionState,
+  entityId: string
+): void {
   const entity = graph.get(entityId);
   if (!entity || !state.dragPointer) return;
 
@@ -682,6 +701,14 @@ function finalizeDrop(graph: EntityGraph, state: InteractionState, entityId: str
   // shown highlighted/grown on screen. Recomputing independently risked
   // disagreeing with what the user was looking at when they released.
   const newParentId = state.hoverTargetId;
+
+  // Final settle of the live "canvas as mixing surface" feedback (ui/
+  // stereoMix.ts) — normally a no-op vs. the last pointermove's call
+  // (state.dragPointer hasn't moved since), but this is also the very
+  // first position update for an entity just dragged out of the dock,
+  // where the per-move calls already fired too, so it's redundant-but-safe
+  // there as well rather than a special case.
+  applyPositionToMix(graph, canvas, entityId, state.dragPointer);
 
   const relative = toRelative(graph, newParentId, state.dragPointer);
   entity.x = relative.x;

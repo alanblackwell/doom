@@ -32,6 +32,7 @@ import { formatKeyLabel, getBoundKey } from './tapBindings';
 import { drawDock } from './dock';
 import { drawPopup, drawPorthole } from './organelle';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
+import { positionModifier, viewportSize } from './stereoMix';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
 // resting at its center (see drawControls), a little lighter than the
@@ -729,6 +730,80 @@ function drawBox(
   ctx.restore();
 }
 
+// Peak alpha at 100% modification (right at/past either edge) — deliberately
+// well short of opaque, so the overlay stays "semi-transparent": entities,
+// wires, and controls underneath stay legible even where the wash is
+// strongest. Tune by eye.
+const MIX_OVERLAY_MAX_ALPHA = 0.4;
+// Gradient color-stop count approximating ui/stereoMix.ts's curve — a
+// native CanvasGradient only linearly interpolates between stops, so this
+// needs to be high enough that the smooth cubic doesn't facet visibly; 40
+// is plenty for that and negligible either way (stop-building is cheap,
+// and the actual fill is hardware-rasterized regardless of canvas size —
+// no per-pixel JS scan).
+const MIX_OVERLAY_STOPS = 40;
+
+// Whether ui/render.ts's canvas-position-mix visualization (below) is
+// currently drawn — on by default for now; exposed as a toggle for a future
+// on/off control (a button, keyboard shortcut, ...) that doesn't exist yet.
+let mixOverlayVisible = true;
+
+export function setMixOverlayVisible(visible: boolean): void {
+  mixOverlayVisible = visible;
+}
+
+export function isMixOverlayVisible(): boolean {
+  return mixOverlayVisible;
+}
+
+// Dark red — reads as a warning/heat wash (untouched center, "hotter"
+// toward the edges) rather than a plain brightness overlay.
+const MIX_OVERLAY_COLOR = '139, 0, 0';
+
+// Visualizes ui/stereoMix.ts's canvas-position → mix-modification curve: a
+// semi-transparent dark red wash whose opacity tracks the same modification
+// percentage the actual pan/volume mapping uses for that position — flat/
+// invisible over the dead-center region, brightening non-linearly toward
+// each edge exactly like the real mapping does. Built from two 1D
+// gradients (one per axis, sampling positionModifier directly so this can
+// never drift out of sync with the real mapping) rather than a per-pixel
+// scan, composited via ordinary alpha blending — not an exact max() of the
+// two axes, but close enough that it reads the same way: darkest in the
+// middle, brightest near any edge, and it's cheap regardless of canvas
+// size. Stops are defined only across the viewport span (the same fixed
+// reference frame the real mapping uses — see viewportSize's own comment);
+// a CanvasGradient clamps to its nearest stop's color beyond that span, so
+// canvas content scrolled out past the viewport reads as "fully modified"
+// too, matching positionModifier's own clamping.
+function drawMixModificationOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+  if (!mixOverlayVisible) return;
+
+  const { width, height } = viewportSize(canvas);
+  if (width <= 0 || height <= 0) return;
+
+  ctx.save();
+
+  const xGradient = ctx.createLinearGradient(0, 0, width, 0);
+  for (let i = 0; i <= MIX_OVERLAY_STOPS; i++) {
+    const fraction = i / MIX_OVERLAY_STOPS;
+    const alpha = Math.abs(positionModifier(fraction * width, width)) * MIX_OVERLAY_MAX_ALPHA;
+    xGradient.addColorStop(fraction, `rgba(${MIX_OVERLAY_COLOR}, ${alpha})`);
+  }
+  ctx.fillStyle = xGradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const yGradient = ctx.createLinearGradient(0, 0, 0, height);
+  for (let i = 0; i <= MIX_OVERLAY_STOPS; i++) {
+    const fraction = i / MIX_OVERLAY_STOPS;
+    const alpha = Math.abs(positionModifier(fraction * height, height)) * MIX_OVERLAY_MAX_ALPHA;
+    yGradient.addColorStop(fraction, `rgba(${MIX_OVERLAY_COLOR}, ${alpha})`);
+  }
+  ctx.fillStyle = yGradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.restore();
+}
+
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -832,6 +907,12 @@ export function renderFrame(
       drawPorthole(ctx, graph, feature, owner, drag);
     }
   }
+
+  // A wash over everything drawn on the canvas so far (entities, wires,
+  // controls, popups) — but before the dock HUD below, so the dock (whose
+  // icons have no x/y position for this mapping to mean anything about)
+  // stays unwashed and fully legible.
+  drawMixModificationOverlay(ctx, canvas);
 
   // Topmost of all — a fixed HUD panel pinned to the viewport's right edge
   // (see ui/dock.ts), not part of the scrollable canvas content, so it

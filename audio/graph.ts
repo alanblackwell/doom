@@ -17,7 +17,13 @@ import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
   input: GainNode; // children connect here (this entity's internal mixer)
-  output: GainNode; // parent connects from here (own generator + children, summed)
+  output: GainNode; // own generator + children, summed — feeds `pan`, not the parent directly
+  // Stereo position, driven by the entity's canvas x position (ui/stereoMix.ts)
+  // — inserted after `output` so it's what the parent (or master) actually
+  // connects from; see setPan below and every output-reconnection site
+  // (buildFromEntityGraph, reparentEntity, activateEntity, deactivateEntity),
+  // which all target `pan` now, not `output`, for exactly that reason.
+  pan: StereoPannerNode;
 }
 
 const nodesByEntity = new Map<string, EntityNodes>();
@@ -41,6 +47,21 @@ export function getControlSetter(
   param: string
 ): ((value: number) => void) | undefined {
   return controlsByEntity.get(entityId)?.[param];
+}
+
+// Live stereo position for an entity's own output — see EntityNodes.pan.
+// A no-op if the entity has no audio nodes yet (mirrors every other live
+// setter here — e.g. a docked or not-yet-built entity), so ui/stereoMix.ts
+// can call this unconditionally as the canvas position changes without
+// first checking whether the graph has actually been built.
+export function setPan(entityId: string, value: number): void {
+  const nodes = nodesByEntity.get(entityId);
+  if (!nodes) return;
+  // Short time constant — smooths out the zipper noise a hard setValue
+  // would cause on every drag tick, without noticeably lagging behind a
+  // fast drag the way `level`'s 0.01s (tuned for a slower slider drag)
+  // would start to.
+  nodes.pan.pan.setTargetAtTime(value, getAudioContext().currentTime, 0.015);
 }
 
 // Kinds that are a one-shot "click the pad to trigger it" instrument rather
@@ -948,6 +969,8 @@ function createNodes(entity: Entity, graph: EntityGraph): EntityNodes {
 
   const input = ctx.createGain();
   const output = ctx.createGain();
+  const pan = ctx.createStereoPanner();
+  output.connect(pan);
 
   const processorTail = createProcessor(entity, input);
   if (processorTail) {
@@ -959,7 +982,7 @@ function createNodes(entity: Entity, graph: EntityGraph): EntityNodes {
   const generator = createGenerator(entity, graph);
   if (generator) generator.connect(output);
 
-  const nodes: EntityNodes = { input, output };
+  const nodes: EntityNodes = { input, output, pan };
   nodesByEntity.set(entity.id, nodes);
   return nodes;
 }
@@ -1019,9 +1042,9 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
     const parentNodes = entity.parentId ? nodesByEntity.get(entity.parentId) : undefined;
 
     if (parentNodes) {
-      nodes.output.connect(parentNodes.input);
+      nodes.pan.connect(parentNodes.input);
     } else {
-      nodes.output.connect(master);
+      nodes.pan.connect(master);
     }
   }
 }
@@ -1031,21 +1054,22 @@ export function getEntityNodes(id: string): EntityNodes | undefined {
 }
 
 // Live re-routing for a drag-driven reparent (ui/interaction.ts) — an
-// entity's `output` only ever has one outgoing connection (its parent's
-// input, or master), so disconnecting everything and reconnecting once is
-// correct, not just convenient. A no-op if the entity has no audio nodes yet
-// (e.g. the graph was rearranged before the user started audio).
+// entity's `pan` (its final stereo-positioned output — see EntityNodes)
+// only ever has one outgoing connection (its parent's input, or master), so
+// disconnecting everything and reconnecting once is correct, not just
+// convenient. A no-op if the entity has no audio nodes yet (e.g. the graph
+// was rearranged before the user started audio).
 export function reparentEntity(id: string, newParentId: string | null): void {
   const nodes = nodesByEntity.get(id);
   if (!nodes) return;
 
-  nodes.output.disconnect();
+  nodes.pan.disconnect();
 
   const parentNodes = newParentId ? nodesByEntity.get(newParentId) : undefined;
   if (parentNodes) {
-    nodes.output.connect(parentNodes.input);
+    nodes.pan.connect(parentNodes.input);
   } else {
-    nodes.output.connect(getMasterChain());
+    nodes.pan.connect(getMasterChain());
   }
 }
 
@@ -1072,22 +1096,22 @@ export function activateEntity(entity: Entity, graph: EntityGraph): void {
     }
   }
 
-  nodes.output.disconnect(); // in case it was already connected somewhere
+  nodes.pan.disconnect(); // in case it was already connected somewhere
   const parentNodes = entity.parentId ? nodesByEntity.get(entity.parentId) : undefined;
   if (parentNodes) {
-    nodes.output.connect(parentNodes.input);
+    nodes.pan.connect(parentNodes.input);
   } else {
-    nodes.output.connect(getMasterChain());
+    nodes.pan.connect(getMasterChain());
   }
 }
 
 // Drag an instrument from the canvas into the dock: silence it by
-// disconnecting its output from wherever it currently feeds — its nodes
-// are kept around (not torn down), so dragging it back out later is a cheap
-// reconnect via activateEntity() above rather than a rebuild. A no-op if it
-// was never built (docked before "start audio" was ever pressed).
+// disconnecting its final output from wherever it currently feeds — its
+// nodes are kept around (not torn down), so dragging it back out later is a
+// cheap reconnect via activateEntity() above rather than a rebuild. A no-op
+// if it was never built (docked before "start audio" was ever pressed).
 export function deactivateEntity(id: string): void {
   const nodes = nodesByEntity.get(id);
   if (!nodes) return;
-  nodes.output.disconnect();
+  nodes.pan.disconnect();
 }
