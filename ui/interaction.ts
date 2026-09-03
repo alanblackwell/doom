@@ -17,7 +17,7 @@ import {
   TRIGGERED_KINDS,
 } from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds, hitTest, toRelative } from './layout';
-import type { DragContext, Point } from './layout';
+import type { DragContext, Point, Rect } from './layout';
 import { controlsFor, hitTestControl, trackGeometry, valueFraction, valueFromTrackPosition } from './controls';
 import type { ControlHit, ControlSpec, Track } from './controls';
 import { isWithinPad } from './pads';
@@ -201,9 +201,20 @@ export function fireEventWireTargets(entityId: string, state: InteractionState):
 
 const DRAG_START_THRESHOLD = 4; // px of movement before a press becomes a drag, vs. a click/select
 // "A small amount of expansion is OK" — slack around a container's real
-// bounds within which the dragged entity's centroid still counts as
-// "inside" once already hovering. See the sticky-hover comment below.
+// bounds within which the dragged entity still counts as "inside" once
+// already hovering. See the sticky-hover comment below.
 const HOVER_EXIT_MARGIN = 32;
+
+// True if `p` falls within `bounds` (a center-based Rect), grown by
+// `margin` on every side.
+function withinBounds(p: Point, bounds: Rect, margin: number): boolean {
+  return (
+    p.x >= bounds.x - bounds.width / 2 - margin &&
+    p.x <= bounds.x + bounds.width / 2 + margin &&
+    p.y >= bounds.y - bounds.height / 2 - margin &&
+    p.y <= bounds.y + bounds.height / 2 + margin
+  );
+}
 
 export function attachInteraction(
   canvas: HTMLCanvasElement,
@@ -504,29 +515,23 @@ export function attachInteraction(
     exclude.add(entity.id);
 
     // Sticky hover, with an escape: once a container is the hover target,
-    // keep it as long as the DRAGGED ENTITY'S OWN CENTROID stays within its
-    // real (undragged) bounds plus a small fixed margin — not within the
-    // container's live preview-grown bounds. Checking against the preview
-    // bounds is circular here: they're grown specifically to include
-    // wherever the dragged entity currently is, so "is the dragged entity
-    // still inside" is trivially always true once triggered, no matter how
-    // far it's dragged away — which was the bug (impossible to drag
-    // something back out of a container). The margin is deliberately
-    // small and fixed, not "however big the preview grew" — a little slack
-    // so it doesn't flicker right at the exact edge, but the container
-    // snaps back the moment the centroid actually leaves.
+    // keep it as long as EITHER the cursor itself OR the dragged entity's
+    // own centroid stays within its real (undragged) bounds plus a small
+    // fixed margin — not within the container's live preview-grown bounds.
+    // Checking against the preview bounds is circular here: they're grown
+    // specifically to include wherever the dragged entity currently is, so
+    // "is the dragged entity still inside" is trivially always true once
+    // triggered, no matter how far it's dragged away — which was the bug
+    // (impossible to drag something back out of a container). The margin is
+    // deliberately small and fixed, not "however big the preview grew" — a
+    // little slack so it doesn't flicker right at the exact edge, but the
+    // container snaps back once both the cursor and the centroid have left.
     let hoverTarget: Entity | null = null;
     if (state.hoverTargetId) {
       const current = graph.get(state.hoverTargetId);
       if (current) {
         const shrunk = effectiveBounds(graph, current, { excludeId: entity.id, preview: null });
-        const withinX =
-          target.x >= shrunk.x - shrunk.width / 2 - HOVER_EXIT_MARGIN &&
-          target.x <= shrunk.x + shrunk.width / 2 + HOVER_EXIT_MARGIN;
-        const withinY =
-          target.y >= shrunk.y - shrunk.height / 2 - HOVER_EXIT_MARGIN &&
-          target.y <= shrunk.y + shrunk.height / 2 + HOVER_EXIT_MARGIN;
-        if (withinX && withinY) {
+        if (withinBounds(point, shrunk, HOVER_EXIT_MARGIN) || withinBounds(target, shrunk, HOVER_EXIT_MARGIN)) {
           hoverTarget = current;
         }
       }
@@ -535,11 +540,17 @@ export function attachInteraction(
     if (!hoverTarget) {
       // excludeId only, no preview — a fresh candidate search intentionally
       // uses real (undragged) bounds: "would growing this box now catch the
-      // pointer" is circular for a box not yet hovered. Tested against the
-      // dragged entity's centroid too, for consistency with the sticky
-      // check above (same notion of "is this dragged thing over that box").
+      // pointer" is circular for a box not yet hovered. Tried against the
+      // cursor first — the user expects a drop target to light up the
+      // moment the cursor itself crosses into a container's boundary, not
+      // only once the dragged box's centroid (which can be well off-cursor,
+      // depending on where it was grabbed) gets there — falling back to the
+      // centroid so a box whose cursor has strayed outside but whose bulk
+      // still visually overlaps the container keeps activating it too.
       const dragCtx: DragContext = { excludeId: entity.id, preview: null };
-      hoverTarget = containerTarget(hitTest(graph, target, exclude, dragCtx));
+      hoverTarget =
+        containerTarget(hitTest(graph, point, exclude, dragCtx)) ??
+        containerTarget(hitTest(graph, target, exclude, dragCtx));
     }
 
     state.hoverTargetId = hoverTarget ? hoverTarget.id : null;
