@@ -6,7 +6,7 @@
 // logic in layout.ts.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
-import { PROCESSOR_KINDS, TRIGGERED_KINDS } from '../audio/graph';
+import { PROCESSOR_KINDS, TRIGGERED_KINDS, isEntityPlaying } from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds } from './layout';
 import type { DragContext, Point, Rect } from './layout';
 import type { InteractionState } from './interaction';
@@ -309,16 +309,26 @@ function drawPad(
     ctx.fill();
   }
 
-  // Small "play"-style triangle, subtle — enough to read as a button
-  // without competing with the id/kind labels underneath it.
+  // Small "play"-style triangle at rest, subtle — enough to read as a
+  // button without competing with the id/kind labels underneath it. Swaps
+  // to a "pause"-style two-bar icon while a 'sample' entity is actually
+  // playing (see audio/graph.ts's isEntityPlaying) — always false for the
+  // other TRIGGERED_KINDS, so their pad never shows this.
   ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-  ctx.beginPath();
   const s = radius * 0.5;
-  ctx.moveTo(bounds.x - s * 0.5, bounds.y - s * 0.7);
-  ctx.lineTo(bounds.x - s * 0.5, bounds.y + s * 0.7);
-  ctx.lineTo(bounds.x + s * 0.8, bounds.y);
-  ctx.closePath();
-  ctx.fill();
+  if (isEntityPlaying(entity.id)) {
+    const barWidth = s * 0.4;
+    const barHeight = s * 1.4;
+    ctx.fillRect(bounds.x - s * 0.6, bounds.y - barHeight / 2, barWidth, barHeight);
+    ctx.fillRect(bounds.x + s * 0.2, bounds.y - barHeight / 2, barWidth, barHeight);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(bounds.x - s * 0.5, bounds.y - s * 0.7);
+    ctx.lineTo(bounds.x - s * 0.5, bounds.y + s * 0.7);
+    ctx.lineTo(bounds.x + s * 0.8, bounds.y);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   const flashStart = interaction.triggerFlashes.get(entity.id);
   if (flashStart !== undefined) {
@@ -706,12 +716,14 @@ function drawBox(
   } else {
     // Just the kind, centered — no instance id (e.g. "bow-1"), which
     // named nothing a player needs while performing; the kind alone is
-    // enough to tell voices apart at a glance.
+    // enough to tell voices apart at a glance. entity.label overrides this
+    // for a kind where the kind name alone can't distinguish instances
+    // (e.g. 'sample' — see audio/entityGraph.ts's Entity.label).
     ctx.font = '10px monospace';
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(entity.kind, x, y);
+    ctx.fillText(entity.label ?? entity.kind, x, y);
   }
 
   ctx.restore();

@@ -11,6 +11,8 @@ import {
   getControlSetter,
   releaseEntity,
   triggerEntity,
+  isEntityPlaying,
+  stopEntity,
   PROCESSOR_KINDS,
   TRIGGERED_KINDS,
 } from '../audio/graph';
@@ -315,12 +317,22 @@ export function attachInteraction(
     // hit and can still become a drag if the pointer moves far enough, so
     // repositioning a triggered instrument from its own pad still works.
     if (TRIGGERED_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
-      triggerEntity(hit.id);
-      state.triggerFlashes.set(hit.id, performance.now());
-      // Gate-on for a press-and-hold envelope (see endPress's matching
-      // release) — a no-op release if this instrument has no envelope
-      // feature attached, so tracked unconditionally.
-      state.gatedId = hit.id;
+      // A long-running 'sample' already playing: this press means "stop it"
+      // rather than "retrigger" — the pad doubles as a pause button while
+      // sound is coming out of it (see ui/render.ts's drawPad for the
+      // matching play/pause icon swap). isEntityPlaying is always false for
+      // the other TRIGGERED_KINDS (short one-shots), so they always hit the
+      // normal trigger branch below.
+      if (isEntityPlaying(hit.id)) {
+        stopEntity(hit.id);
+      } else {
+        triggerEntity(hit.id);
+        state.triggerFlashes.set(hit.id, performance.now());
+        // Gate-on for a press-and-hold envelope (see endPress's matching
+        // release) — a no-op release if this instrument has no envelope
+        // feature attached, so tracked unconditionally.
+        state.gatedId = hit.id;
+      }
     } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see

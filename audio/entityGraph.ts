@@ -67,6 +67,13 @@ export interface Entity {
   // its popup's position/size are computed fresh each frame from its
   // owner's current bounds (ui/organelle.ts), not stored.
   expanded: boolean;
+
+  // Optional display override for ui/render.ts's box label, which otherwise
+  // just shows entity.kind — every 'sample' entity has kind 'sample' (the
+  // dropped file's actual audio data lives in audio/graph.ts's sample
+  // buffer registry, not here), so without this every dropped file would
+  // render as an indistinguishable "sample" box. Unset for every other kind.
+  label?: string;
 }
 
 export class EntityGraph {

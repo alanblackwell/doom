@@ -49,7 +49,30 @@ export function getControlSetter(
 // the graph is built. There's no event transport yet (ARCHITECTURE.md
 // §5.3) — this is the manual/interactive way to fire a hit until that
 // exists.
-export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal']);
+export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample']);
+
+// Below this actual playback time (buffer duration / current speed — see
+// the 'sample' case's registerTrigger), a pad hit layers a fresh voice on
+// top of whatever's already sounding (like kick/pluck/metal's short
+// one-shots); at or above it, the pad instead pauses/resumes a single
+// voice (see startPlayback/pausedOffset) — a slow doom-tempo drone-length
+// sample retriggering underneath itself reads as a mistake, not a deliberate
+// layered hit, where a short drum/foley sample retriggering fast is exactly
+// the point. Arbitrary but reasonable; tune by ear if it's ever wrong.
+const LONG_SAMPLE_SECONDS = 5;
+
+// A dropped audio file's decoded data, keyed by the entity id created for
+// it (see ui/sampleDrop.ts) — not entity.params, which is numbers-only.
+// Registered before the entity's nodes are built (either immediately, if
+// dropped while the engine is already running, or later by
+// buildFromEntityGraph on "start audio"), and read by createGenerator's
+// 'sample' case below. Persists across suspend/resume and across a docked
+// round-trip, the same as any other kind's node state.
+const sampleBuffers = new Map<string, AudioBuffer>();
+
+export function registerSampleBuffer(entityId: string, buffer: AudioBuffer): void {
+  sampleBuffers.set(entityId, buffer);
+}
 
 // Registered by createGenerator() for triggered kinds — one no-argument
 // function per entity that fires a single hit, reading whatever's currently
@@ -81,6 +104,32 @@ function registerRelease(entityId: string, release: () => void): void {
 
 export function releaseEntity(entityId: string): void {
   releasesByEntity.get(entityId)?.();
+}
+
+// Registered by createGenerator() only for the 'sample' kind (below) — the
+// other TRIGGERED_KINDS are short one-shots with nothing worth interrupting
+// mid-flight, but a dropped-in audio file can run long, so its pad doubles
+// as a stop button once playback has actually started (see
+// ui/interaction.ts's pad-press handling and isEntityPlaying just below).
+const stopsByEntity = new Map<string, () => void>();
+
+function registerStop(entityId: string, stop: () => void): void {
+  stopsByEntity.set(entityId, stop);
+}
+
+export function stopEntity(entityId: string): void {
+  stopsByEntity.get(entityId)?.();
+}
+
+// Which TRIGGERED_KINDS entities currently have sound actually playing —
+// only ever populated for 'sample' (below); kick/pluck/metal never add to
+// this, so isEntityPlaying is always false for them and ui/render.ts's pad
+// icon / ui/interaction.ts's pad-press handling fall back to their normal
+// always-triggers behavior unchanged.
+const playingEntities = new Set<string>();
+
+export function isEntityPlaying(entityId: string): boolean {
+  return playingEntities.has(entityId);
 }
 
 // Wall-clock (performance.now()) timing for an in-progress envelope, so
@@ -328,6 +377,142 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         level: 0.8,
         exposeFeedback: true,
       });
+    // A dropped-in audio file (ui/sampleDrop.ts) — click-to-fire like kick,
+    // not a drone, so it's in TRIGGERED_KINDS above. Unlike kick's synthesis,
+    // there's real per-instance data (the decoded buffer) to play back, and
+    // unlike the WASM voices' worklet ports, playbackRate is a native
+    // AudioParam — smoothly adjustable live on whichever instance is
+    // currently sounding, not just picked up fresh on the next trigger.
+    case 'sample': {
+      const maybeBuffer = sampleBuffers.get(entity.id);
+      // No buffer yet (shouldn't normally happen — ui/sampleDrop.ts
+      // registers it before the entity ever reaches the graph — but decode
+      // is async, so guard rather than throw and take the whole build down).
+      if (!maybeBuffer) return undefined;
+      // Rebound to a non-optional const: TS doesn't carry the narrowing
+      // above into the nested startPlayback() function declaration below.
+      const buffer: AudioBuffer = maybeBuffer;
+
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.8;
+
+      // The AudioBufferSourceNode currently playing, if any — a fresh node
+      // per segment (a WebAudio source can only ever be started once, and
+      // pausing means actually stopping it — there's no native pause/resume
+      // on an AudioBufferSourceNode). segmentStart{CtxTime,Offset}/segmentRate
+      // are what let offsetNow() below reconstruct "how far into the buffer
+      // is playback right now" — needed both to capture a pause point and to
+      // stay accurate across a live speed change mid-playback (playbackRate
+      // isn't constant across the segment in that case).
+      let current: AudioBufferSourceNode | null = null;
+      let segmentStartCtxTime = 0;
+      let segmentStartOffset = 0;
+      let segmentRate = entity.params.speed ?? 1;
+      // Buffer-seconds to resume from on the next trigger — set by the pad's
+      // stop/pause button (registerStop below) and consumed (reset to 0) by
+      // the very next trigger, so a trigger that isn't resuming a pause
+      // (the first play, or a retrigger while already playing) always starts
+      // from the beginning rather than replaying a stale pause point.
+      let pausedOffset = 0;
+
+      function offsetNow(): number {
+        if (!current) return pausedOffset;
+        return segmentStartOffset + (ctx.currentTime - segmentStartCtxTime) * segmentRate;
+      }
+
+      function startPlayback(offset: number): void {
+        const now = ctx.currentTime;
+        const rate = entity.params.speed ?? 1;
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.playbackRate.value = rate;
+        source.connect(level);
+        // Guards a paused-right-at-the-end race (offsetNow() landing at or
+        // past duration) — start() would otherwise reject an out-of-range
+        // offset; falling back to 0 just replays from the top.
+        const clamped = offset > 0 && offset < buffer.duration ? offset : 0;
+        source.start(now, clamped);
+        current = source;
+        segmentStartCtxTime = now;
+        segmentStartOffset = clamped;
+        segmentRate = rate;
+        playingEntities.add(entity.id);
+
+        source.addEventListener('ended', () => {
+          source.disconnect();
+          if (current === source) {
+            current = null;
+            playingEntities.delete(entity.id);
+          }
+        });
+      }
+
+      registerTrigger(entity.id, () => {
+        const rate = entity.params.speed ?? 1;
+        // Actual playback time at the current speed, not the buffer's raw
+        // duration — a file slowed to 0.2x plays 5x longer than its native
+        // length, and that's the "long/slow" behavior that should trigger,
+        // not the file's nominal duration.
+        const playbackSeconds = buffer.duration / rate;
+
+        if (playbackSeconds < LONG_SAMPLE_SECONDS) {
+          // Short hit (a drum/foley one-shot, typically) — always layers a
+          // fresh, independent voice on top of whatever's already sounding,
+          // same "click it again before the last hit fades" expectation
+          // kick/pluck/metal already have. Deliberately never touches
+          // current/pausedOffset — those belong to the single-voice
+          // pause/resume path below, for slow/long samples where
+          // overlapping playback wouldn't read as a deliberate retrigger.
+          // Never added to playingEntities either, so the pad never shows
+          // a pause icon or treats a press as "stop" for this kind of hit.
+          const now = ctx.currentTime;
+          const hit = ctx.createBufferSource();
+          hit.buffer = buffer;
+          hit.playbackRate.value = rate;
+          hit.connect(level);
+          hit.start(now);
+          hit.addEventListener('ended', () => hit.disconnect());
+          return;
+        }
+
+        // Long/slow — single voice, pause/resume via pausedOffset (see
+        // registerStop below and startPlayback's offset argument).
+        const resumeFrom = pausedOffset;
+        pausedOffset = 0;
+        // Replaces rather than layers, if something's already playing (e.g.
+        // an event-wired retrigger while this is mid-playback) — a sampler
+        // pad, not a polyphonic one.
+        current?.stop();
+        startPlayback(resumeFrom);
+      });
+
+      registerStop(entity.id, () => {
+        if (!current) return;
+        pausedOffset = offsetNow();
+        current.stop();
+      });
+
+      registerControls(entity.id, {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+        // Live on whichever instance is currently sounding — playbackRate is
+        // a native AudioParam, so this actually resamples in real time
+        // (audible pitch/speed change while it plays), not just picked up
+        // fresh on the next trigger. Checkpoints the offset bookkeeping
+        // first so offsetNow() (and thus a later pause) stays accurate
+        // across the rate change instead of assuming the old rate applied
+        // for the whole segment.
+        speed: (value) => {
+          if (current) {
+            segmentStartOffset = offsetNow();
+            segmentStartCtxTime = ctx.currentTime;
+            segmentRate = value;
+            current.playbackRate.setTargetAtTime(value, ctx.currentTime, 0.01);
+          }
+        },
+      });
+
+      return level;
+    }
     default:
       return undefined;
   }

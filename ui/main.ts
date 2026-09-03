@@ -11,6 +11,7 @@ import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import { attachInteraction, attachKeyboard, createInteractionState } from './interaction';
 import { attachClockPulse } from './clockPulse';
+import { attachSampleDrop } from './sampleDrop';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -361,6 +362,7 @@ const interaction = createInteractionState();
 attachInteraction(canvas, graph, interaction);
 attachKeyboard(graph, interaction);
 attachClockPulse('clock-1', interaction);
+attachSampleDrop(canvas, graph);
 
 // Two independent states: whether the engine/graph has been built at all
 // (one-time — worklets registered, WASM compiled, nodes created), and

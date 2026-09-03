@@ -113,6 +113,17 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
     // you're dialing in by ear rather than a fixed physical quantity.
     { param: 'feedbackFreq', label: 'squeal', min: 200, max: 3000, color: '#5ac8a0' },
   ],
+  // A dropped-in audio file (ui/sampleDrop.ts, audio/graph.ts's 'sample'
+  // case) — a TRIGGERED_KINDS one-shot like kick/pluck/metal above, not a
+  // drone: click its pad to play it from the start. speed reuses pitch's
+  // blue since it's the same "playback rate" knob a turntable/tape player
+  // has — raising it audibly raises pitch too, same physical coupling.
+  // Bottom end goes well below "half speed" (0.1x) so a normal recording
+  // drags down into doom/drone territory — deep, slow, pitched-down.
+  sample: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'speed', label: 'speed', min: 0.1, max: 4, color: '#5aa0c8' },
+  ],
   // A knob's own value — reuses the same dot+slider mechanism as every
   // other parameter (see ui/controls.ts), rather than needing bespoke
   // interaction code. Color matches the knob's rotating indicator (see
