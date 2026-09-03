@@ -36,6 +36,7 @@ import { scheduleSoon } from '../audio/transport';
 import { isOverDock, hitTestDockIcon } from './dock';
 import { isDockable, dockEntity } from './docking';
 import { applyPositionToMix, clearLevelOverride, markLevelOverridden } from './stereoMix';
+import { isTextureEditorActive } from './textureEditor';
 import {
   envelopeValuesFromHandle,
   hitTestFeatureDot,
@@ -224,6 +225,12 @@ export function attachInteraction(
   }
 
   canvas.addEventListener('pointerdown', (e) => {
+    // The texture crop/target editor (ui/textureEditor.ts) is effectively
+    // modal while open — it has its own independent pointer listeners on
+    // this same canvas, so normal selection/drag/wiring must do nothing
+    // at all rather than fight it for the same events.
+    if (isTextureEditorActive()) return;
+
     const point = canvasPoint(e);
 
     // An open envelope popup (ui/organelle.ts) sits visually on top of
@@ -351,6 +358,8 @@ export function attachInteraction(
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    if (isTextureEditorActive()) return;
+
     const point = canvasPoint(e);
 
     if (state.draggingHandle) {
@@ -655,6 +664,7 @@ export function attachInteraction(
 // keydown matching some entity's existing binding fires that entity's tap.
 export function attachKeyboard(graph: EntityGraph, state: InteractionState): void {
   window.addEventListener('keydown', (e) => {
+    if (isTextureEditorActive()) return; // modal — see the pointerdown/pointermove guards above
     if (e.metaKey || e.ctrlKey || e.altKey) return; // don't steal OS/browser shortcuts
 
     if (state.hoveredTapId) {

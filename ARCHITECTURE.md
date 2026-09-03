@@ -159,6 +159,104 @@ GPU work, so heavy redraws (many entities, complex textures) don't compete with
 the main thread — keep the main thread free for input handling and keep the audio
 thread (AudioWorklet) completely separate from both.
 
+### 4.3 User-customizable textures
+
+Drag an image file from the desktop onto the canvas to skin the app's own
+visuals — a texture underlay for either the whole canvas background or every
+box of a given entity **kind** (not per-instance; matches how `KIND_COLORS`/
+`controlSpecs.ts` already theme by kind). Two modules:
+
+- **`ui/textures.ts`** — the registry (`Map<TextureTarget, SavedTexture>`,
+  `TextureTarget` = `'canvas'` or a kind string) plus the pixel-adjustment
+  math, read by `ui/render.ts` wherever a box or the background is drawn. A
+  `SavedTexture` is an `HTMLImageElement`, an image-pixel crop window
+  (`TextureSourceRect` — resolution-independent, so it draws correctly
+  regardless of the target box's own on-screen size), and a
+  `TextureAdjustments` bundle (brightness/saturation/opacity, plus a hue
+  target + on/off toggle — see below).
+- **`ui/textureEditor.ts`** — the interactive crop/adjust/save-or-cancel
+  editor that opens on drop. Effectively modal while open: it registers its
+  own independent canvas pointer/wheel listeners, and `ui/interaction.ts`'s
+  own handlers each guard on `isTextureEditorActive()` and no-op entirely
+  rather than the two fighting over the same events.
+
+**Editor interaction model.** A crop rectangle lives in canvas-content screen
+space, always aspect-locked to whatever's currently targeted (the canvas's
+own aspect by default, or a targeted entity's `effectiveBounds` aspect —
+`ui/layout.ts`, not its raw `width`/`height`, since a box's actual footprint
+is often larger once a control-dot column or nested children are accounted
+for). What's framed inside the rect is described independently, in the
+source image's own pixel space, so panning/zooming never needs to touch the
+rect's own on-screen geometry. Handles:
+
+- Four corner handles resize the rect (aspect-locked, opposite corner
+  fixed).
+- Dragging the rect's edges (a band straddling each side, excluding the
+  corners) moves the whole rect without touching the framing.
+- Dragging inside the rect pans the framed image; a dedicated magnifying-
+  glass handle (top-left) zooms it, independent of the rect's own bounds —
+  both are clamped so the crop window can never show a gap past the image's
+  edges (a "cover"-fit minimum zoom).
+- A crosshair-reticle target handle starts at the rect's center; dragging it
+  over an entity (live hover preview, snapping the rect's aspect as it
+  passes over each candidate) and releasing sets that entity's kind as the
+  target, and the reticle stays at that entity's own center afterward — not
+  back at the rect — so it doubles as a persistent "here's what's targeted"
+  marker, grabbable from wherever it now rests to retarget.
+- Save (green tick) / cancel (red cross) icons sit just above the rect's top
+  right.
+
+The image preview renders at a fixed reduced alpha while editing (not the
+adjustable opacity — see below) specifically so a target entity sitting
+under the crop window (the reticle's default resting spot) stays visible
+enough to aim at.
+
+**Adjustments — brightness/saturation/opacity/hue.** Deliberately **not**
+`CanvasRenderingContext2D.filter` (`brightness()`/`contrast()`/`saturate()`):
+Safari's canvas filter support has real gaps beyond simple single-function
+cases — confirmed by testing, one function applied while chaining further
+ones in the same string silently no-opped. Instead, brightness/saturation/
+opacity/hue are applied by hand to raw pixel data
+(`getImageData`/`putImageData`, `ui/textures.ts`'s `applyAdjustments`) onto
+a small reusable offscreen scratch canvas, then composited onto whatever's
+actually being drawn to (the editor's live preview, a per-kind box, or the
+canvas background) — `getImageData`/`putImageData` is about as universally
+supported as canvas gets, so this sidesteps the gap entirely rather than
+working around one browser's specific version of it.
+
+Four subtle, textless side sliders (opacity above brightness on the left,
+saturation above hue on the right; a tiny round on/off toggle between
+saturation and hue) drive this live. Hue is the odd one out: rather than a
+`1 = unchanged` multiplier, it's a color-wheel position (0-359°) that pulls
+nearby pixels toward a synthesized, fully-saturated version of itself at
+each pixel's own lightness — weighted by how close the pixel's *own* hue
+already is (a raised-cosine falloff), and, critically, blending **toward** a
+target color rather than scaling existing chroma **outward**, so it can
+still introduce color into an already fully-desaturated (achromatic) pixel,
+where a pure "boost saturation" approach structurally can't (scaling zero
+chroma by anything is still zero). Applied after the saturation adjustment,
+not before, so pulling saturation down first and then hue-boosting produces
+a duotone/colorize effect — at zero saturation, hue-boosting the whole image
+renders it entirely in varying *lightness* of the selected hue rather than
+staying grey. Since hue has no neutral value the way the other three do
+(every hue selects *some* color to favor), it needs the explicit toggle,
+defaulting off.
+
+**Applying a saved texture.** A `'canvas'`-target texture replaces the flat
+background fill, stretched to cover the drawing buffer (behind an
+unconditional opaque base fill first, so a texture saved with opacity < 1
+composites against a stable backdrop rather than the previous frame's
+stale pixels). A kind-target texture replaces that kind's box fill (the
+procedural gradient, or the hollow "filter" outline) entirely in `drawBox` —
+its own alpha channel is what shows through, nothing else is drawn under it,
+so a texture with transparent regions can redefine a box's visible
+silhouette (e.g. reshaping a filter's outline), not just recolor the usual
+rect. This is visual only: hit-testing/containment (`ui/layout.ts`) stays
+rectangular regardless of a texture's own alpha shape — a deliberate
+simplification, not a bug, since redoing hit-testing against arbitrary
+pixel masks would touch wire endpoints, control-dot positions, and drag-
+target detection throughout the interaction layer.
+
 ## 5. Audio Engine
 
 ### 5.1 Native Web Audio nodes

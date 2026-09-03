@@ -13,6 +13,7 @@ import { attachInteraction, attachKeyboard, createInteractionState } from './int
 import { attachClockPulse } from './clockPulse';
 import { attachSampleDrop } from './sampleDrop';
 import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
+import { attachTextureEditor } from './textureEditor';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -361,6 +362,11 @@ window.addEventListener('resize', resize);
 resize();
 
 const interaction = createInteractionState();
+// Registered before attachInteraction: while the texture editor is open it
+// gates ui/interaction.ts's own handlers off entirely (isTextureEditorActive
+// — see ui/textureEditor.ts's comment), but registering it first keeps
+// startup order matching "the modal owns the canvas first."
+attachTextureEditor(canvas, graph);
 attachInteraction(canvas, graph, interaction);
 attachKeyboard(graph, interaction);
 attachClockPulse('clock-1', interaction);

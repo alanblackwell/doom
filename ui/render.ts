@@ -33,6 +33,9 @@ import { drawDock } from './dock';
 import { drawPopup, drawPorthole } from './organelle';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
+import { drawAdjustedTexture, getTexture } from './textures';
+import type { SavedTexture } from './textures';
+import { drawTextureEditor } from './textureEditor';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
 // resting at its center (see drawControls), a little lighter than the
@@ -644,6 +647,39 @@ function drawWires(
   }
 }
 
+// Draws a saved texture's crop window (ui/textures.ts) stretched to fill
+// an entity's box rect — its own alpha channel is what shows through
+// (nothing else is drawn under it here), so transparent regions of the
+// source image reveal whatever's already on the canvas beneath the box,
+// which is what gives a customized texture the ability to redefine the
+// box's visible silhouette rather than just recoloring the usual rect.
+function drawTexturedFill(
+  ctx: CanvasRenderingContext2D,
+  texture: SavedTexture,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): void {
+  const { image, sourceRect, adjustments } = texture;
+  ctx.save();
+  // Opacity applied directly here (unlike ui/textureEditor.ts's own live
+  // preview, which multiplies it with a fixed visibility alpha that only
+  // matters while editing) — brightness/hue/saturation via
+  // drawAdjustedTexture, which isolates the filtered draw onto its own
+  // scratch canvas rather than combining ctx.filter with this globalAlpha
+  // in the same pass.
+  ctx.globalAlpha = adjustments.opacity;
+  drawAdjustedTexture(
+    ctx,
+    image,
+    sourceRect,
+    { x: x - w / 2, y: y - h / 2, width: w, height: h },
+    adjustments
+  );
+  ctx.restore();
+}
+
 function drawBox(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
@@ -662,6 +698,11 @@ function drawBox(
   // corner that stays clear once contents grow the box, rather than a
   // centered label that would get buried under whatever's dropped in.
   const isFilter = PROCESSOR_KINDS.has(entity.kind);
+  // A user-customized texture (ui/textureEditor.ts) replaces the fill AND
+  // the jittered-rect outline below — its own alpha channel defines the
+  // visible silhouette (e.g. reshaping a filter's outline boundary),
+  // rather than being clipped to the same rectangle every other kind uses.
+  const texture = getTexture(entity.kind);
 
   ctx.save();
 
@@ -675,9 +716,18 @@ function drawBox(
     ctx.shadowOffsetY = 2;
   }
 
-  jitteredRectPath(ctx, x, y, w, h, entity.seed);
-
-  if (isFilter) {
+  if (texture) {
+    drawTexturedFill(ctx, texture, x, y, w, h);
+    ctx.shadowColor = 'transparent';
+    if (flags.selected || flags.dropTarget) {
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 2.5;
+      if (flags.dropTarget) ctx.setLineDash([6, 4]);
+      ctx.strokeRect(x - w / 2, y - h / 2, w, h);
+      ctx.setLineDash([]);
+    }
+  } else if (isFilter) {
+    jitteredRectPath(ctx, x, y, w, h, entity.seed);
     ctx.shadowColor = 'transparent';
     ctx.lineWidth = flags.selected || flags.dropTarget ? 2.5 : 1.5;
     // A near-black edge (the plain-source default below) would be nearly
@@ -690,6 +740,7 @@ function drawBox(
     ctx.stroke();
     ctx.setLineDash([]);
   } else {
+    jitteredRectPath(ctx, x, y, w, h, entity.seed);
     const gradient = ctx.createRadialGradient(x, y - h * 0.2, w * 0.1, x, y, w * 0.7);
     // Nested boxes read as recessed layers — each depth level a touch darker.
     const shade = Math.max(0, 1 - depth * 0.12);
@@ -811,8 +862,30 @@ export function renderFrame(
   interaction: InteractionState,
   now: number
 ): void {
+  // Always an opaque base fill first — canvas content otherwise persists
+  // frame to frame, so a texture with opacity < 1 (see ui/textures.ts's
+  // TextureAdjustments) would blend with whatever was drawn last frame
+  // (ghosting/trails) rather than a stable backdrop if drawn alone.
   ctx.fillStyle = '#111';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // A user-customized 'canvas' texture (ui/textureEditor.ts) then replaces
+  // that flat fill, stretched to cover the full drawing buffer, with its
+  // own brightness/hue/saturation/opacity adjustments applied.
+  const canvasTexture = getTexture('canvas');
+  if (canvasTexture) {
+    const { image, sourceRect, adjustments } = canvasTexture;
+    ctx.save();
+    ctx.globalAlpha = adjustments.opacity;
+    drawAdjustedTexture(
+      ctx,
+      image,
+      sourceRect,
+      { x: 0, y: 0, width: canvas.width, height: canvas.height },
+      adjustments
+    );
+    ctx.restore();
+  }
 
   // Built once per frame so every effectiveBounds() call below sees the
   // same live drag state — the dragged entity excluded from wherever it
@@ -914,10 +987,15 @@ export function renderFrame(
   // stays unwashed and fully legible.
   drawMixModificationOverlay(ctx, canvas);
 
-  // Topmost of all — a fixed HUD panel pinned to the viewport's right edge
-  // (see ui/dock.ts), not part of the scrollable canvas content, so it
-  // always sits in front regardless of what's been scrolled underneath it.
+  // A fixed HUD panel pinned to the viewport's right edge (see ui/dock.ts),
+  // not part of the scrollable canvas content, so it always sits in front
+  // regardless of what's been scrolled underneath it.
   drawDock(ctx, canvas, graph, interaction, now);
+
+  // Absolute topmost, over the dock included — the texture crop/target
+  // editor (ui/textureEditor.ts) is effectively modal while open, so it
+  // draws in front of everything else on the page.
+  drawTextureEditor(ctx, canvas, graph);
 }
 
 function drawDraggedSubtree(
