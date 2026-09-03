@@ -294,15 +294,22 @@ function clampToCoverage(): void {
   state.imageCenterY = clamp(state.imageCenterY, halfSrcH, state.image.naturalHeight - halfSrcH);
 }
 
-// Opens the editor for a freshly-decoded dropped image, centered exactly on
-// the drop point, with the canvas's own (viewport) aspect ratio as the
-// default target. If a rect of the usual default size centered there would
-// extend past the visible viewport on any side, it's shrunk (preserving
-// aspect, still centered on the drop point) until it fits entirely within
-// view — the image's own zoom (coverScale) is derived from the crop rect's
-// final size, so it scales down to match automatically.
+// Opens the editor for a freshly-decoded dropped image. If the drop lands
+// directly on an entity's box, it's targeted immediately (same rule as
+// dragging the target handle onto it by hand afterward — see
+// targetAndAspectFor/applyHoverTarget), with the crop rect matching that
+// entity's own on-screen footprint and centered on it, reticle included —
+// no extra retargeting step needed. Otherwise it falls back to the
+// previous behavior: the default 'canvas' target, the canvas's own
+// (viewport) aspect ratio, centered exactly on the drop point. Either way,
+// if a rect of the desired size centered there would extend past the
+// visible viewport on any side, it's shrunk (preserving aspect, still
+// centered on the same point) until it fits entirely within view — the
+// image's own zoom (coverScale) is derived from the crop rect's final
+// size, so it scales down to match automatically.
 export function openTextureEditor(
   canvas: HTMLCanvasElement,
+  graph: EntityGraph,
   image: HTMLImageElement,
   objectUrl: string,
   dropPoint: Point,
@@ -311,26 +318,34 @@ export function openTextureEditor(
 ): void {
   const viewport = canvas.parentElement as HTMLElement;
   const { width: vw, height: vh } = viewportSize(canvas);
-  const aspect = vw > 0 && vh > 0 ? vw / vh : 1;
 
-  const desiredHeight = Math.max(MIN_CROP_SIZE, Math.min(vw, vh) * 0.5);
+  const hitEntity = hitTest(graph, dropPoint, new Set());
+  const { target, aspect, anchor } = targetAndAspectFor(canvas, graph, hitEntity);
+  const center = anchor ?? dropPoint;
+  const targetEntityId = anchor && hitEntity ? hitEntity.id : null;
+  const entityBounds = targetEntityId ? effectiveBounds(graph, hitEntity!) : null;
+
+  const desiredHeight = entityBounds
+    ? Math.max(MIN_CROP_SIZE, entityBounds.height)
+    : Math.max(MIN_CROP_SIZE, Math.min(vw, vh) * 0.5);
   const desiredWidth = desiredHeight * aspect;
 
-  // Distance from the drop point to the nearest viewport edge on each
-  // axis — the limiting factor for how big a rect centered there can be
-  // without spilling past that edge. A drop always lands within the
-  // visible viewport (it's wherever the cursor was), so both distances are
-  // always >= 0.
+  // Distance from the crop rect's intended center to the nearest viewport
+  // edge on each axis — the limiting factor for how big a rect centered
+  // there can be without spilling past that edge. A drop always lands
+  // within the visible viewport (it's wherever the cursor was), and a hit
+  // entity's own center is necessarily on-screen too, so both distances
+  // are always >= 0.
   const viewLeft = viewport.scrollLeft;
   const viewTop = viewport.scrollTop;
-  const distX = Math.min(dropPoint.x - viewLeft, viewLeft + vw - dropPoint.x);
-  const distY = Math.min(dropPoint.y - viewTop, viewTop + vh - dropPoint.y);
+  const distX = Math.min(center.x - viewLeft, viewLeft + vw - center.x);
+  const distY = Math.min(center.y - viewTop, viewTop + vh - center.y);
   const maxWidth = Math.min(2 * distX, 2 * aspect * distY);
 
   const width = Math.max(MIN_CROP_SIZE, Math.min(desiredWidth, maxWidth));
   const height = width / aspect;
 
-  const cropRect: Rect = { x: dropPoint.x, y: dropPoint.y, width, height };
+  const cropRect: Rect = { x: center.x, y: center.y, width, height };
 
   state = {
     image,
@@ -340,14 +355,14 @@ export function openTextureEditor(
     copyright: defaultCopyright(fileName),
     cropRect,
     aspect,
-    target: 'canvas',
+    target,
     imageCenterX: image.naturalWidth / 2,
     imageCenterY: image.naturalHeight / 2,
     imageScale: coverScale(cropRect, image),
     adjustments: { ...DEFAULT_ADJUSTMENTS },
     drag: null,
     hoverTargetEntityId: null,
-    targetAnchor: null,
+    targetAnchor: anchor,
   };
 }
 
@@ -647,7 +662,7 @@ export function attachTextureEditor(canvas: HTMLCanvasElement, graph: EntityGrap
     const img = new Image();
     img.onload = () => {
       file.arrayBuffer().then((buf) => {
-        openTextureEditor(canvas, img, url, dropPoint, file.name, new Uint8Array(buf));
+        openTextureEditor(canvas, graph, img, url, dropPoint, file.name, new Uint8Array(buf));
       });
     };
     img.onerror = () => {
