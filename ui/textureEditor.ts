@@ -26,6 +26,7 @@ import { viewportSize } from './stereoMix';
 import { drawAdjustedTexture, setTexture, DEFAULT_ADJUSTMENTS } from './textures';
 import type { TextureAdjustments, TextureTarget } from './textures';
 import { ACCENT } from './palette';
+import { defaultCopyright } from './attribution';
 
 type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se';
 // Excludes hueEnabled — a boolean toggle, not a slider value (see the
@@ -43,6 +44,9 @@ type EditorDrag =
 interface EditorState {
   image: HTMLImageElement;
   objectUrl: string;
+  fileName: string; // original dropped filename — carried into the saved SavedTexture (ui/textures.ts)
+  fileBytes: Uint8Array; // original file bytes, likewise
+  copyright: string; // defaulted once at drop time (ui/attribution.ts), fixed for this editor session
   cropRect: Rect; // editor/screen space, center-based (see layout.ts's Rect)
   aspect: number; // width/height currently locked to — see retarget()
   target: TextureTarget;
@@ -301,7 +305,9 @@ export function openTextureEditor(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement,
   objectUrl: string,
-  dropPoint: Point
+  dropPoint: Point,
+  fileName: string,
+  fileBytes: Uint8Array
 ): void {
   const viewport = canvas.parentElement as HTMLElement;
   const { width: vw, height: vh } = viewportSize(canvas);
@@ -329,6 +335,9 @@ export function openTextureEditor(
   state = {
     image,
     objectUrl,
+    fileName,
+    fileBytes,
+    copyright: defaultCopyright(fileName),
     cropRect,
     aspect,
     target: 'canvas',
@@ -415,6 +424,9 @@ function commitSave(): void {
       height: srcH,
     },
     adjustments: { ...state.adjustments },
+    fileName: state.fileName,
+    fileBytes: state.fileBytes,
+    copyright: state.copyright,
   });
   closeEditor();
 }
@@ -633,7 +645,11 @@ export function attachTextureEditor(canvas: HTMLCanvasElement, graph: EntityGrap
     const dropPoint = canvasPoint(canvas, e);
     const url = URL.createObjectURL(file);
     const img = new Image();
-    img.onload = () => openTextureEditor(canvas, img, url, dropPoint);
+    img.onload = () => {
+      file.arrayBuffer().then((buf) => {
+        openTextureEditor(canvas, img, url, dropPoint, file.name, new Uint8Array(buf));
+      });
+    };
     img.onerror = () => {
       console.error(`Failed to load dropped image "${file.name}"`);
       URL.revokeObjectURL(url);

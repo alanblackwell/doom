@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "target": "canvas",
+      "file": "underground-map.png",
+      "sourceRect": {
+        "x": 45.753488372093045,
+        "y": 0,
+        "width": 634.4930232558139,
+        "height": 588
+      },
+      "adjustments": {
+        "brightness": 0.7857142857142857,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1.3214285714285714,
+        "opacity": 1
+      },
+      "copyright": "Uploaded by user Alan Blackwell on 2026-09-03 as file underground-map.png"
+    },
+    {
+      "target": "kick",
+      "file": "goodman-cover.png",
+      "sourceRect": {
+        "x": 156.33591042388696,
+        "y": 0,
+        "width": 359.66408957611304,
+        "height": 321.2999200213277
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Uploaded by user Alan Blackwell on 2026-09-03 as file goodman-cover.png"
+    }
+  ]
+}

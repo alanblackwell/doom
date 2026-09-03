@@ -233,6 +233,19 @@ export interface SavedTexture {
   image: HTMLImageElement;
   sourceRect: TextureSourceRect;
   adjustments: TextureAdjustments;
+  // The remaining three fields exist so a texture can be re-exported as part
+  // of an appearance pack (ui/appearancePack.ts) byte-identical to how it
+  // was uploaded, and with its attribution intact — parallel to how
+  // ui/sampleDrop.ts's LoadedSampleFile keeps a sample's original bytes
+  // alongside its decoded AudioBuffer for the same reason.
+  fileName: string; // original uploaded/imported filename, used as the zip entry name on export
+  fileBytes: Uint8Array; // untouched original file bytes (not a re-encode of `image`)
+  // Free-text attribution, defaulted once at upload time (see
+  // ui/attribution.ts) and thereafter carried through verbatim on every
+  // load/export round-trip — never regenerated — so a value hand-edited in
+  // an exported pack's manifest.json stays associated with this asset
+  // permanently, including into future re-exports.
+  copyright: string;
 }
 
 // 'canvas' for the whole-canvas background, or an entity kind string (e.g.
@@ -249,4 +262,11 @@ export function setTexture(target: TextureTarget, texture: SavedTexture): void {
 
 export function getTexture(target: TextureTarget): SavedTexture | undefined {
   return textures.get(target);
+}
+
+// Read by ui/appearancePack.ts to serialize every currently-applied texture
+// into an asset pack — a live view, not a copy, so it always reflects the
+// registry's current contents.
+export function allTextures(): ReadonlyMap<TextureTarget, SavedTexture> {
+  return textures;
 }

@@ -257,6 +257,40 @@ simplification, not a bug, since redoing hit-testing against arbitrary
 pixel masks would touch wire endpoints, control-dot positions, and drag-
 target detection throughout the interaction layer.
 
+### 4.4 Appearance packs — export, import, and default load
+
+The full set of currently-applied textures (`ui/textures.ts`'s registry) can
+be downloaded as a single **appearance pack** zip (`ui/appearancePack.ts`'s
+`exportAppearancePack`, wired to the "export appearance" button) and loaded
+back in two ways: dropping a previously-exported `.zip` onto the canvas
+(`attachAppearancePackDrop` — a third canvas drop listener alongside
+`ui/textureEditor.ts`'s image-drop and `ui/sampleDrop.ts`'s audio-drop, each
+checking its own file type and no-opping otherwise), or automatically at
+startup from `public/appearance/` — a plain Vite `public/` directory
+committed to the repo, so its contents are copied verbatim into the build
+and fetched at runtime from `/appearance/...` with no code changes needed to
+update the default skin (see `public/appearance/README.md`).
+
+A pack is `manifest.json` (which image file is applied to which target, its
+`TextureSourceRect` crop and `TextureAdjustments`, plus a `copyright` field)
+alongside one image file per texture — the original uploaded bytes,
+unmodified, so re-exporting is byte-identical to what was actually uploaded.
+
+**Attribution.** Each `SavedTexture` (`ui/textures.ts`) carries its original
+`fileName`/`fileBytes` plus a `copyright` string, defaulted once — at the
+moment an image is first dropped into the texture editor
+(`ui/textureEditor.ts`'s `commitSave`) — to `"Uploaded by user <name> on
+<date> as file <filename>"` (`ui/attribution.ts`). Every load and export path
+in `ui/appearancePack.ts` (zip import, default-pack fetch, re-export)
+carries whatever `copyright` string is already present straight through
+unexamined rather than regenerating it, so a value hand-edited directly in
+an exported pack's `manifest.json` — before it's committed to
+`public/appearance/`, say — stays permanently attached to that asset,
+including into any later re-export of an updated pack that still includes
+it. Dropping a *new* image onto a target replaces its texture outright, so
+that target's attribution resets to a fresh default for the new file — the
+old association was for the old asset, not the target itself.
+
 ## 5. Audio Engine
 
 ### 5.1 Native Web Audio nodes

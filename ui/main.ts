@@ -14,12 +14,14 @@ import { attachClockPulse } from './clockPulse';
 import { attachSampleDrop } from './sampleDrop';
 import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
 import { attachTextureEditor } from './textureEditor';
+import { attachAppearancePackDrop, exportAppearancePack, hasExportableAppearance, loadDefaultAppearance } from './appearancePack';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
 const ctx2d = canvas.getContext('2d')!;
 const startButton = document.querySelector<HTMLButtonElement>('#start-audio')!;
 const exportButton = document.querySelector<HTMLButtonElement>('#export-samples')!;
+const exportAppearanceButton = document.querySelector<HTMLButtonElement>('#export-appearance')!;
 
 // Demo composition: a sub-bass drone, a bowed-string voice, and an overdrive
 // pedal (sink+source — drag bass-1 or bow-1 onto it to route their audio
@@ -371,6 +373,15 @@ attachInteraction(canvas, graph, interaction);
 attachKeyboard(graph, interaction);
 attachClockPulse('clock-1', interaction);
 attachSampleDrop(canvas, graph);
+attachAppearancePackDrop(canvas);
+
+// The repo's committed default skin (public/appearance/, see
+// ui/appearancePack.ts), if any — applied whenever it resolves; renderFrame
+// picks up newly-set textures on its next frame same as any interactively-
+// saved one, so this doesn't need to block or sequence against draw() below.
+loadDefaultAppearance().catch((err) => {
+  console.error('Failed to load default appearance:', err);
+});
 
 // Two independent states: whether the engine/graph has been built at all
 // (one-time — worklets registered, WASM compiled, nodes created), and
@@ -437,12 +448,17 @@ exportButton.addEventListener('click', () => {
   exportSamplesZip(graph);
 });
 
+exportAppearanceButton.addEventListener('click', () => {
+  exportAppearancePack();
+});
+
 function draw(now: number): void {
   resize();
   // Cheap enough (a handful of entities, one Map lookup each) to just
   // recompute every frame rather than threading an update call through
   // every place a sample can be added/removed.
   exportButton.disabled = !hasExportableSamples(graph);
+  exportAppearanceButton.disabled = !hasExportableAppearance();
   renderFrame(ctx2d, canvas, graph, interaction, now);
   requestAnimationFrame(draw);
 }
