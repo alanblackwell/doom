@@ -32,7 +32,7 @@ import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
 import { ownerOf, popupRectFor, CLOSE_BUTTON_RADIUS } from './organelle';
 import { ACCENT } from './palette';
-import { flatMakesSense, sharpMakesSense } from './musicTheory';
+import { flatMakesSense, nearestStepForLetter, semitoneFromStep, sharpMakesSense } from './musicTheory';
 import { isBravuraReady } from './bravuraFont';
 import {
   ACCIDENTAL_WIDTH_SP,
@@ -43,6 +43,7 @@ import {
   LEGER_LINE_EXTENSION_SP,
   LEGER_LINE_THICKNESS_SP,
   NOTEHEAD_WIDTH_SP,
+  REST_QUARTER_HEIGHT_SP,
   REST_WIDTH_SP,
   STEM_DOWN_NW,
   STEM_THICKNESS_SP,
@@ -98,6 +99,316 @@ export function melodyStateFor(entityId: string): MelodyState {
     melodies.set(entityId, state);
   }
   return state;
+}
+
+// Notes AND rests are selectable (barlines aren't — there's nothing to
+// nudge, delete-and-reselect-sensibly, or dim/undim about a barline the way
+// there is for the other two).
+export type MelodySelectable = MelodyNoteItem | MelodyRestItem;
+
+function isSelectable(item: MelodyItem): item is MelodySelectable {
+  return item.kind === 'note' || item.kind === 'rest';
+}
+
+export interface MelodySelectionHit {
+  entityId: string;
+  item: MelodySelectable;
+}
+
+// The single "current" note-or-rest the Up/Down/Left/Right/Delete keyboard
+// shortcuts (ui/interaction.ts) operate on — one across the whole app, not
+// one per organelle, since there's exactly one "currently selected" concept
+// regardless of how many melody organelles happen to be open. Defaults to
+// whichever note was most recently created or moved (see selectItem's call
+// sites: addNoteAt, updateNotePitchDrag, the horizontal drag/merge paths,
+// mergeIntoTarget — a rest only ever becomes selected via explicit
+// navigation, Left/Right or Delete's own reselection, never "created or
+// moved" the way a note can be) — never set any other way, so it's always
+// either that, or null if nothing anywhere has been touched yet. Up/Down
+// (nudgePitch) only make sense for a note; ui/interaction.ts guards that
+// itself rather than this module refusing to hold a rest at all.
+let selectedItem: MelodySelectionHit | null = null;
+
+// Where the NEXT typed insertion (letter note, rest, or barline) goes —
+// right after this. Distinct from selectedItem because a barline isn't
+// itself selectable, but typing one should still move the insertion point
+// past it, so a run like "C D | E" lands as C, D, barline, E — not C, D, E,
+// barline with E inserted back before the barline just typed. Always kept
+// in sync with selectedItem (selectItem sets both) and additionally
+// advanced on its own by insertRestAfterCurrent/insertBarlineAfterCurrent
+// when they place a barline, which doesn't touch selectedItem at all.
+let insertionPoint: { entityId: string; item: MelodyItem } | null = null;
+
+function selectItem(entityId: string, item: MelodySelectable): void {
+  selectedItem = { entityId, item };
+  insertionPoint = { entityId, item };
+}
+
+export function getSelectedItem(): MelodySelectionHit | null {
+  return selectedItem;
+}
+
+// The item after which the next typed insertion should go, for `entityId`
+// — insertionPoint if it's still valid and belongs to this organelle,
+// otherwise `fallback` (always selectedItem's own item at every current
+// call site, since insertionPoint can only ever be stale, never point at a
+// different organelle's note while selectedItem points at this one — but
+// resolved defensively rather than assumed).
+function resolveInsertionAnchor(entityId: string, state: MelodyState, fallback: MelodyItem): MelodyItem {
+  if (insertionPoint && insertionPoint.entityId === entityId && state.items.includes(insertionPoint.item)) {
+    return insertionPoint.item;
+  }
+  return fallback;
+}
+
+// Adjusts scrollIndex by the minimum amount needed to bring visible-index
+// `index` into view — left if it's above the current window, right if
+// below, unchanged if already visible. Shared by selectAdjacentItem (so
+// arrow-key navigation never leaves the selection scrolled out of sight)
+// and could equally serve any other future "make sure this item is
+// visible" need.
+function scrollToShow(state: MelodyState, index: number): void {
+  if (index < state.scrollIndex) {
+    state.scrollIndex = index;
+  } else if (index >= state.scrollIndex + VISIBLE_SLOTS) {
+    state.scrollIndex = index - VISIBLE_SLOTS + 1;
+  }
+  clampScroll(state);
+}
+
+// Moves the current selection to the previous/next note-or-rest in the
+// same organelle's sequence (ui/interaction.ts's Left/Right arrow keys) —
+// barlines are skipped over since they're not selectable. If there's
+// nothing further in that direction, 'previous' is simply a no-op, but
+// 'next' still scrolls one slot further right instead — with no note/rest
+// left to select, this is what lets repeatedly pressing Right reveal the
+// always-available blank working area past the end (TODO.md's melody
+// organelle spec), without changing what's selected.
+export function selectAdjacentItem(direction: 'previous' | 'next'): void {
+  if (!selectedItem) return;
+  const { entityId, item } = selectedItem;
+  const state = melodyStateFor(entityId);
+  const index = state.items.indexOf(item);
+  if (index === -1) return;
+
+  const step = direction === 'next' ? 1 : -1;
+  for (let i = index + step; i >= 0 && i < state.items.length; i += step) {
+    const candidate = state.items[i];
+    if (isSelectable(candidate)) {
+      selectItem(entityId, candidate);
+      scrollToShow(state, i);
+      return;
+    }
+  }
+  if (direction === 'next') {
+    state.scrollIndex += 1;
+    clampScroll(state);
+  }
+}
+
+// getSelectedItem(), but null if that item's own organelle popup isn't
+// currently open — closing a popup shouldn't leave its last selection
+// silently actionable by the Up/Down/Left/Right/Delete/letter-key
+// shortcuts below while nothing on screen shows what's being changed.
+// ui/interaction.ts's keydown handler gates all of them through this
+// rather than the raw getSelectedItem().
+export function activeSelectedItem(graph: EntityGraph): MelodySelectionHit | null {
+  if (!selectedItem) return null;
+  const entity = graph.get(selectedItem.entityId);
+  return entity?.expanded ? selectedItem : null;
+}
+
+// Removes the current selection from its sequence (the Delete/Backspace
+// keyboard shortcut, ui/interaction.ts). The next note-or-rest in the
+// sequence becomes the new selection, or the previous one if it was the
+// last — mirroring selectAdjacentItem's own scope — so deleting a run of
+// items moves forward through the sequence naturally. Clears the selection
+// entirely if none is left.
+export function deleteSelectedItem(): void {
+  if (!selectedItem) return;
+  const { entityId, item } = selectedItem;
+  const state = melodyStateFor(entityId);
+  const index = state.items.indexOf(item);
+  if (index === -1) return;
+
+  state.items.splice(index, 1);
+  clampScroll(state);
+
+  for (let i = index; i < state.items.length; i++) {
+    const candidate = state.items[i];
+    if (isSelectable(candidate)) {
+      selectItem(entityId, candidate);
+      scrollToShow(state, i);
+      return;
+    }
+  }
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = state.items[i];
+    if (isSelectable(candidate)) {
+      selectItem(entityId, candidate);
+      scrollToShow(state, i);
+      return;
+    }
+  }
+  selectedItem = null;
+}
+
+function noteSemitone(note: MelodyNoteItem): number {
+  const accidentalOffset = note.accidental === 'sharp' ? 1 : note.accidental === 'flat' ? -1 : 0;
+  return semitoneFromStep(note.step) + accidentalOffset;
+}
+
+// The pitch reference for a new letter note (TODO.md's spec): `current`'s
+// own pitch if it's a note, or — since a rest carries no pitch of its own —
+// the most recent actual note BEFORE it in the sequence, searching
+// backward from wherever `current` sits. Falls back to middle C (semitone
+// 0) if there's no earlier note at all, matching insertFirstLetterNote's
+// own default for a from-scratch sequence.
+function referenceSemitoneFor(state: MelodyState, current: MelodySelectable): number {
+  if (current.kind === 'note') return noteSemitone(current);
+  const index = state.items.indexOf(current);
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = state.items[i];
+    if (candidate.kind === 'note') return noteSemitone(candidate);
+  }
+  return 0;
+}
+
+// Adds a new NATURAL note (no accidental) named by `letterIdx` (0=C, 1=D,
+// ... 6=B) immediately after the current selection, with the same
+// duration, and selects it — the A-G letter-key shortcuts
+// (ui/interaction.ts). Its octave is chosen so its pitch lands as close as
+// possible to the current note's own actual (semitone) pitch
+// (nearestStepForLetter — always within six semitones either way, per
+// TODO.md's melody organelle spec), rather than defaulting to some fixed
+// octave that could land however far away.
+export function insertLetterNoteAfterSelection(letterIdx: number): void {
+  if (!selectedItem) return;
+  const { entityId, item: current } = selectedItem;
+  const state = melodyStateFor(entityId);
+  const anchorIndex = state.items.indexOf(resolveInsertionAnchor(entityId, state, current));
+  if (anchorIndex === -1) return;
+
+  const referenceSemitone = referenceSemitoneFor(state, current);
+  const step = nearestStepForLetter(letterIdx, referenceSemitone);
+
+  const note: MelodyNoteItem = { kind: 'note', step, accidental: null, durationIndex: current.durationIndex, dots: 0 };
+  const newIndex = anchorIndex + 1;
+  state.items.splice(newIndex, 0, note);
+  selectItem(entityId, note);
+  if (newIndex === state.items.length - 1) {
+    scrollToEnd(state);
+  } else {
+    scrollToShow(state, newIndex);
+  }
+}
+
+// The A-G letter-key shortcut's bootstrapping case (TODO.md's spec): "if a
+// letter key is pressed before any other notes have been entered" — seeds
+// an EMPTY, currently-expanded melody organelle with a single crotchet at
+// the given letter's own pitch closest to MIDDLE C (semitone 0, rather than
+// insertLetterNoteAfterSelection's "closest to the current note," since
+// there is no current note yet), selecting it. Picks the first expanded-
+// and-empty organelle found — there's normally only one melody popup open
+// at a time, so this doesn't need to disambiguate further. Returns false
+// (does nothing) if no such organelle exists, so ui/interaction.ts's
+// keydown handler can fall through to tap-binding as usual.
+export function insertFirstLetterNote(graph: EntityGraph, letterIdx: number): boolean {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'feature' || entity.kind !== 'melody' || !entity.expanded) continue;
+    const state = melodyStateFor(entity.id);
+    if (state.items.length > 0) continue;
+
+    const step = nearestStepForLetter(letterIdx, 0);
+    const note: MelodyNoteItem = { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX, dots: 0 };
+    state.items.push(note);
+    selectItem(entity.id, note);
+    return true;
+  }
+  return false;
+}
+
+// The closest duration this app's model can actually represent to
+// `wholeNotes` — rests have no dots field (unlike notes), so this only
+// searches the plain (undotted) durations. Exact for every "fill to the
+// next beat" case except a dotted semiquaver or demisemiquaver's own rest
+// (restToFillBeat below), where the exact gap would need a dotted rest;
+// those get the nearest plain approximation instead rather than extending
+// the rest data model/rendering just for that rare case.
+function nearestRepresentableRestDuration(wholeNotes: number): number {
+  let best = DEFAULT_DURATION_INDEX;
+  let bestDiff = Infinity;
+  for (let durationIndex = MIN_DURATION_INDEX; durationIndex <= MAX_DURATION_INDEX; durationIndex++) {
+    const diff = Math.abs(durationInWholeNotes(durationIndex) - wholeNotes);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = durationIndex;
+    }
+  }
+  return best;
+}
+
+// "The rest should be the duration needed to get up to the next whole
+// beat" (TODO.md's spec, for a dotted current note) — a beat is a crotchet
+// (this app's implicit beat unit elsewhere, e.g. VISIBLE_SLOTS' own "about
+// two bars" sizing assumes four crotchet beats per bar). If the dotted
+// note's own duration already lands exactly on a beat boundary (e.g. a
+// dotted minim is exactly 3 beats), "the next" one is a full beat further
+// on, not zero — "next" means strictly ahead of where the note ends.
+function restToFillBeat(durationIndex: number, dots: number): number {
+  const beats = 4 * durationInWholeNotes(durationIndex, dots);
+  const fractional = beats - Math.floor(beats);
+  const restBeats = fractional > 1e-9 ? 1 - fractional : 1;
+  return nearestRepresentableRestDuration(restBeats / 4);
+}
+
+// The Space keyboard shortcut (ui/interaction.ts): inserts a rest after
+// the current insertion point (resolveInsertionAnchor — so a rest typed
+// right after an already-typed note/rest/barline lands after THAT, not
+// back next to whichever note is still "current" for Up/Down/Left/Right
+// purposes). Duration matches the current note's own value, unless that
+// note is dotted, in which case the rest instead fills the gap up to the
+// next whole beat (restToFillBeat) — see TODO.md's spec for both rules.
+export function insertRestAfterCurrent(): void {
+  if (!selectedItem) return;
+  const { entityId, item: current } = selectedItem;
+  const state = melodyStateFor(entityId);
+  const anchorIndex = state.items.indexOf(resolveInsertionAnchor(entityId, state, current));
+  if (anchorIndex === -1) return;
+
+  const durationIndex =
+    current.kind === 'note' && current.dots > 0 ? restToFillBeat(current.durationIndex, current.dots) : current.durationIndex;
+  const rest: MelodyRestItem = { kind: 'rest', durationIndex };
+  const newIndex = anchorIndex + 1;
+  state.items.splice(newIndex, 0, rest);
+  insertionPoint = { entityId, item: rest }; // advances the insertion point WITHOUT touching selectedItem — rests aren't selectable
+  if (newIndex === state.items.length - 1) {
+    scrollToEnd(state);
+  } else {
+    scrollToShow(state, newIndex);
+  }
+}
+
+// The `|` keyboard shortcut (ui/interaction.ts): inserts a barline after
+// the current insertion point, same placement logic as
+// insertRestAfterCurrent — no duration to compute, a barline just marks a
+// position in the sequence.
+export function insertBarlineAfterCurrent(): void {
+  if (!selectedItem) return;
+  const { entityId, item: current } = selectedItem;
+  const state = melodyStateFor(entityId);
+  const anchorIndex = state.items.indexOf(resolveInsertionAnchor(entityId, state, current));
+  if (anchorIndex === -1) return;
+
+  const barline: MelodyBarlineItem = { kind: 'barline' };
+  const newIndex = anchorIndex + 1;
+  state.items.splice(newIndex, 0, barline);
+  insertionPoint = { entityId, item: barline };
+  if (newIndex === state.items.length - 1) {
+    scrollToEnd(state);
+  } else {
+    scrollToShow(state, newIndex);
+  }
 }
 
 // Keeps scrollIndex sane after any change to item count — clamped rather
@@ -189,8 +500,10 @@ function maxScrollFor(itemCount: number): number {
 
 // `index`/`step` are already resolved against the layout in effect at click
 // time (see hitTestMelodyPopup's 'addNote' hit).
-export function addNoteAt(state: MelodyState, index: number, step: number): void {
-  state.items.splice(index, 0, { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX, dots: 0 });
+export function addNoteAt(entityId: string, state: MelodyState, index: number, step: number): void {
+  const note: MelodyNoteItem = { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX, dots: 0 };
+  state.items.splice(index, 0, note);
+  selectItem(entityId, note); // most recently created — see getSelectedItem's own comment
   if (index === state.items.length - 1) {
     // Appended at the tail (as opposed to inserted somewhere in the middle
     // of the existing sequence) — same "keep at least one blank slot
@@ -216,13 +529,17 @@ function scrollToEnd(state: MelodyState): void {
   clampScroll(state);
 }
 
-export function insertRestAfterLast(state: MelodyState): void {
-  state.items.push({ kind: 'rest', durationIndex: DEFAULT_DURATION_INDEX });
+export function insertRestAfterLast(entityId: string, state: MelodyState): void {
+  const rest: MelodyRestItem = { kind: 'rest', durationIndex: DEFAULT_DURATION_INDEX };
+  state.items.push(rest);
+  insertionPoint = { entityId, item: rest }; // so a following typed insertion continues from here, not from wherever selectedItem still is
   scrollToEnd(state);
 }
 
-export function insertBarlineAfterLast(state: MelodyState): void {
-  state.items.push({ kind: 'barline' });
+export function insertBarlineAfterLast(entityId: string, state: MelodyState): void {
+  const barline: MelodyBarlineItem = { kind: 'barline' };
+  state.items.push(barline);
+  insertionPoint = { entityId, item: barline };
   scrollToEnd(state);
 }
 
@@ -281,6 +598,7 @@ function quantizeVerticalDrag(
 }
 
 export function updateNotePitchDrag(
+  entityId: string,
   item: MelodyNoteItem,
   startStep: number,
   startAccidental: Accidental,
@@ -289,6 +607,46 @@ export function updateNotePitchDrag(
   const { stepDelta, accidental } = quantizeVerticalDrag(deltaY, startAccidental, startStep);
   item.step = startStep + stepDelta;
   item.accidental = accidental;
+  selectItem(entityId, item); // most recently moved — see getSelectedItem's own comment
+}
+
+// Moves a note exactly one chromatic half-step up or down — the Up/Down
+// keyboard shortcut (ui/interaction.ts), operating on the current selection
+// (getSelectedItem above). Walks the same ladder
+// quantizeVerticalDrag's half-step handling uses, just directly in step/
+// accidental terms rather than via a pixel distance: a natural note tries
+// to become a sharp (going up) or flat (going down) of ITSELF first, per
+// ui/musicTheory.ts's gating (skipping straight to the next natural step
+// where that accidental wouldn't mean anything, e.g. E has no sharp); an
+// already-accidental note either continues on to the next natural step (if
+// nudged further the same direction it was reached from) or reverts to
+// natural (if nudged back the other way) — so up and down are always exact
+// inverses of each other at every position, and the note passes through
+// every valid accidental on the way, never skipping one.
+export function nudgePitch(item: MelodyNoteItem, direction: 'up' | 'down'): void {
+  if (direction === 'up') {
+    if (item.accidental === 'flat') {
+      item.accidental = null;
+    } else if (item.accidental === 'sharp') {
+      item.step += 1;
+      item.accidental = null;
+    } else if (sharpMakesSense(item.step)) {
+      item.accidental = 'sharp';
+    } else {
+      item.step += 1;
+    }
+  } else {
+    if (item.accidental === 'sharp') {
+      item.accidental = null;
+    } else if (item.accidental === 'flat') {
+      item.step -= 1;
+      item.accidental = null;
+    } else if (flatMakesSense(item.step)) {
+      item.accidental = 'flat';
+    } else {
+      item.step -= 1;
+    }
+  }
 }
 
 // --- Staff geometry ---------------------------------------------------------
@@ -424,7 +782,10 @@ function computeLayout(graph: EntityGraph, owner: Entity, itemCount: number, dra
     // staffTop (see closeButton below) — same relative 26px gap between the
     // two as before.
     restIcon: { x: iconX, y: staffTop + 32 },
-    barlineIcon: { x: iconX, y: staffTop + 58 },
+    // Same column as restIcon (aligned under it), but vertically centered
+    // on the bass staff's own middle line rather than a fixed offset below
+    // the rest icon.
+    barlineIcon: { x: iconX, y: stepToY(middleCY, BASS_MIDDLE_LINE_STEP) },
     // Top-aligned with the +8ve button (octaveUpButton) rather than
     // organelle.ts's own shared title-row placement — melody has no title
     // text needing that row (see drawMelodyPopup), so the close control
@@ -580,6 +941,7 @@ export function reorderDuringDrag(
   }
 
   spliceAtPointerX(state, layout, item, pointerX);
+  if (item.kind === 'note') selectItem(entityId, item); // most recently moved — see getSelectedItem's own comment
   return null;
 }
 
@@ -595,6 +957,7 @@ export function forcePlacement(graph: EntityGraph, entityId: string, item: Melod
   const { state, layout } = resolved;
   if (!state.items.includes(item)) return;
   spliceAtPointerX(state, layout, item, pointerX);
+  if (item.kind === 'note') selectItem(entityId, item);
 }
 
 // Where `item` currently renders — used by ui/render.ts to snap a dragged
@@ -649,12 +1012,14 @@ export function mergeIntoTarget(entityId: string, item: MelodyNoteItem, target: 
     const adjustedTargetIndex = itemIndex < targetIndex ? targetIndex - 1 : targetIndex;
     state.items = state.items.filter((i) => i !== item && i !== target);
     state.items.splice(Math.min(adjustedTargetIndex, state.items.length), 0, item);
+    selectItem(entityId, item); // the surviving note — most recently moved
     clampScroll(state);
     return true;
   }
   if (canAbsorbAsDot(target, item)) {
     target.dots += 1;
     state.items.splice(itemIndex, 1);
+    selectItem(entityId, target);
     clampScroll(state);
     return true;
   }
@@ -843,7 +1208,9 @@ export function hitTestMelodyPopup(graph: EntityGraph, point: Point, drag?: Drag
 
 const PANEL_BG = 'rgba(22, 22, 22, 0.97)'; // matches ui/organelle.ts's envelope popup panel
 const STAFF_COLOR = 'rgba(255, 255, 255, 0.55)';
+const CLEF_COLOR = 'rgba(255, 255, 255, 0.25)'; // dimmer than STAFF_COLOR — large but purely decorative, no interactive function
 const NOTE_COLOR = 'rgba(232, 220, 192, 0.95)'; // matches organelle.ts's CURVE_COLOR family
+const NOTE_COLOR_DIM = 'rgba(232, 220, 192, 0.55)'; // every note except the current selection (getSelectedItem)
 
 function setBravuraFont(ctx: CanvasRenderingContext2D): void {
   ctx.font = `${BRAVURA_FONT_SIZE_PX}px ${BRAVURA_FONT_FAMILY}`;
@@ -1110,8 +1477,8 @@ export function drawMelodyPopup(
   // on it and always draw regardless.
   const bravuraReady = isBravuraReady();
   if (bravuraReady) {
-    drawTrebleClef(ctx, layout.left, CLEF_COLUMN_WIDTH, layout, STAFF_COLOR);
-    drawBassClef(ctx, layout.left, CLEF_COLUMN_WIDTH, layout, STAFF_COLOR);
+    drawTrebleClef(ctx, layout.left, CLEF_COLUMN_WIDTH, layout, CLEF_COLOR);
+    drawBassClef(ctx, layout.left, CLEF_COLUMN_WIDTH, layout, CLEF_COLOR);
   }
 
   const shift = effectiveOctaveSteps(state);
@@ -1131,8 +1498,9 @@ export function drawMelodyPopup(
       // Same item, same duration, drawn twice — one glyph per staff (see
       // restScreenPositions' own comment) — so the two are always in sync
       // by construction, never two separately-tracked rests to keep aligned.
-      drawRestGlyph(ctx, treblePos, item.durationIndex, NOTE_COLOR);
-      drawRestGlyph(ctx, bassPos, item.durationIndex, NOTE_COLOR);
+      const restColor = getSelectedItem()?.item === item ? NOTE_COLOR : NOTE_COLOR_DIM;
+      drawRestGlyph(ctx, treblePos, item.durationIndex, restColor);
+      drawRestGlyph(ctx, bassPos, item.durationIndex, restColor);
       continue;
     }
 
@@ -1163,8 +1531,9 @@ export function drawMelodyPopup(
         ctx.stroke();
       }
       const onLine = renderedStep % 2 === 0; // staff lines sit at even steps, spaces at odd — see TREBLE_LINE_STEPS/BASS_LINE_STEPS
-      const noteheadLeftX = drawNoteGlyph(ctx, pos, item.durationIndex, item.dots, onLine, stemUpFor(renderedStep), NOTE_COLOR);
-      drawAccidental(ctx, noteheadLeftX, pos.y, item.accidental, NOTE_COLOR);
+      const noteColor = getSelectedItem()?.item === item ? NOTE_COLOR : NOTE_COLOR_DIM;
+      const noteheadLeftX = drawNoteGlyph(ctx, pos, item.durationIndex, item.dots, onLine, stemUpFor(renderedStep), noteColor);
+      drawAccidental(ctx, noteheadLeftX, pos.y, item.accidental, noteColor);
     }
   }
 
@@ -1193,9 +1562,10 @@ export function drawMelodyPopup(
   if (bravuraReady) drawRestGlyph(ctx, layout.restIcon, DEFAULT_DURATION_INDEX, 'rgba(255, 255, 255, 0.6)');
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.lineWidth = 1.4;
+  const barlineIconHalfHeight = sp(REST_QUARTER_HEIGHT_SP) / 2; // matches the rest icon's own glyph height exactly
   ctx.beginPath();
-  ctx.moveTo(layout.barlineIcon.x, layout.barlineIcon.y - 9);
-  ctx.lineTo(layout.barlineIcon.x, layout.barlineIcon.y + 9);
+  ctx.moveTo(layout.barlineIcon.x, layout.barlineIcon.y - barlineIconHalfHeight);
+  ctx.lineTo(layout.barlineIcon.x, layout.barlineIcon.y + barlineIconHalfHeight);
   ctx.stroke();
 
   ctx.restore();

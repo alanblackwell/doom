@@ -84,6 +84,11 @@ export const REST_WIDTH_SP = {
   rest32nd: 1.452,
 } as const;
 
+// glyphBBoxes.restQuarter's own height (bBoxNE.y - bBoxSW.y = 1.492 -
+// -1.5) — used by ui/melody.ts's barline "add" icon so it matches the rest
+// "add" icon's own visual height exactly.
+export const REST_QUARTER_HEIGHT_SP = 2.992;
+
 // glyphsWithAnchors.noteheadBlack / noteheadHalf, from Bravura.json —
 // identical for both. Where a stem attaches, relative to the notehead's own
 // origin (left edge, vertical center). SE = the right-side attachment point

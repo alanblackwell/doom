@@ -51,18 +51,26 @@ import {
 } from './organelle';
 import type { HandleKind } from './organelle';
 import {
+  activeSelectedItem,
   addNoteAt,
   cycleDurationDown,
   cycleDurationUp,
   cycleOctaveDown,
   cycleOctaveUp,
+  deleteSelectedItem,
   forcePlacement,
   hitTestMelodyPopup,
+  insertBarlineAfterCurrent,
   insertBarlineAfterLast,
+  insertFirstLetterNote,
+  insertLetterNoteAfterSelection,
+  insertRestAfterCurrent,
   insertRestAfterLast,
   melodyStateFor,
   mergeIntoTarget,
+  nudgePitch,
   reorderDuringDrag,
+  selectAdjacentItem,
   updateNotePitchDrag,
   updateScrollFromTrackX,
 } from './melody';
@@ -342,13 +350,13 @@ export function attachInteraction(
           cycleOctaveDown(melody);
           break;
         case 'restIcon':
-          insertRestAfterLast(melody);
+          insertRestAfterLast(melodyHit.entityId, melody);
           break;
         case 'barlineIcon':
-          insertBarlineAfterLast(melody);
+          insertBarlineAfterLast(melodyHit.entityId, melody);
           break;
         case 'addNote':
-          addNoteAt(melody, melodyHit.index, melodyHit.step);
+          addNoteAt(melodyHit.entityId, melody, melodyHit.index, melodyHit.step);
           break;
         case 'item':
           canvas.setPointerCapture(e.pointerId);
@@ -560,7 +568,7 @@ export function attachInteraction(
       if (press.axis === 'x') {
         press.mergeTarget = reorderDuringDrag(graph, press.entityId, press.item, point.x);
       } else if (press.item.kind === 'note' && press.startStep !== null) {
-        updateNotePitchDrag(press.item, press.startStep, press.startAccidental, dy);
+        updateNotePitchDrag(press.entityId, press.item, press.startStep, press.startAccidental, dy);
       }
       return;
     }
@@ -879,6 +887,21 @@ export function attachInteraction(
   });
 }
 
+// Letter name -> diatonic step-mod-7 index (0=C, 1=D, ... 6=B) for the
+// melody organelle's A-G note-entry shortcut (ui/melody.ts's
+// insertLetterNoteAfterSelection) — keyed by e.code so it's independent of
+// keyboard layout/shift state the way key-binding elsewhere in this file
+// already is.
+const LETTER_KEY_INDEX: Record<string, number> = {
+  KeyC: 0,
+  KeyD: 1,
+  KeyE: 2,
+  KeyF: 3,
+  KeyG: 4,
+  KeyA: 5,
+  KeyB: 6,
+};
+
 // Global keydown handling for tap entities — on `window`, not the canvas,
 // since a bound key should fire "from anywhere," not just while the canvas
 // has focus. Two mutually exclusive behaviors depending on hover state:
@@ -889,6 +912,71 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
   window.addEventListener('keydown', (e) => {
     if (isTextureEditorActive()) return; // modal — see the pointerdown/pointermove guards above
     if (e.metaKey || e.ctrlKey || e.altKey) return; // don't steal OS/browser shortcuts
+
+    // Up/Down/Left/Right/Delete/A-G all operate on the melody organelle's
+    // current selection (ui/melody.ts's activeSelectedItem — the most
+    // recently created or moved note, updated by addNoteAt/
+    // updateNotePitchDrag/the drag-reorder and merge paths — but null once
+    // that note's own popup has been closed, so a stale selection can't
+    // keep acting invisibly). Checked before the tap-binding handling
+    // below; if there's no active selection, these fall through to it
+    // instead, so keys bound as tap triggers keep working until a melody
+    // note exists to select.
+    if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+      const selected = activeSelectedItem(graph);
+      // A rest can be the current selection too (Left/Right/Delete), but
+      // has no pitch to nudge — Up/Down simply have nothing to do for one,
+      // same as when nothing at all is selected.
+      if (selected && selected.item.kind === 'note') {
+        nudgePitch(selected.item, e.code === 'ArrowUp' ? 'up' : 'down');
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      if (activeSelectedItem(graph)) {
+        selectAdjacentItem(e.code === 'ArrowRight' ? 'next' : 'previous');
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code === 'Delete' || e.code === 'Backspace') {
+      if (activeSelectedItem(graph)) {
+        deleteSelectedItem();
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code in LETTER_KEY_INDEX) {
+      // A-G add a new natural note right after the current selection, at
+      // whichever octave lands it closest in pitch (TODO.md's melody
+      // organelle spec) — see insertLetterNoteAfterSelection. With no
+      // current selection at all, fall back to seeding an empty organelle's
+      // very first note instead (insertFirstLetterNote), closest to middle
+      // C rather than to some nonexistent "current" note.
+      const letterIdx = LETTER_KEY_INDEX[e.code];
+      if (activeSelectedItem(graph)) {
+        insertLetterNoteAfterSelection(letterIdx);
+        e.preventDefault();
+        return;
+      }
+      if (insertFirstLetterNote(graph, letterIdx)) {
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code === 'Space') {
+      if (activeSelectedItem(graph)) {
+        insertRestAfterCurrent();
+        e.preventDefault();
+        return;
+      }
+    } else if (e.key === '|') {
+      // Checked by e.key, not e.code — '|' is a shifted character (e.g.
+      // Shift+Backslash on a US layout), and e.code reports the physical
+      // key regardless of shift, not the character it produces.
+      if (activeSelectedItem(graph)) {
+        insertBarlineAfterCurrent();
+        e.preventDefault();
+        return;
+      }
+    }
 
     if (state.hoveredTapId) {
       const entity = graph.get(state.hoveredTapId);
