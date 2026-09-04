@@ -288,7 +288,7 @@ export async function initAudioEngine(): Promise<void> {
   const ctx = getAudioContext();
 
   const wasmUrl = new URL('../dsp/rust/pkg/doom_dsp.wasm', import.meta.url);
-  const [, , , , wasmModule] = await Promise.all([
+  const [, , , , , wasmModule] = await Promise.all([
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/noise-processor.js', import.meta.url)
     ),
@@ -300,6 +300,12 @@ export async function initAudioEngine(): Promise<void> {
     ),
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/pluck-processor.js', import.meta.url)
+    ),
+    // Plain JS, no WASM — see dsp/worklets/capture-processor.js's own header
+    // comment on why the sampler organelle (ui/sampler.ts) records raw PCM
+    // this way instead of via MediaRecorder.
+    ctx.audioWorklet.addModule(
+      new URL('../dsp/worklets/capture-processor.js', import.meta.url)
     ),
     WebAssembly.compileStreaming(fetch(wasmUrl)),
   ]);
@@ -524,22 +530,24 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         level: 0.8,
         exposeFeedback: true,
       });
-    // A dropped-in audio file (ui/sampleDrop.ts) — click-to-fire like kick,
-    // not a drone, so it's in TRIGGERED_KINDS above. Unlike kick's synthesis,
-    // there's real per-instance data (the decoded buffer) to play back, and
-    // unlike the WASM voices' worklet ports, playbackRate is a native
-    // AudioParam — smoothly adjustable live on whichever instance is
-    // currently sounding, not just picked up fresh on the next trigger.
+    // A dropped-in audio file (ui/sampleDrop.ts) or a recorded-and-trimmed
+    // clip (ui/sampler.ts) — click-to-fire like kick, not a drone, so it's
+    // in TRIGGERED_KINDS above. Unlike kick's synthesis, there's real
+    // per-instance data (the decoded buffer) to play back, and unlike the
+    // WASM voices' worklet ports, playbackRate is a native AudioParam —
+    // smoothly adjustable live on whichever instance is currently sounding,
+    // not just picked up fresh on the next trigger.
+    //
+    // Unlike a dropped file (registered before the entity ever reaches this
+    // function), a sampler entity can sit on canvas with NO buffer yet, and
+    // get one — or a re-trimmed replacement — at any later point after its
+    // nodes are already built (ui/sampler.ts's commitTrim, called every time
+    // a trim marker settles). So every buffer read below happens fresh, via
+    // sampleBuffers.get(entity.id), at the moment it's actually needed
+    // (offsetNow/startPlayback/registerTrigger) rather than snapshotted into
+    // a build-time const the way every other per-instance value here would
+    // normally be — see registerTrigger's own no-buffer-yet guard below.
     case 'sample': {
-      const maybeBuffer = sampleBuffers.get(entity.id);
-      // No buffer yet (shouldn't normally happen — ui/sampleDrop.ts
-      // registers it before the entity ever reaches the graph — but decode
-      // is async, so guard rather than throw and take the whole build down).
-      if (!maybeBuffer) return undefined;
-      // Rebound to a non-optional const: TS doesn't carry the narrowing
-      // above into the nested startPlayback() function declaration below.
-      const buffer: AudioBuffer = maybeBuffer;
-
       const level = ctx.createGain();
       level.gain.value = entity.params.level ?? 0.8;
 
@@ -567,7 +575,7 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         return segmentStartOffset + (ctx.currentTime - segmentStartCtxTime) * segmentRate;
       }
 
-      function startPlayback(offset: number): void {
+      function startPlayback(buffer: AudioBuffer, offset: number): void {
         const now = ctx.currentTime;
         const rate = entity.params.speed ?? 1;
         const source = ctx.createBufferSource();
@@ -595,6 +603,12 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       }
 
       registerTrigger(entity.id, () => {
+        // No buffer registered yet (a sampler that hasn't recorded anything,
+        // or a dropped file mid-decode) — a silent no-op press rather than
+        // an error; see this case's own header comment.
+        const buffer = sampleBuffers.get(entity.id);
+        if (!buffer) return;
+
         const rate = entity.params.speed ?? 1;
         // Actual playback time at the current speed, not the buffer's raw
         // duration — a file slowed to 0.2x plays 5x longer than its native
@@ -630,7 +644,7 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         // an event-wired retrigger while this is mid-playback) — a sampler
         // pad, not a polyphonic one.
         current?.stop();
-        startPlayback(resumeFrom);
+        startPlayback(buffer, resumeFrom);
       });
 
       registerStop(entity.id, () => {

@@ -356,6 +356,52 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// A sampler: kind 'sample' like a dropped-in file (ui/sampleDrop.ts), just
+// starting with no buffer registered yet — its pad/level/speed controls
+// (controlSpecs.ts's existing 'sample' entry) work completely unmodified
+// the moment something's been recorded and trimmed (see audio/graph.ts's
+// 'sample' case and its own comment on reading the buffer fresh rather than
+// requiring one at construction time). No `label` yet either — shows the
+// generic "sample" box label (ui/render.ts) until named via the organelle's
+// text field.
+graph.add({
+  id: 'sampler-1',
+  type: 'source',
+  kind: 'sample',
+  parentId: null,
+  children: [],
+  params: { level: 0.8, speed: 1 },
+  x: 1680,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 17,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// sampler-1's recording organelle (EntityType 'feature', kind 'sampler' —
+// ui/sampler.ts): input device selector, live scope, record button, and a
+// trim-marker editor over the recorded waveform. Same porthole/popup
+// mechanism as the ADSR/melody organelles above — see TODO.md item 2
+// ("Sample capture"). x/y/width/height/seed are unused for a feature entity,
+// same as pluck-1-envelope/bow-1-melody above.
+graph.add({
+  id: 'sampler-1-capture',
+  type: 'feature',
+  kind: 'sampler',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 18,
+  docked: false,
+  ownerId: 'sampler-1',
+  expanded: false,
+});
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.

@@ -33,6 +33,7 @@ import { drawDock } from './dock';
 import { drawPopup, drawPorthole } from './organelle';
 import { drawMelodyPopup, itemScreenX } from './melody';
 import type { MelodyItem } from './melody';
+import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -874,6 +875,15 @@ export function renderFrame(
   interaction: InteractionState,
   now: number
 ): void {
+  // Reset-then-reconfirm for the sampler organelle's floating name <input>
+  // (ui/sampler.ts) — it's a real DOM element, not drawn on canvas, so its
+  // visibility can't just follow from "was drawPopup called this frame" the
+  // way everything else here works. beginSamplerFrame clears a "shown this
+  // frame" flag; drawSamplerPopup below sets it back if an expanded sampler
+  // popup is actually drawn; endSamplerFrame (bottom of this function) hides
+  // the input if nothing did.
+  beginSamplerFrame();
+
   // Always an opaque base fill first — canvas content otherwise persists
   // frame to frame, so a texture with opacity < 1 (see ui/textures.ts's
   // TextureAdjustments) would blend with whatever was drawn last frame
@@ -1001,6 +1011,8 @@ export function renderFrame(
           dragOverride = { item: press.item, x };
         }
         drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
+      } else if (feature.kind === 'sampler') {
+        drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
@@ -1027,6 +1039,8 @@ export function renderFrame(
   // editor (ui/textureEditor.ts) is effectively modal while open, so it
   // draws in front of everything else on the page.
   drawTextureEditor(ctx, canvas, graph);
+
+  endSamplerFrame();
 }
 
 function drawDraggedSubtree(

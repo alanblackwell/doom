@@ -8,6 +8,7 @@ import { deactivateEntity } from '../audio/graph';
 import { controlsFor } from './controlSpecs';
 import { removeWireTo } from './wiring';
 import { removeEventWiresTo } from './eventWiring';
+import { stopCapture } from './sampler';
 
 // Only a leaf, non-control entity can dock — a Control (knob/clock/tap) has
 // no independent sound to silence and isn't drawn as a box at all (see
@@ -41,6 +42,10 @@ export function dockEntity(graph: EntityGraph, entity: Entity): void {
   // open with a stale position for whenever it reappears.
   for (const feature of graph.featuresOf(entity.id)) {
     feature.expanded = false;
+    // A sampler organelle (ui/sampler.ts) may be mid-recording or holding a
+    // live mic stream — parking the instrument in the dock must release
+    // that, not leave it running silently in the background.
+    if (feature.kind === 'sampler') stopCapture(feature.id);
   }
   entity.docked = true;
 }

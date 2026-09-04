@@ -74,6 +74,21 @@ import {
   updateScrollFromTrackX,
 } from './melody';
 import type { Accidental, MelodyItem, MelodyNoteItem } from './melody';
+import {
+  commitTrim,
+  focusNameField,
+  hasSelectedMarker,
+  hitTestSamplerPopup,
+  nudgeSelectedMarker,
+  samplerStateFor,
+  scopeLayoutFor,
+  selectDevice,
+  selectMarker,
+  stopCapture,
+  toggleDeviceList,
+  toggleRecord,
+  updateMarkerDrag,
+} from './sampler';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -181,6 +196,12 @@ export interface InteractionState {
   // could mean (see updateScrollFromTrackX's own "jump to the click,
   // continue tracking from there" behavior).
   melodyScrollDrag: { entityId: string } | null;
+
+  // Set while directly dragging one of an open sampler popup's trim markers
+  // (ui/sampler.ts) — live position updates happen continuously on move, but
+  // the buffer only gets re-registered and re-auditioned once on release
+  // (see endPress below), so a fast drag doesn't fire overlapping previews.
+  draggingSamplerMarker: { entityId: string; ownerId: string; edge: 'start' | 'end' } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -204,6 +225,7 @@ export function createInteractionState(): InteractionState {
     gatedId: null,
     melodyPress: null,
     melodyScrollDrag: null,
+    draggingSamplerMarker: null,
   };
 }
 
@@ -382,6 +404,48 @@ export function attachInteraction(
       return;
     }
 
+    // An open sampler popup (ui/sampler.ts) sits visually on top of
+    // everything else too, same reasoning as the melody popup above.
+    const samplerHit = hitTestSamplerPopup(graph, point);
+    if (samplerHit) {
+      switch (samplerHit.kind) {
+        case 'close': {
+          const feature = graph.get(samplerHit.entityId);
+          if (feature) feature.expanded = false;
+          // Closing (not just docking) also releases the mic — leaving a
+          // hot input running behind a collapsed panel isn't expected
+          // background behavior; reopening re-requests the stream, which
+          // doesn't re-prompt once the origin already has permission.
+          stopCapture(samplerHit.entityId);
+          break;
+        }
+        case 'deviceRow':
+          toggleDeviceList(samplerHit.entityId);
+          break;
+        case 'deviceOption':
+          selectDevice(samplerHit.entityId, samplerHit.deviceId);
+          break;
+        case 'record':
+          toggleRecord(samplerHit.entityId, samplerHit.ownerId);
+          break;
+        case 'nameField':
+          focusNameField(samplerHit.entityId);
+          break;
+        case 'marker':
+          canvas.setPointerCapture(e.pointerId);
+          selectMarker(samplerHit.entityId, samplerHit.ownerId, samplerHit.edge);
+          state.draggingSamplerMarker = {
+            entityId: samplerHit.entityId,
+            ownerId: samplerHit.ownerId,
+            edge: samplerHit.edge,
+          };
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/envelope popups' own catch-all.
+      }
+      return;
+    }
+
     // An open envelope popup (ui/organelle.ts) sits visually on top of
     // everything else on the canvas, so its own hit-test goes first — a
     // click anywhere inside it (its background included) must never fall
@@ -552,6 +616,13 @@ export function attachInteraction(
 
     if (state.melodyScrollDrag) {
       updateScrollFromTrackX(graph, state.melodyScrollDrag.entityId, point.x);
+      return;
+    }
+
+    if (state.draggingSamplerMarker) {
+      const { entityId, edge } = state.draggingSamplerMarker;
+      const layout = scopeLayoutFor(graph, entityId);
+      if (layout) updateMarkerDrag(entityId, edge, point, layout);
       return;
     }
 
@@ -736,6 +807,17 @@ export function attachInteraction(
     if (state.melodyScrollDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.melodyScrollDrag = null;
+      return;
+    }
+
+    if (state.draggingSamplerMarker) {
+      canvas.releasePointerCapture(e.pointerId);
+      const { entityId, ownerId, edge } = state.draggingSamplerMarker;
+      // Commit + audition happens once, here, on release — not on every
+      // intermediate pointermove during the drag (see ui/sampler.ts's
+      // commitTrim comment).
+      commitTrim(ownerId, samplerStateFor(entityId), edge);
+      state.draggingSamplerMarker = null;
       return;
     }
 
@@ -937,6 +1019,15 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       if (activeSelectedItem(graph)) {
         selectAdjacentItem(e.code === 'ArrowRight' ? 'next' : 'previous');
+        e.preventDefault();
+        return;
+      }
+      // Falls through to the sampler organelle's trim markers (ui/sampler.ts)
+      // when there's no active melody selection — the two features
+      // shouldn't fight over the same keys, so melody's own selection always
+      // takes priority first.
+      if (hasSelectedMarker(graph)) {
+        nudgeSelectedMarker(e.code === 'ArrowRight' ? 1 : -1);
         e.preventDefault();
         return;
       }

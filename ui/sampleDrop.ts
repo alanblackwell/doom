@@ -42,14 +42,31 @@ export interface LoadedSampleFile {
   // regardless of what decodeAudioData did to it.
 }
 
-// Keyed by entity id, one entry per 'sample' entity ever dropped — read by
-// ui/sampleArchive.ts's exportSamplesZip to bundle the originals for
+// Keyed by entity id, one entry per 'sample' entity ever dropped OR recorded
+// — read by ui/sampleArchive.ts's exportSamplesZip to bundle them all for
 // download. Entries are never removed (there's no entity-delete feature yet
-// to prompt it — see audio/entityGraph.ts).
+// to prompt it — see audio/entityGraph.ts). Populated directly by
+// addSampleEntity below for a dropped file; ui/sampler.ts calls
+// registerLoadedSampleFile/renameLoadedSampleFile for a recorded-and-trimmed
+// clip instead, since it has no original file on disk to keep bytes from —
+// a WAV encode of the current trim (audio/wavEncode.ts) stands in for one.
 const loadedSampleFiles = new Map<string, LoadedSampleFile>();
 
 export function getLoadedSampleFiles(): ReadonlyMap<string, LoadedSampleFile> {
   return loadedSampleFiles;
+}
+
+export function registerLoadedSampleFile(entityId: string, file: LoadedSampleFile): void {
+  loadedSampleFiles.set(entityId, file);
+}
+
+// Updates just the export filename of an already-registered entry, leaving
+// its bytes alone — for renaming a sampler-recorded clip (ui/sampler.ts's
+// name field) without re-encoding audio that hasn't actually changed. A
+// no-op if nothing's been recorded/committed yet (nothing to rename).
+export function renameLoadedSampleFile(entityId: string, fileName: string): void {
+  const existing = loadedSampleFiles.get(entityId);
+  if (existing) loadedSampleFiles.set(entityId, { ...existing, fileName });
 }
 
 async function addSampleEntity(
