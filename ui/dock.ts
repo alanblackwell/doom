@@ -100,7 +100,13 @@ export function drawDock(
   const top = panel.y - panel.height / 2;
 
   ctx.save();
-  ctx.fillStyle = 'rgba(24, 24, 24, 0.95)';
+  // Semi-transparent rather than near-opaque — the canvas background
+  // texture (ui/render.ts's renderFrame, ui/textureEditor.ts) is already
+  // drawn to fill the full drawing buffer before this, dock panel included,
+  // so this reads as a dark scrim over that image rather than hiding it
+  // behind a flat panel. Icons/text below are drawn after this fill, within
+  // this same function, so they stay legible on top of it regardless.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
   ctx.fillRect(left, top, panel.width, panel.height);
   ctx.strokeStyle = interaction.hoverDock ? ACCENT : 'rgba(255, 255, 255, 0.08)';
   ctx.lineWidth = interaction.hoverDock ? 2.5 : 1;
