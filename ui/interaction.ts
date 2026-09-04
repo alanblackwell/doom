@@ -34,6 +34,7 @@ import {
 } from './eventWiring';
 import { eventWireEndpoints, hitTestWireCurve, valueWireEndpoints } from './wireGeometry';
 import { bindKey, getEntityForKey } from './tapBindings';
+import { recordSourcePulse } from './eventPulse';
 import { scheduleSoon } from '../audio/transport';
 import { isOverDock, hitTestDockIcon } from './dock';
 import { isDockable, dockEntity } from './docking';
@@ -268,7 +269,9 @@ function applyControlValue(graph: EntityGraph, entityId: string, param: string, 
 // flash store, for both the tap's own bump and any instrument it fires.
 function fireTap(entityId: string, state: InteractionState): void {
   scheduleSoon(() => {
-    state.triggerFlashes.set(entityId, performance.now());
+    const now = performance.now();
+    state.triggerFlashes.set(entityId, now);
+    recordSourcePulse(entityId, now); // ui/eventPulse.ts — animates any wire out of this tap's bump
     fireEventWireTargets(entityId, state);
   });
 }

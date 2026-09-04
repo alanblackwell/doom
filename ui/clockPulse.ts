@@ -11,6 +11,7 @@ import { getAudioContext } from '../audio/context';
 import { onTick, SUBDIVISIONS_PER_BEAT } from '../audio/transport';
 import { fireEventWireTargets } from './interaction';
 import type { InteractionState } from './interaction';
+import { recordSourcePulse } from './eventPulse';
 
 export const FLASH_DURATION_MS = 150;
 
@@ -42,6 +43,7 @@ export function attachClockPulse(entityId: string, state: InteractionState): voi
     const delayMs = Math.max(0, (time - ctx.currentTime) * 1000);
     setTimeout(() => {
       recordBeatFlash();
+      recordSourcePulse(entityId, performance.now()); // ui/eventPulse.ts — animates any wire out of the clock's own bump
       fireEventWireTargets(entityId, state);
     }, delayMs);
   });

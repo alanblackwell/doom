@@ -27,6 +27,7 @@ import { knobIndicatorAngle, wireHandlePosition, WIRE_BUMP_RADIUS } from './knob
 import { getAllWires, getWireTo } from './wiring';
 import { getAllEventWires } from './eventWiring';
 import { eventWireEndpoints, valueWireEndpoints, wireCurveControlPoint } from './wireGeometry';
+import { sourcePulseGlow } from './eventPulse';
 import { getBeatFlashGlow } from './clockPulse';
 import { formatKeyLabel, getBoundKey } from './tapBindings';
 import { drawDock } from './dock';
@@ -556,12 +557,17 @@ function wireOpacity(
 
 // A soft-sagging cable curve, like a real patch cord — used for both
 // committed wires and the live rubber band while dragging a new one.
+// `glow` (0-1, default 0) adds a soft bloom on top of the flat stroke —
+// only event wires pass a nonzero value (ui/eventPulse.ts's per-source
+// pulse animation), matching the warm flash-ring glow the pad/clock/tap
+// endpoints already use elsewhere so the whole wire reads as one animation.
 function drawWireLine(
   ctx: CanvasRenderingContext2D,
   from: Point,
   to: Point,
   color: string,
-  opacity: number
+  opacity: number,
+  glow = 0
 ): void {
   const control = wireCurveControlPoint(from, to);
 
@@ -569,6 +575,10 @@ function drawWireLine(
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.globalAlpha = opacity;
+  if (glow > 0) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = glow * 10;
+  }
   ctx.beginPath();
   ctx.moveTo(from.x, from.y);
   ctx.quadraticCurveTo(control.x, control.y, to.x, to.y);
@@ -583,7 +593,7 @@ function drawWireLine(
 // nothing to fade proportionally the way wireOpacity does for value wires —
 // a flat, warm color/opacity, matching the palette trigger feedback already
 // uses elsewhere (the pad flash ring, the clock/tap bump glow).
-const EVENT_WIRE_COLOR = 'rgba(255, 210, 150, 0.75)';
+const EVENT_WIRE_COLOR = 'rgba(255, 210, 150, 0.3)';
 
 function drawWires(
   ctx: CanvasRenderingContext2D,
@@ -591,7 +601,8 @@ function drawWires(
   interaction: InteractionState,
   drag: DragContext | undefined,
   dragDelta: { x: number; y: number } | null,
-  draggedSubtreeIds: Set<string>
+  draggedSubtreeIds: Set<string>,
+  now: number
 ): void {
   // A wire's endpoint follows the live drag position throughout, not just
   // once the drop commits it to entity.x/y — same delta-translation the
@@ -623,7 +634,12 @@ function drawWires(
     if (!endpoints) continue;
     const from = translate(endpoints.from, wire.sourceEntityId);
     const to = translate(endpoints.to, wire.targetEntityId);
-    drawWireLine(ctx, from, to, EVENT_WIRE_COLOR, MAX_WIRE_OPACITY);
+    // Whole-line pulse in sync with this wire's own source firing (see
+    // ui/eventPulse.ts) — 0 only for a wire whose source has never fired at
+    // all yet, which falls back to the flat opacity this always used to
+    // draw at, rather than animating from nothing.
+    const glow = sourcePulseGlow(wire.sourceEntityId, now);
+    drawWireLine(ctx, from, to, EVENT_WIRE_COLOR, glow > 0 ? glow : MAX_WIRE_OPACITY, glow);
   }
 
   if (interaction.wiringFrom && interaction.wireDragPoint) {
@@ -967,7 +983,7 @@ export function renderFrame(
   // dot rather than drawn over it. Needs dragDelta/draggedSubtreeIds (just
   // above) so a wire's endpoint tracks the live drag too, not just the
   // eventual dropped position.
-  drawWires(ctx, graph, interaction, drag, dragDelta, draggedSubtreeIds);
+  drawWires(ctx, graph, interaction, drag, dragDelta, draggedSubtreeIds, now);
 
   for (const entity of graph.all()) {
     if (entity.id === interaction.draggingId) continue;
