@@ -31,7 +31,8 @@ import { getBeatFlashGlow } from './clockPulse';
 import { formatKeyLabel, getBoundKey } from './tapBindings';
 import { drawDock } from './dock';
 import { drawPopup, drawPorthole } from './organelle';
-import { drawMelodyPopup } from './melody';
+import { drawMelodyPopup, itemScreenX } from './melody';
+import type { MelodyItem } from './melody';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -986,12 +987,19 @@ export function renderFrame(
       if (feature.kind === 'melody') {
         // A live horizontal item drag (ui/interaction.ts's melodyPress)
         // renders that one item at the raw pointer x rather than its
-        // snapped slot — see ui/melody.ts's MelodyDragOverride for why.
+        // snapped slot — see ui/melody.ts's MelodyDragOverride for why. If
+        // the pointer is hovering a same-pitch note (mergeTarget), that
+        // note has frozen in place instead of reordering (reorderDuringDrag),
+        // so the dragged item's own visual snaps onto ITS position instead
+        // of the raw pointer — reading as "sitting on top of" the target.
         const press = interaction.melodyPress;
-        const dragOverride =
-          press && press.entityId === feature.id && press.dragging && press.axis === 'x'
-            ? { item: press.item, x: press.currentPointer.x }
-            : null;
+        let dragOverride: { item: MelodyItem; x: number } | null = null;
+        if (press && press.entityId === feature.id && press.dragging && press.axis === 'x') {
+          const x = press.mergeTarget
+            ? (itemScreenX(graph, feature.id, press.mergeTarget, drag) ?? press.currentPointer.x)
+            : press.currentPointer.x;
+          dragOverride = { item: press.item, x };
+        }
         drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
       } else {
         const activeHandle =

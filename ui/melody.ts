@@ -36,6 +36,7 @@ import { flatMakesSense, sharpMakesSense } from './musicTheory';
 import { isBravuraReady } from './bravuraFont';
 import {
   ACCIDENTAL_WIDTH_SP,
+  AUGMENTATION_DOT_WIDTH_SP,
   BRAVURA_FONT_FAMILY,
   CLEF_WIDTH_SP,
   GLYPH,
@@ -63,6 +64,7 @@ export interface MelodyNoteItem {
   step: number; // written diatonic step, octave-shift NOT applied
   accidental: Accidental;
   durationIndex: number; // -1=breve, 0=semibreve .. 5=demisemiquaver, see DEFAULT_DURATION_INDEX
+  dots: number; // 0-2 — see mergeAdjacentSamePitch; independent of durationIndex, carried through halving/doubling unchanged
 }
 
 export interface MelodyRestItem {
@@ -149,9 +151,19 @@ export function cycleDurationUp(item: MelodyItem): void {
 
 // Fraction of a semibreve — not read anywhere yet, but this is the natural
 // hook point for the future sequencer/transport work (TODO.md) to convert a
-// durationIndex into actual playback time.
-export function durationInWholeNotes(durationIndex: number): number {
-  return 1 / 2 ** durationIndex;
+// durationIndex/dots pair into actual playback time. Each dot adds half of
+// the previous increment (base, then base/2, then base/4, ...) — standard
+// dotted-note arithmetic, and exactly what mergeAdjacentSamePitch's own
+// "next halving step down" check below is built around.
+export function durationInWholeNotes(durationIndex: number, dots = 0): number {
+  const base = 1 / 2 ** durationIndex;
+  let total = base;
+  let increment = base;
+  for (let i = 0; i < dots; i++) {
+    increment /= 2;
+    total += increment;
+  }
+  return total;
 }
 
 // --- Sequence editing ------------------------------------------------------
@@ -166,7 +178,7 @@ const VISIBLE_SLOTS = 8;
 // `index`/`step` are already resolved against the layout in effect at click
 // time (see hitTestMelodyPopup's 'addNote' hit).
 export function addNoteAt(state: MelodyState, index: number, step: number): void {
-  state.items.splice(index, 0, { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX });
+  state.items.splice(index, 0, { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX, dots: 0 });
   clampScroll(state);
 }
 
@@ -441,28 +453,176 @@ function indexFromX(layout: MelodyLayout, pointerX: number, itemCount: number, s
   return Math.min(itemCount, Math.max(0, visibleSlot + scrollIndex));
 }
 
-// Called on every pointermove of a horizontal-axis item drag
-// (ui/interaction.ts's melodyPress) — moves `item` to whatever slot the
-// pointer is over right now, among the OTHER items' own slots (removing
-// `item` from consideration first, so it doesn't block its own gap from
-// closing beneath it). This is what makes neighbors shift live to make room
-// as the dragged item passes over them, and what makes the gap it left
-// behind close immediately rather than needing a separate step on drop —
-// there's nothing left to "clean up" on release, the array is already in
-// its final order.
-export function reorderDuringDrag(graph: EntityGraph, entityId: string, item: MelodyItem, pointerX: number, drag?: DragContext): void {
+function resolveLayoutFor(
+  graph: EntityGraph,
+  entityId: string,
+  drag?: DragContext
+): { state: MelodyState; layout: MelodyLayout } | null {
   const feature = graph.get(entityId);
   const owner = feature && ownerOf(graph, feature);
-  if (!feature || !owner) return;
-
+  if (!feature || !owner) return null;
   const state = melodyStateFor(entityId);
-  if (!state.items.includes(item)) return;
   const layout = computeLayout(graph, owner, state.items.length, drag);
+  return { state, layout };
+}
 
+function spliceAtPointerX(state: MelodyState, layout: MelodyLayout, item: MelodyItem, pointerX: number): void {
   const others = state.items.filter((i) => i !== item);
   const targetIndex = indexFromX(layout, pointerX, others.length, state.scrollIndex);
   others.splice(targetIndex, 0, item);
   state.items = others;
+}
+
+// How close the pointer needs to be to a same-pitch note's own slot before
+// that note freezes in place (see reorderDuringDrag) — a fraction of one
+// slot's spacing, not a fixed pixel count, so it scales with
+// DEFAULT_ITEM_SPACING if that's ever retuned.
+const MERGE_HOVER_FRACTION = 0.5;
+
+// The nearest OTHER note of the exact same written pitch (step AND
+// accidental — a merge only makes sense between genuinely identical notes),
+// if the pointer is currently within MERGE_HOVER_FRACTION of a slot's width
+// of it. Duration compatibility is NOT checked here — that's decided at
+// drop time (mergeIntoTarget) — this only decides whether the target
+// freezes during the drag at all.
+function nearestSamePitchNote(
+  state: MelodyState,
+  layout: MelodyLayout,
+  dragged: MelodyNoteItem,
+  pointerX: number
+): MelodyNoteItem | null {
+  let best: MelodyNoteItem | null = null;
+  let bestDist = Infinity;
+  for (let i = 0; i < state.items.length; i++) {
+    const other = state.items[i];
+    if (other === dragged || other.kind !== 'note') continue;
+    if (other.step !== dragged.step || other.accidental !== dragged.accidental) continue;
+    const x = itemSlotX(layout, i - state.scrollIndex);
+    const d = Math.abs(x - pointerX);
+    if (d < bestDist) {
+      bestDist = d;
+      best = other;
+    }
+  }
+  return best && bestDist <= DEFAULT_ITEM_SPACING * MERGE_HOVER_FRACTION ? best : null;
+}
+
+// Called on every pointermove of a horizontal-axis item drag
+// (ui/interaction.ts's melodyPress). Two behaviors depending on what's
+// under the pointer:
+//  - Nowhere near another note of the exact same pitch: the normal live
+//    reorder applies — `item` moves to whatever slot the pointer is over
+//    right now, among the OTHER items' own slots (removing `item` from
+//    consideration first, so it doesn't block its own gap from closing
+//    beneath it). This is what makes neighbors shift live to make room as
+//    the dragged item passes over them, and what makes the gap it left
+//    behind close immediately rather than needing a separate step on drop.
+//  - Hovering a same-pitch note (nearestSamePitchNote): that note freezes
+//    in place — no reorder happens at all this frame — so it can't be
+//    shifted out of the way of the very note that's about to be dropped on
+//    it (TODO.md's melody organelle spec: "drag one note onto an adjacent
+//    note of the same pitch to add their values together"). The returned
+//    note is what ui/render.ts snaps the dragged item's own visual onto
+//    (see MelodyDragOverride) — so it reads as "sitting on top of" the
+//    target rather than the target moving — and what
+//    ui/interaction.ts's endPress passes to mergeIntoTarget on release.
+export function reorderDuringDrag(
+  graph: EntityGraph,
+  entityId: string,
+  item: MelodyItem,
+  pointerX: number,
+  drag?: DragContext
+): MelodyNoteItem | null {
+  const resolved = resolveLayoutFor(graph, entityId, drag);
+  if (!resolved) return null;
+  const { state, layout } = resolved;
+  if (!state.items.includes(item)) return null;
+
+  if (item.kind === 'note') {
+    const target = nearestSamePitchNote(state, layout, item, pointerX);
+    if (target) return target;
+  }
+
+  spliceAtPointerX(state, layout, item, pointerX);
+  return null;
+}
+
+// Places `item` at the pointer's current position with a normal reorder,
+// bypassing the same-pitch freeze above entirely — used by
+// ui/interaction.ts when a hover-merge (reorderDuringDrag's return value)
+// turns out not to be a valid dot relationship on release (mergeIntoTarget
+// returns false), so the drag still has a visible effect instead of leaving
+// `item` sitting wherever it was before the drag started.
+export function forcePlacement(graph: EntityGraph, entityId: string, item: MelodyItem, pointerX: number, drag?: DragContext): void {
+  const resolved = resolveLayoutFor(graph, entityId, drag);
+  if (!resolved) return;
+  const { state, layout } = resolved;
+  if (!state.items.includes(item)) return;
+  spliceAtPointerX(state, layout, item, pointerX);
+}
+
+// Where `item` currently renders — used by ui/render.ts to snap a dragged
+// note's own visual onto a frozen hover-merge target (reorderDuringDrag's
+// return value) instead of the raw pointer position, so it reads as
+// "sitting on top of" the target rather than following the cursor past it.
+export function itemScreenX(graph: EntityGraph, entityId: string, item: MelodyItem, drag?: DragContext): number | null {
+  const resolved = resolveLayoutFor(graph, entityId, drag);
+  if (!resolved) return null;
+  const { state, layout } = resolved;
+  const index = state.items.indexOf(item);
+  if (index === -1) return null;
+  return itemSlotX(layout, index - state.scrollIndex);
+}
+
+// True if `longer` can absorb `shorter` as one more dot: `longer` isn't
+// already double-dotted, and `shorter`'s duration is exactly `longer`'s own
+// next halving step down — its plain duration if it has no dots yet, or its
+// most recent dot's own contribution otherwise (durationInWholeNotes' own
+// comment). That's the only relationship where combining the two durations
+// is still a single notatable note (dotted or double-dotted `longer`)
+// rather than an unrepresentable sum. Pitch is NOT checked here — by the
+// time this is called, `shorter`/`longer` already came from a same-pitch
+// hover pairing (nearestSamePitchNote); kept as a separate check so it can
+// also be exercised on its own duration logic without a pitch fixture.
+function canAbsorbAsDot(longer: MelodyNoteItem, shorter: MelodyNoteItem): boolean {
+  return longer.dots < 2 && shorter.durationIndex === longer.durationIndex + longer.dots + 1;
+}
+
+// The mechanism this implements (TODO.md's melody organelle spec): drag one
+// note onto an adjacent note of the same pitch (reorderDuringDrag's hover-
+// freeze already made sure `target` didn't move out of the way) to add
+// their values together, producing a dotted or double-dotted note. Called
+// once the drag ends (ui/interaction.ts) — merging mid-drag, before the
+// player has actually released, would make the note vanish out from under
+// the cursor. Returns false if the two durations aren't a valid dot
+// relationship in either direction, so the caller can fall back to placing
+// `item` normally (forcePlacement) instead of the drag having no effect.
+export function mergeIntoTarget(entityId: string, item: MelodyNoteItem, target: MelodyNoteItem): boolean {
+  const state = melodyStateFor(entityId);
+  const itemIndex = state.items.indexOf(item);
+  const targetIndex = state.items.indexOf(target);
+  if (itemIndex === -1 || targetIndex === -1) return false;
+
+  if (canAbsorbAsDot(item, target)) {
+    // `item` survives (with one more dot) and settles into target's own
+    // slot — it visually sat "on top of" target throughout the hover, so
+    // landing there on release (rather than back wherever it started this
+    // drag) is the only position that doesn't jump. Adjusted for target's
+    // own index shifting down by one if item used to sit before it.
+    item.dots += 1;
+    const adjustedTargetIndex = itemIndex < targetIndex ? targetIndex - 1 : targetIndex;
+    state.items = state.items.filter((i) => i !== item && i !== target);
+    state.items.splice(Math.min(adjustedTargetIndex, state.items.length), 0, item);
+    clampScroll(state);
+    return true;
+  }
+  if (canAbsorbAsDot(target, item)) {
+    target.dots += 1;
+    state.items.splice(itemIndex, 1);
+    clampScroll(state);
+    return true;
+  }
+  return false;
 }
 
 // --- Scrolling ---------------------------------------------------------
@@ -721,15 +881,40 @@ function flagGlyphFor(durationIndex: number, stemUp: boolean): string | null {
 // Returns the notehead glyph's own left edge — drawAccidental and the
 // ledger-line drawing in drawMelodyPopup both need it (ledger lines extend
 // LEGER_LINE_EXTENSION_SP past this, not past the note's center).
-function drawNoteGlyph(ctx: CanvasRenderingContext2D, center: Point, durationIndex: number, stemUp: boolean, color: string): number {
+function drawNoteGlyph(
+  ctx: CanvasRenderingContext2D,
+  center: Point,
+  durationIndex: number,
+  dots: number,
+  onLine: boolean,
+  stemUp: boolean,
+  color: string
+): number {
   const { glyph, widthSp } = noteheadGlyphFor(durationIndex);
   const leftX = center.x - sp(widthSp) / 2;
+  const rightX = leftX + sp(widthSp);
 
   ctx.save();
   setBravuraFont(ctx);
   ctx.fillStyle = color;
   ctx.fillText(glyph, leftX, center.y);
   ctx.restore();
+
+  if (dots > 0) {
+    // A dot landing exactly on a staff line is nudged up into the space
+    // above it — standard engraving practice, so it doesn't read as part of
+    // the line itself. A dot in a space already sits fine unmoved.
+    const dotY = onLine ? center.y - sp(0.5) : center.y;
+    const dotGapSp = 0.2;
+    ctx.save();
+    setBravuraFont(ctx);
+    ctx.fillStyle = color;
+    for (let i = 0; i < dots; i++) {
+      const dotX = rightX + sp(dotGapSp) + i * sp(AUGMENTATION_DOT_WIDTH_SP + dotGapSp);
+      ctx.fillText(GLYPH.augmentationDot, dotX, dotY);
+    }
+    ctx.restore();
+  }
 
   if (durationIndex >= 1) {
     // Stem-attachment anchors are relative to the notehead's own origin
@@ -935,7 +1120,8 @@ export function drawMelodyPopup(
         ctx.lineTo(pos.x + ledgerHalfWidth, ly);
         ctx.stroke();
       }
-      const noteheadLeftX = drawNoteGlyph(ctx, pos, item.durationIndex, stemUpFor(renderedStep), NOTE_COLOR);
+      const onLine = renderedStep % 2 === 0; // staff lines sit at even steps, spaces at odd — see TREBLE_LINE_STEPS/BASS_LINE_STEPS
+      const noteheadLeftX = drawNoteGlyph(ctx, pos, item.durationIndex, item.dots, onLine, stemUpFor(renderedStep), NOTE_COLOR);
       drawAccidental(ctx, noteheadLeftX, pos.y, item.accidental, NOTE_COLOR);
     }
   }

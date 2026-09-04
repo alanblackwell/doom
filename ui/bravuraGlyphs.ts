@@ -35,6 +35,7 @@ export const GLYPH = {
   rest32nd: '\u{E4E8}',
   accidentalSharp: '\u{E262}',
   accidentalFlat: '\u{E260}',
+  augmentationDot: '\u{E1E7}',
   flag8thUp: '\u{E240}',
   flag8thDown: '\u{E241}',
   flag16thUp: '\u{E242}',
@@ -65,6 +66,8 @@ export const ACCIDENTAL_WIDTH_SP = {
   sharp: 0.996,
   flat: 0.904,
 } as const;
+
+export const AUGMENTATION_DOT_WIDTH_SP = 0.4;
 
 export const CLEF_WIDTH_SP = {
   gClef: 2.684,

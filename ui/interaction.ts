@@ -56,15 +56,17 @@ import {
   cycleDurationUp,
   cycleOctaveDown,
   cycleOctaveUp,
+  forcePlacement,
   hitTestMelodyPopup,
   insertBarlineAfterLast,
   insertRestAfterLast,
   melodyStateFor,
+  mergeIntoTarget,
   reorderDuringDrag,
   updateNotePitchDrag,
   updateScrollFromTrackX,
 } from './melody';
-import type { Accidental, MelodyItem } from './melody';
+import type { Accidental, MelodyItem, MelodyNoteItem } from './melody';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -158,6 +160,12 @@ export interface InteractionState {
     startAccidental: Accidental; // already nullable — see ui/melody.ts's Accidental
     dragging: boolean;
     axis: 'x' | 'y' | null;
+    // The same-pitch note (if any) currently frozen under the pointer
+    // during a horizontal drag — see ui/melody.ts's reorderDuringDrag. Read
+    // by ui/render.ts to snap the dragged note's own visual onto it, and by
+    // endPress below to merge into it (or, failing that, fall back to a
+    // normal placement) once the drag ends.
+    mergeTarget: MelodyNoteItem | null;
   } | null;
 
   // The melody popup's own horizontal scrollbar (ui/melody.ts) currently
@@ -353,6 +361,7 @@ export function attachInteraction(
             startAccidental: melodyHit.item.kind === 'note' ? melodyHit.item.accidental : null,
             dragging: false,
             axis: null,
+            mergeTarget: null,
           };
           break;
         case 'scrollTrack':
@@ -549,7 +558,7 @@ export function attachInteraction(
       }
 
       if (press.axis === 'x') {
-        reorderDuringDrag(graph, press.entityId, press.item, point.x);
+        press.mergeTarget = reorderDuringDrag(graph, press.entityId, press.item, point.x);
       } else if (press.item.kind === 'note' && press.startStep !== null) {
         updateNotePitchDrag(press.item, press.startStep, press.startAccidental, dy);
       }
@@ -722,11 +731,24 @@ export function attachInteraction(
 
     if (state.melodyPress) {
       canvas.releasePointerCapture(e.pointerId);
-      // A release without ever crossing DRAG_START_THRESHOLD is a plain
-      // click — cycle the item's duration down one step (see TODO.md's
-      // melody organelle spec); an actual drag just ends here, its
-      // position/pitch already applied live by pointermove above.
-      if (!state.melodyPress.dragging) cycleDurationDown(state.melodyPress.item);
+      const press = state.melodyPress;
+      if (!press.dragging) {
+        // A release without ever crossing DRAG_START_THRESHOLD is a plain
+        // click — cycle the item's duration down one step (see TODO.md's
+        // melody organelle spec).
+        cycleDurationDown(press.item);
+      } else if (press.axis === 'x' && press.item.kind === 'note' && press.mergeTarget) {
+        // Was hovering a same-pitch note when released (it froze in place
+        // rather than reordering — see reorderDuringDrag) — merge into it
+        // (TODO.md's spec: dotted/double-dotted notes). If the two
+        // durations don't actually form a valid dot relationship, place the
+        // note normally instead of the drag having no effect at all.
+        if (!mergeIntoTarget(press.entityId, press.item, press.mergeTarget)) {
+          forcePlacement(graph, press.entityId, press.item, press.currentPointer.x);
+        }
+      }
+      // A normal horizontal reorder (no merge target) already applied its
+      // position live via pointermove above — nothing further to do here.
       state.melodyPress = null;
       return;
     }
