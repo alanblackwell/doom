@@ -6,7 +6,7 @@
 // logic in layout.ts.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
-import { PROCESSOR_KINDS, TRIGGERED_KINDS, isEntityPlaying } from '../audio/graph';
+import { CONTINUOUS_KINDS, PROCESSOR_KINDS, TRIGGERED_KINDS, isEntityPaused, isEntityPlaying } from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds } from './layout';
 import type { DragContext, Point, Rect } from './layout';
 import type { InteractionState } from './interaction';
@@ -282,8 +282,12 @@ function drawControls(
 
 // Center trigger pad for one-shot instruments (audio/graph.ts's
 // TRIGGERED_KINDS) — a quiet ring at rest, with an expanding-and-fading
-// flash ring on trigger for "you hit it" feedback. Called from
-// renderFrame()'s final overlay pass, same reasoning as drawControls above.
+// flash ring on trigger for "you hit it" feedback. Also doubles as the
+// play/pause button for a continuous drone (CONTINUOUS_KINDS) — same ring/
+// icon-swap/flash treatment, an event wire can land on either kind's pad
+// exactly the same way (see ui/interaction.ts), just with different
+// semantics once it fires. Called from renderFrame()'s final overlay pass,
+// same reasoning as drawControls above.
 function drawPad(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
@@ -291,7 +295,8 @@ function drawPad(
   interaction: InteractionState,
   now: number
 ): void {
-  if (!TRIGGERED_KINDS.has(entity.kind)) return;
+  const continuous = CONTINUOUS_KINDS.has(entity.kind);
+  if (!TRIGGERED_KINDS.has(entity.kind) && !continuous) return;
 
   const radius = padRadius(bounds);
 
@@ -315,12 +320,17 @@ function drawPad(
 
   // Small "play"-style triangle at rest, subtle — enough to read as a
   // button without competing with the id/kind labels underneath it. Swaps
-  // to a "pause"-style two-bar icon while a 'sample' entity is actually
-  // playing (see audio/graph.ts's isEntityPlaying) — always false for the
-  // other TRIGGERED_KINDS, so their pad never shows this.
+  // to a "pause"-style two-bar icon while sound is actually coming out of
+  // it: for a 'sample' entity, once playback has actually started (see
+  // audio/graph.ts's isEntityPlaying — always false for the other
+  // TRIGGERED_KINDS, so their pad never shows this); for a CONTINUOUS_KINDS
+  // drone, the icon's polarity is reversed — playing is its normal resting
+  // state, so the bars show whenever it's NOT paused, inviting a click to
+  // pause rather than to start something that's already sounding.
   ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
   const s = radius * 0.5;
-  if (isEntityPlaying(entity.id)) {
+  const showPauseIcon = continuous ? !isEntityPaused(entity.id) : isEntityPlaying(entity.id);
+  if (showPauseIcon) {
     const barWidth = s * 0.4;
     const barHeight = s * 1.4;
     ctx.fillRect(bounds.x - s * 0.6, bounds.y - barHeight / 2, barWidth, barHeight);

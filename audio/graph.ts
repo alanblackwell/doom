@@ -72,6 +72,15 @@ export function setPan(entityId: string, value: number): void {
 // exists.
 export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample']);
 
+// Source kinds that play continuously as soon as their nodes are built,
+// rather than needing to be triggered (TRIGGERED_KINDS above) or acting as
+// a processing container (PROCESSOR_KINDS below) — exported so the UI
+// knows which entities get a play/pause button (ui/render.ts's drawPad,
+// ui/interaction.ts's pad-press/event-wire handling) in the same style as
+// a TRIGGERED_KINDS entity's own trigger pad, wired the same way too (see
+// activateEventTarget below).
+export const CONTINUOUS_KINDS = new Set(['bass', 'bow']);
+
 // Below this actual playback time (buffer duration / current speed — see
 // the 'sample' case's registerTrigger), a pad hit layers a fresh voice on
 // top of whatever's already sounding (like kick/pluck/metal's short
@@ -151,6 +160,64 @@ const playingEntities = new Set<string>();
 
 export function isEntityPlaying(entityId: string): boolean {
   return playingEntities.has(entityId);
+}
+
+// entityId -> the dedicated mute gain a CONTINUOUS_KINDS entity's own
+// generator case (below) inserts after its normal level control — kept
+// separate from that level gain rather than reusing it, so toggling pause
+// can never race with (or get silently undone by) the user still dragging
+// the level control-dot slider while paused; whatever level was set while
+// paused is simply what's revealed again on resume.
+const pauseGatesByEntity = new Map<string, GainNode>();
+
+// Starts muted — a continuous synth stays silent until the user explicitly
+// presses its play/pause button (or fires an event wire into it), rather
+// than sounding the instant its nodes are built. gate.gain's own initial
+// value is set directly here (not ramped via setEntityPaused — there's
+// nothing playing yet to ramp away from), and pausedEntities is seeded to
+// match so isEntityPaused already reads true before any toggle happens.
+function registerPauseGate(entityId: string, gate: GainNode): void {
+  pauseGatesByEntity.set(entityId, gate);
+  gate.gain.value = 0;
+  pausedEntities.add(entityId);
+}
+
+// Mirrors playingEntities/isEntityPlaying above, for the same reason: a
+// stable current on/off state for ui/render.ts's play/pause icon and
+// ui/interaction.ts's toggle to read, independent of whatever the gate's
+// own AudioParam happens to read mid-ramp (see setEntityPaused's
+// setTargetAtTime).
+const pausedEntities = new Set<string>();
+
+export function isEntityPaused(entityId: string): boolean {
+  return pausedEntities.has(entityId);
+}
+
+function setEntityPaused(entityId: string, paused: boolean): void {
+  const gate = pauseGatesByEntity.get(entityId);
+  if (!gate) return;
+  if (paused) pausedEntities.add(entityId);
+  else pausedEntities.delete(entityId);
+  gate.gain.setTargetAtTime(paused ? 0 : 1, getAudioContext().currentTime, 0.02);
+}
+
+export function toggleEntityPaused(entityId: string): void {
+  setEntityPaused(entityId, !isEntityPaused(entityId));
+}
+
+// What "fire an event at this entity" (ui/interaction.ts's
+// fireEventWireTargets — a wire's target, or the clock's every-beat
+// targets) actually means depends on which of these two mutually exclusive
+// registries the target's own generator case populated: a TRIGGERED_KINDS
+// entity re-hits (triggerEntity), a CONTINUOUS_KINDS one toggles play/pause
+// instead — exactly one of the two is ever a no-op for a given id, so
+// there's no need to look up the entity's kind here at all.
+export function activateEventTarget(entityId: string): void {
+  if (triggersByEntity.has(entityId)) {
+    triggerEntity(entityId);
+  } else if (pauseGatesByEntity.has(entityId)) {
+    toggleEntityPaused(entityId);
+  }
 }
 
 // Wall-clock (performance.now()) timing for an in-progress envelope, so
@@ -255,6 +322,13 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       level.gain.value = entity.params.level ?? 0.5;
       bass.connect(level);
 
+      // See registerPauseGate's own comment — a separate mute gain after
+      // level, not level itself, so the play/pause button (CONTINUOUS_KINDS)
+      // never fights the level control-dot slider.
+      const pauseGate = ctx.createGain();
+      level.connect(pauseGate);
+      registerPauseGate(entity.id, pauseGate);
+
       registerControls(entity.id, {
         level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
         // Genuinely click-free, unlike the bow's frequency control — see
@@ -262,7 +336,7 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         frequency: (value) => bass.port.postMessage({ type: 'setFrequency', value }),
       });
 
-      return level;
+      return pauseGate;
     }
     case 'bow': {
       const bow = new AudioWorkletNode(ctx, 'bow-processor', {
@@ -282,6 +356,13 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       level.gain.value = entity.params.level ?? 0.5;
       bow.connect(level);
 
+      // See registerPauseGate's own comment — a separate mute gain after
+      // level, not level itself, so the play/pause button (CONTINUOUS_KINDS)
+      // never fights the level control-dot slider.
+      const pauseGate = ctx.createGain();
+      level.connect(pauseGate);
+      registerPauseGate(entity.id, pauseGate);
+
       // None of these are native AudioParams — frequency, bow speed, and
       // bow pressure are all baked into the WASM voice's internal state
       // rather than read per-sample, so live changes go through the
@@ -293,7 +374,7 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         bowPressure: (value) => bow.port.postMessage({ type: 'setPressure', value }),
       });
 
-      return level;
+      return pauseGate;
     }
     case 'kick': {
       const voiceOutput = ctx.createGain(); // summing point for each transient hit; not itself an envelope

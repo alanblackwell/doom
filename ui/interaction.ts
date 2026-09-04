@@ -8,11 +8,14 @@ import type { Entity, EntityGraph } from '../audio/entityGraph';
 import {
   reparentEntity as reparentAudio,
   activateEntity,
+  activateEventTarget,
   getControlSetter,
   releaseEntity,
   triggerEntity,
+  toggleEntityPaused,
   isEntityPlaying,
   stopEntity,
+  CONTINUOUS_KINDS,
   PROCESSOR_KINDS,
   TRIGGERED_KINDS,
 } from '../audio/graph';
@@ -194,7 +197,10 @@ function fireTap(entityId: string, state: InteractionState): void {
 // one-off click/keypress uses, rather than duplicating it.
 export function fireEventWireTargets(entityId: string, state: InteractionState): void {
   for (const wire of getEventWiresFrom(entityId)) {
-    triggerEntity(wire.targetEntityId);
+    // Trigger (TRIGGERED_KINDS) or toggle play/pause (CONTINUOUS_KINDS),
+    // whichever this particular target actually is — see
+    // audio/graph.ts's own comment on activateEventTarget.
+    activateEventTarget(wire.targetEntityId);
     state.triggerFlashes.set(wire.targetEntityId, performance.now());
   }
 }
@@ -352,6 +358,12 @@ export function attachInteraction(
         // feature attached, so tracked unconditionally.
         state.gatedId = hit.id;
       }
+    } else if (CONTINUOUS_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
+      // Same pad/button, same press-fires-immediately reasoning as above,
+      // but a plain toggle rather than a trigger — no gatedId hold-release
+      // gesture involved, since play/pause has no envelope to gate.
+      toggleEntityPaused(hit.id);
+      state.triggerFlashes.set(hit.id, performance.now());
     } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see
@@ -407,18 +419,22 @@ export function attachInteraction(
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
 
-      // A TRIGGERED_KINDS instrument's whole pad circle (see ui/pads.ts) is
-      // always a valid drop target from ANY control-type source's bump —
-      // not just an event-only source like tap. Whether anything actually
-      // fires through it depends on whether that source ever calls
-      // fireEventWireTargets (tap on click/keypress, the clock on every
-      // beat) — a knob dropped here would just sit inert, same as a tap
-      // dropped on a value dot already silently does nothing. Checked
-      // before dot-targeting since the pad is the bigger, more likely
-      // target when both are near the pointer.
+      // A TRIGGERED_KINDS instrument's or CONTINUOUS_KINDS drone's whole pad
+      // circle (see ui/pads.ts) is always a valid drop target from ANY
+      // control-type source's bump — not just an event-only source like
+      // tap. Whether anything actually fires through it depends on whether
+      // that source ever calls fireEventWireTargets (tap on click/keypress,
+      // the clock on every beat) — a knob dropped here would just sit
+      // inert, same as a tap dropped on a value dot already silently does
+      // nothing. Checked before dot-targeting since the pad is the bigger,
+      // more likely target when both are near the pointer.
       const padHit = hitTest(graph, point, new Set());
       const validPadHit =
-        source && padHit && padHit.id !== source.id && TRIGGERED_KINDS.has(padHit.kind) && isWithinPad(effectiveBounds(graph, padHit), point)
+        source &&
+        padHit &&
+        padHit.id !== source.id &&
+        (TRIGGERED_KINDS.has(padHit.kind) || CONTINUOUS_KINDS.has(padHit.kind)) &&
+        isWithinPad(effectiveBounds(graph, padHit), point)
           ? padHit
           : null;
 
@@ -660,7 +676,11 @@ export function attachInteraction(
     }
 
     const bodyHit = hitTest(graph, point, new Set());
-    if (bodyHit && TRIGGERED_KINDS.has(bodyHit.kind) && isWithinPad(effectiveBounds(graph, bodyHit), point)) {
+    if (
+      bodyHit &&
+      (TRIGGERED_KINDS.has(bodyHit.kind) || CONTINUOUS_KINDS.has(bodyHit.kind)) &&
+      isWithinPad(effectiveBounds(graph, bodyHit), point)
+    ) {
       e.preventDefault();
       removeEventWiresTo(bodyHit.id);
     }
