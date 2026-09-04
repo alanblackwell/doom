@@ -30,7 +30,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { ownerOf, popupRectFor, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { ownerOf, popupRectFor, CLOSE_BUTTON_RADIUS } from './organelle';
 import { ACCENT } from './palette';
 import { flatMakesSense, sharpMakesSense } from './musicTheory';
 import { isBravuraReady } from './bravuraFont';
@@ -104,7 +104,7 @@ export function melodyStateFor(entityId: string): MelodyState {
 // than reset, so a mutation elsewhere in the visible window doesn't yank
 // the view back to the start.
 function clampScroll(state: MelodyState): void {
-  const maxScroll = Math.max(0, state.items.length - VISIBLE_SLOTS);
+  const maxScroll = maxScrollFor(state.items.length);
   state.scrollIndex = Math.min(maxScroll, Math.max(0, state.scrollIndex));
 }
 
@@ -175,19 +175,45 @@ const FIRST_ITEM_OFFSET = 14; // px from staffLeft to item index 0's slot — cl
 // are just barline items the player inserts manually). Tune by eye.
 const VISIBLE_SLOTS = 8;
 
+// The furthest scrollIndex can go — always a full extra window's worth of
+// blank space beyond the real content (not just itemCount - VISIBLE_SLOTS,
+// which would cap scrolling the instant the last item reaches the right
+// edge). This is what makes it possible to always scroll right into a
+// full-width blank working area, no matter how full the staff already is —
+// see hitTestMelodyPopup's/drawMelodyPopup's own item loops, which just
+// skip drawing/hit-testing any slot past the real items, so scrolling out
+// here costs nothing but empty staff.
+function maxScrollFor(itemCount: number): number {
+  return itemCount;
+}
+
 // `index`/`step` are already resolved against the layout in effect at click
 // time (see hitTestMelodyPopup's 'addNote' hit).
 export function addNoteAt(state: MelodyState, index: number, step: number): void {
   state.items.splice(index, 0, { kind: 'note', step, accidental: null, durationIndex: DEFAULT_DURATION_INDEX, dots: 0 });
-  clampScroll(state);
+  if (index === state.items.length - 1) {
+    // Appended at the tail (as opposed to inserted somewhere in the middle
+    // of the existing sequence) — same "keep at least one blank slot
+    // visible after it" auto-scroll as insertRestAfterLast/
+    // insertBarlineAfterLast below, so repeatedly clicking to add notes
+    // left-to-right never runs out of visible room to click into next. A
+    // mid-sequence insertion leaves the current view alone instead —
+    // there's no reason editing existing content should yank the view to
+    // the end.
+    scrollToEnd(state);
+  } else {
+    clampScroll(state);
+  }
 }
 
-// Scrolls to reveal the newly-appended item — "after the last note" (TODO.md)
-// would otherwise land off the right edge of the visible window as soon as
-// there are already more than VISIBLE_SLOTS items, silently doing nothing
-// the player could see.
+// Scrolls to reveal the newly-appended item with at least one blank slot
+// still visible after it (rather than flush against the right edge) —
+// "after the last note" (TODO.md) would otherwise land off the visible
+// window entirely as soon as there are already more than VISIBLE_SLOTS
+// items, silently doing nothing the player could see.
 function scrollToEnd(state: MelodyState): void {
-  state.scrollIndex = Math.max(0, state.items.length - VISIBLE_SLOTS);
+  state.scrollIndex = Math.max(0, state.items.length - VISIBLE_SLOTS + 1);
+  clampScroll(state);
 }
 
 export function insertRestAfterLast(state: MelodyState): void {
@@ -292,6 +318,12 @@ const STAFF_PIXEL_HEIGHT = (TOP_STEP - BOTTOM_STEP) * STEP_PX; // 140
 const CLEF_COLUMN_WIDTH = 34;
 const ICON_COLUMN_WIDTH = 34;
 const OCTAVE_BUTTON_SIZE = 16;
+// The window's top edge sits flush with the top of the close button/+8ve
+// button cluster (both top-aligned at staffTop - this margin — see
+// computeLayout's closeButton/octaveUpButton) — melody has no title text
+// (unlike the envelope popup, which uses organelle.ts's own TITLE_HEIGHT)
+// needing any more room above the staff than that.
+const TOP_MARGIN = OCTAVE_BUTTON_SIZE / 2;
 
 // The window's top/bottom edge sits this far past the OUTER of the two
 // ledger lines beyond the stave (TOP_STEP/BOTTOM_STEP) — approximating a
@@ -323,7 +355,7 @@ function needsScrollbar(itemCount: number): boolean {
 }
 
 function melodyPopupHeight(itemCount: number): number {
-  const base = TITLE_HEIGHT + NOTE_HEAD_HEIGHT + STAFF_PIXEL_HEIGHT + NOTE_HEAD_HEIGHT;
+  const base = TOP_MARGIN + STAFF_PIXEL_HEIGHT + NOTE_HEAD_HEIGHT;
   return needsScrollbar(itemCount) ? base + SCROLLBAR_ROW_HEIGHT : base;
 }
 
@@ -366,7 +398,7 @@ function computeLayout(graph: EntityGraph, owner: Entity, itemCount: number, dra
 
   const staffLeft = left + CLEF_COLUMN_WIDTH;
   const staffRight = left + popup.width - ICON_COLUMN_WIDTH;
-  const staffTop = top + TITLE_HEIGHT + NOTE_HEAD_HEIGHT;
+  const staffTop = top + TOP_MARGIN;
   const staffBottom = staffTop + STAFF_PIXEL_HEIGHT;
   const middleCY = (staffTop + staffBottom) / 2; // step 0 is exactly centered — see TOP_STEP/BOTTOM_STEP's symmetry
 
@@ -401,7 +433,11 @@ function computeLayout(graph: EntityGraph, owner: Entity, itemCount: number, dra
     scrollTrack: needsScrollbar(itemCount)
       ? {
           x: (staffLeft + staffRight) / 2,
-          y: staffBottom + NOTE_HEAD_HEIGHT + SCROLLBAR_ROW_HEIGHT / 2,
+          // Aligned with the bottom of the -8ve button (whose own bottom
+          // edge is staffBottom + OCTAVE_BUTTON_SIZE / 2, same as
+          // octaveDownButton's own y + height/2 above) rather than sitting
+          // lower in the reserved bottom margin.
+          y: staffBottom + OCTAVE_BUTTON_SIZE / 2,
           width: staffRight - staffLeft,
           height: SCROLLBAR_ROW_HEIGHT,
         }
@@ -630,14 +666,20 @@ export function mergeIntoTarget(entityId: string, item: MelodyNoteItem, target: 
 // Proportional to how much of the sequence is visible at once
 // (VISIBLE_SLOTS / itemCount) — never narrower than SCROLLBAR_MIN_THUMB_WIDTH,
 // so the thumb stays grabbable even when there are many items.
+// Proportional to how much of the full scrollable range (real content PLUS
+// the always-available trailing blank window — see maxScrollFor) is visible
+// at once, not just how much of the real content is — otherwise the thumb
+// would read as "you can see everything" right as the blank working area
+// past the end becomes the only thing left to scroll into.
 function thumbWidthFor(trackWidth: number, itemCount: number): number {
-  const proportion = Math.min(1, VISIBLE_SLOTS / itemCount);
+  const virtualLength = itemCount + VISIBLE_SLOTS;
+  const proportion = Math.min(1, VISIBLE_SLOTS / virtualLength);
   return Math.max(SCROLLBAR_MIN_THUMB_WIDTH, trackWidth * proportion);
 }
 
 function thumbXFor(track: Rect, itemCount: number, scrollIndex: number): number {
   const trackLeft = track.x - track.width / 2;
-  const maxScroll = Math.max(0, itemCount - VISIBLE_SLOTS);
+  const maxScroll = maxScrollFor(itemCount);
   if (maxScroll === 0) return trackLeft;
   const thumbWidth = thumbWidthFor(track.width, itemCount);
   return trackLeft + (track.width - thumbWidth) * (scrollIndex / maxScroll);
@@ -660,7 +702,7 @@ export function updateScrollFromTrackX(graph: EntityGraph, entityId: string, poi
   const track = layout.scrollTrack;
   if (!track) return;
 
-  const maxScroll = Math.max(0, state.items.length - VISIBLE_SLOTS);
+  const maxScroll = maxScrollFor(state.items.length);
   if (maxScroll === 0) return;
   const thumbWidth = thumbWidthFor(track.width, state.items.length);
   const trackLeft = track.x - track.width / 2;
