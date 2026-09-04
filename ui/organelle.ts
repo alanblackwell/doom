@@ -47,8 +47,10 @@ function dist(a: Point, b: Point): number {
 // docked (silent and off-canvas — nothing for the organelle to anchor to,
 // see audio/entityGraph.ts's Entity.docked). Every exported function below
 // that takes a bare feature `entity` resolves this first and bails to
-// null/false if it comes back empty.
-function ownerOf(graph: EntityGraph, entity: Entity): Entity | undefined {
+// null/false if it comes back empty. Exported so other feature-kind modules
+// (e.g. ui/melody.ts) can resolve an owner the same way without duplicating
+// the docked/missing-owner guard.
+export function ownerOf(graph: EntityGraph, entity: Entity): Entity | undefined {
   const owner = entity.ownerId ? graph.get(entity.ownerId) : undefined;
   return owner && !owner.docked ? owner : undefined;
 }
@@ -62,8 +64,8 @@ export const POPUP_WIDTH = 240;
 export const POPUP_HEIGHT = 170;
 const POPUP_OFFSET_X = 16; // porthole to popup's near (bottom-left) corner
 const POPUP_OFFSET_Y = 16;
-const TITLE_HEIGHT = 22;
-const CLOSE_BUTTON_RADIUS = 7;
+export const TITLE_HEIGHT = 22;
+export const CLOSE_BUTTON_RADIUS = 7;
 const DOT_COLUMN_INSET = 18; // from the popup's left edge
 const DOT_SPACING = 22;
 const DOT_BOTTOM_INSET = 22; // from the popup's bottom edge, where index 0 sits
@@ -71,16 +73,24 @@ const DOT_BOTTOM_INSET = 22; // from the popup's bottom edge, where index 0 sits
 // Anchored to the porthole's current position, growing up and to the right
 // from it — not draggable/repositionable in this version, and not clamped
 // to the viewport, so a porthole very near the canvas's own edge can run a
-// popup off it. A reasonable v1 gap, not a design ceiling.
-export function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext): Rect {
+// popup off it. A reasonable v1 gap, not a design ceiling. Takes an explicit
+// size so other feature kinds with a differently-shaped popup (e.g.
+// ui/melody.ts's grand-staff editor, much bigger than the envelope's curve)
+// can reuse the same anchoring math — popupRect below is just this called
+// with the envelope's own fixed size.
+export function popupRectFor(graph: EntityGraph, owner: Entity, width: number, height: number, drag?: DragContext): Rect {
   const porthole = portholePosition(graph, owner, drag);
   const left = porthole.x + POPUP_OFFSET_X;
   const bottom = porthole.y - POPUP_OFFSET_Y;
-  const top = bottom - POPUP_HEIGHT;
-  return { x: left + POPUP_WIDTH / 2, y: top + POPUP_HEIGHT / 2, width: POPUP_WIDTH, height: POPUP_HEIGHT };
+  const top = bottom - height;
+  return { x: left + width / 2, y: top + height / 2, width, height };
 }
 
-function closeButtonPosition(popup: Rect): Point {
+export function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext): Rect {
+  return popupRectFor(graph, owner, POPUP_WIDTH, POPUP_HEIGHT, drag);
+}
+
+export function closeButtonPosition(popup: Rect): Point {
   return { x: popup.x + popup.width / 2 - 14, y: popup.y - popup.height / 2 + 12 };
 }
 
@@ -331,7 +341,15 @@ function withinAxisHandleZone(popup: Rect, point: Point): boolean {
 
 export function hitTestPopup(graph: EntityGraph, point: Point, drag?: DragContext): PopupHit | null {
   for (const entity of graph.all()) {
-    if (entity.type !== 'feature' || !entity.expanded) continue;
+    // Envelope-specific hit-testing only (curve geometry, ADSR handles) —
+    // other feature kinds own their own popup shape and hit-testing
+    // entirely (e.g. ui/melody.ts's hitTestMelodyPopup for kind 'melody'),
+    // called separately by ui/interaction.ts before this. Without this
+    // guard a different kind's (differently-sized) popup would still get
+    // matched here against the envelope's own POPUP_WIDTH/HEIGHT-derived
+    // rect, stealing clicks that land in the real popup but outside that
+    // unrelated phantom rect.
+    if (entity.type !== 'feature' || entity.kind !== 'envelope' || !entity.expanded) continue;
     const owner = ownerOf(graph, entity);
     if (!owner) continue;
 

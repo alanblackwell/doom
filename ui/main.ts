@@ -15,6 +15,7 @@ import { attachSampleDrop } from './sampleDrop';
 import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
 import { attachTextureEditor } from './textureEditor';
 import { attachAppearancePackDrop, exportAppearancePack, hasExportableAppearance, loadDefaultAppearance } from './appearancePack';
+import { loadBravuraFont } from './bravuraFont';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -65,6 +66,28 @@ graph.add({
   seed: 2,
   docked: true,
   ownerId: null,
+  expanded: false,
+});
+// bow-1's melody organelle (EntityType 'feature', kind 'melody' —
+// ui/melody.ts) — same porthole/popup mechanism as the ADSR envelope
+// organelles below, just a grand-staff note editor instead of a curve. No
+// audio wiring yet (see TODO.md's melody organelle spec and ui/melody.ts's
+// own header comment) — purely the editing surface for now. x/y/width/
+// height/seed are unused for a feature entity, same as pluck-1-envelope.
+graph.add({
+  id: 'bow-1-melody',
+  type: 'feature',
+  kind: 'melody',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 16,
+  docked: false,
+  ownerId: 'bow-1',
   expanded: false,
 });
 // One-shot, not a drone — click the pad at its center to fire a hit rather
@@ -381,6 +404,14 @@ attachAppearancePackDrop(canvas);
 // saved one, so this doesn't need to block or sequence against draw() below.
 loadDefaultAppearance().catch((err) => {
   console.error('Failed to load default appearance:', err);
+});
+
+// The melody organelle's notation font (ui/bravuraFont.ts) — started as
+// early as possible since it's needed the moment any melody popup first
+// opens; drawMelodyPopup gates its glyph drawing on isBravuraReady() rather
+// than waiting on this promise, so it doesn't need to block startup either.
+loadBravuraFont().catch((err) => {
+  console.error('Failed to load Bravura font:', err);
 });
 
 // Two independent states: whether the engine/graph has been built at all

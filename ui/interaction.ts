@@ -50,6 +50,21 @@ import {
   DEFAULT_TIME_SCALE,
 } from './organelle';
 import type { HandleKind } from './organelle';
+import {
+  addNoteAt,
+  cycleDurationDown,
+  cycleDurationUp,
+  cycleOctaveDown,
+  cycleOctaveUp,
+  hitTestMelodyPopup,
+  insertBarlineAfterLast,
+  insertRestAfterLast,
+  melodyStateFor,
+  reorderDuringDrag,
+  updateNotePitchDrag,
+  updateScrollFromTrackX,
+} from './melody';
+import type { Accidental, MelodyItem } from './melody';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -121,6 +136,36 @@ export interface InteractionState {
   // unconditionally for every TRIGGERED_KINDS press rather than needing to
   // first check whether one exists.
   gatedId: string | null;
+
+  // A press begun on an existing melody-popup item (ui/melody.ts) — held
+  // here rather than starting a drag immediately, same DRAG_START_THRESHOLD
+  // idiom the top-level entity drag below uses: a release before crossing
+  // the threshold is a plain click (cycles the item's duration down one
+  // step), movement past it promotes to an actual reposition/repitch drag.
+  // `axis` is decided once, from whichever of dx/dy is larger at the moment
+  // the threshold is first crossed, and then frozen for the rest of the
+  // drag — horizontal reorders the sequence (ui/melody.ts's
+  // reorderDuringDrag), vertical repitches the note, and the two never mix
+  // within one gesture, so a mostly-sideways drag can't also nudge the
+  // pitch from incidental vertical jitter. startStep/startAccidental are
+  // only meaningful for a 'note' item.
+  melodyPress: {
+    entityId: string;
+    item: MelodyItem;
+    startPointer: Point;
+    currentPointer: Point; // live — kept in sync every pointermove, read by ui/render.ts for a horizontal drag's continuous visual (see MelodyDragOverride)
+    startStep: number | null;
+    startAccidental: Accidental; // already nullable — see ui/melody.ts's Accidental
+    dragging: boolean;
+    axis: 'x' | 'y' | null;
+  } | null;
+
+  // The melody popup's own horizontal scrollbar (ui/melody.ts) currently
+  // being dragged, if any — no press/threshold distinction needed here
+  // unlike melodyPress, since there's nothing else a press on the track
+  // could mean (see updateScrollFromTrackX's own "jump to the click,
+  // continue tracking from there" behavior).
+  melodyScrollDrag: { entityId: string } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -142,6 +187,8 @@ export function createInteractionState(): InteractionState {
     draggingHandle: null,
     draggingTimeAxis: null,
     gatedId: null,
+    melodyPress: null,
+    melodyScrollDrag: null,
   };
 }
 
@@ -248,7 +295,76 @@ export function attachInteraction(
     // at all rather than fight it for the same events.
     if (isTextureEditorActive()) return;
 
+    // Secondary-button presses (a real right mouse button, or its trackpad
+    // surrogates — Safari's two-finger tap included) fire pointerdown AND
+    // pointerup in addition to 'contextmenu', with the same button value in
+    // every browser tested (button === 2) — this module's own right-click
+    // handling lives entirely in the separate 'contextmenu' listener below,
+    // so nothing here should react to a non-primary press at all. Without
+    // this guard, a right-click on a melody item was starting a normal
+    // melodyPress (since hitTestMelodyPopup doesn't know or care which
+    // button was used) that then released as an un-dragged "click" on
+    // pointerup — cycling the item's duration DOWN one step immediately
+    // after 'contextmenu' had just cycled it UP, silently cancelling the
+    // double back to its original value. The same latent issue applied to
+    // every other pointerdown-driven action below (selection, entity drag,
+    // control drag, wiring, ...), just without anything as immediately
+    // visible as this cancel-each-other-out pair to reveal it.
+    if (e.button !== 0) return;
+
     const point = canvasPoint(e);
+
+    // An open melody popup (ui/melody.ts) sits visually on top of everything
+    // else too, same reasoning as the envelope popup right below — checked
+    // first since it's a distinct feature kind with its own hit-testing
+    // (organelle.ts's hitTestPopup only handles kind 'envelope').
+    const melodyHit = hitTestMelodyPopup(graph, point);
+    if (melodyHit) {
+      const melody = melodyStateFor(melodyHit.entityId);
+      switch (melodyHit.kind) {
+        case 'close': {
+          const feature = graph.get(melodyHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'octaveUp':
+          cycleOctaveUp(melody);
+          break;
+        case 'octaveDown':
+          cycleOctaveDown(melody);
+          break;
+        case 'restIcon':
+          insertRestAfterLast(melody);
+          break;
+        case 'barlineIcon':
+          insertBarlineAfterLast(melody);
+          break;
+        case 'addNote':
+          addNoteAt(melody, melodyHit.index, melodyHit.step);
+          break;
+        case 'item':
+          canvas.setPointerCapture(e.pointerId);
+          state.melodyPress = {
+            entityId: melodyHit.entityId,
+            item: melodyHit.item,
+            startPointer: point,
+            currentPointer: point,
+            startStep: melodyHit.item.kind === 'note' ? melodyHit.item.step : null,
+            startAccidental: melodyHit.item.kind === 'note' ? melodyHit.item.accidental : null,
+            dragging: false,
+            axis: null,
+          };
+          break;
+        case 'scrollTrack':
+          canvas.setPointerCapture(e.pointerId);
+          updateScrollFromTrackX(graph, melodyHit.entityId, point.x); // jump to the click, then keep tracking on move
+          state.melodyScrollDrag = { entityId: melodyHit.entityId };
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // envelope popup's own catch-all below.
+      }
+      return;
+    }
 
     // An open envelope popup (ui/organelle.ts) sits visually on top of
     // everything else on the canvas, so its own hit-test goes first — a
@@ -415,6 +531,31 @@ export function attachInteraction(
       return;
     }
 
+    if (state.melodyScrollDrag) {
+      updateScrollFromTrackX(graph, state.melodyScrollDrag.entityId, point.x);
+      return;
+    }
+
+    if (state.melodyPress) {
+      const press = state.melodyPress;
+      press.currentPointer = point;
+      const dx = point.x - press.startPointer.x;
+      const dy = point.y - press.startPointer.y;
+      if (!press.dragging) {
+        if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+        press.dragging = true;
+        // Frozen for the rest of this drag — see melodyPress's own comment.
+        press.axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+      }
+
+      if (press.axis === 'x') {
+        reorderDuringDrag(graph, press.entityId, press.item, point.x);
+      } else if (press.item.kind === 'note' && press.startStep !== null) {
+        updateNotePitchDrag(press.item, press.startStep, press.startAccidental, dy);
+      }
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -573,6 +714,23 @@ export function attachInteraction(
   });
 
   function endPress(e: PointerEvent): void {
+    if (state.melodyScrollDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.melodyScrollDrag = null;
+      return;
+    }
+
+    if (state.melodyPress) {
+      canvas.releasePointerCapture(e.pointerId);
+      // A release without ever crossing DRAG_START_THRESHOLD is a plain
+      // click — cycle the item's duration down one step (see TODO.md's
+      // melody organelle spec); an actual drag just ends here, its
+      // position/pitch already applied live by pointermove above.
+      if (!state.melodyPress.dragging) cycleDurationDown(state.melodyPress.item);
+      state.melodyPress = null;
+      return;
+    }
+
     if (state.draggingHandle) {
       canvas.releasePointerCapture(e.pointerId);
       state.draggingHandle = null;
@@ -650,6 +808,18 @@ export function attachInteraction(
   // has no single dot to pick) clears everything feeding it.
   canvas.addEventListener('contextmenu', (e) => {
     const point = canvasPoint(e);
+
+    // Right-click doubles a melody item's duration one step (TODO.md's
+    // spec) — checked first, same priority the melody popup gets in
+    // pointerdown, and swallowing the browser's own context menu for any
+    // click inside the popup (not just on an item) so it doesn't pop up
+    // over what's meant to read as a modal-ish editing surface.
+    const melodyHit = hitTestMelodyPopup(graph, point);
+    if (melodyHit) {
+      e.preventDefault();
+      if (melodyHit.kind === 'item') cycleDurationUp(melodyHit.item);
+      return;
+    }
 
     for (const wire of getAllWires()) {
       const endpoints = valueWireEndpoints(graph, wire);

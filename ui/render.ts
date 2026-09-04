@@ -31,6 +31,7 @@ import { getBeatFlashGlow } from './clockPulse';
 import { formatKeyLabel, getBoundKey } from './tapBindings';
 import { drawDock } from './dock';
 import { drawPopup, drawPorthole } from './organelle';
+import { drawMelodyPopup } from './melody';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -982,10 +983,22 @@ export function renderFrame(
     if (!owner || owner.docked || owner.id === interaction.draggingId) continue;
 
     if (feature.expanded) {
-      const activeHandle =
-        interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
-      const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
-      drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
+      if (feature.kind === 'melody') {
+        // A live horizontal item drag (ui/interaction.ts's melodyPress)
+        // renders that one item at the raw pointer x rather than its
+        // snapped slot — see ui/melody.ts's MelodyDragOverride for why.
+        const press = interaction.melodyPress;
+        const dragOverride =
+          press && press.entityId === feature.id && press.dragging && press.axis === 'x'
+            ? { item: press.item, x: press.currentPointer.x }
+            : null;
+        drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
+      } else {
+        const activeHandle =
+          interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
+        const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
+        drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
+      }
     } else {
       drawPorthole(ctx, graph, feature, owner, drag);
     }
