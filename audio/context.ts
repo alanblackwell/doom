@@ -1,5 +1,9 @@
-// Single shared AudioContext for the app. Created lazily so it's constructed
-// after a user gesture (browsers block autoplay of unstarted contexts).
+// Single shared AudioContext for the app. Constructing it doesn't itself
+// need a user gesture (ui/main.ts builds the whole engine, this context
+// included, immediately on load) — what browsers actually gate is
+// resume()ing it into the 'running' state, which resumeAudioContext()
+// below leaves suspended until a real gesture does that (see ui/main.ts's
+// toggleAudio/ensureEngineBuilt split).
 
 let ctx: AudioContext | null = null;
 

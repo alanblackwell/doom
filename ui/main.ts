@@ -4,7 +4,7 @@
 // click now means select/drag, so it can't double as the audio-start
 // gesture the way it did before this feature.
 
-import { resumeAudioContext, suspendAudioContext } from '../audio/context';
+import { getAudioContext, resumeAudioContext, suspendAudioContext } from '../audio/context';
 import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
 import { getTempo, start as startTransport, stop as stopTransport } from '../audio/transport';
 import { EntityGraph } from '../audio/entityGraph';
@@ -395,53 +395,101 @@ function setButtonState(): void {
   startButton.textContent = running ? 'stop audio' : 'start audio';
 }
 
+// The one-time, never-gesture-gated half of starting up: worklets
+// registered, WASM compiled, entity-graph nodes built. Unlike
+// AudioContext.resume() (see toggleAudio below), none of this needs a user
+// gesture and it always eventually resolves, so it's safe to run
+// automatically on load without any risk of leaving the UI stuck waiting
+// on it (see the call below, after toggleAudio).
+async function ensureEngineBuilt(): Promise<void> {
+  if (engineBuilt) return;
+  engineBuilt = true;
+
+  await initAudioEngine();
+  await buildFromEntityGraph(graph);
+
+  // running/the button/the transport all follow the AudioContext's own
+  // actual state from here on, via this listener — not just this file's
+  // own explicit resume()/suspend() calls below. That matters because a
+  // suspended context can also resume from a gesture this file never sees:
+  // e.g. clicking a just-dropped instrument's own play/pause pad (see
+  // ui/interaction.ts/audio/graph.ts's CONTINUOUS_KINDS) is itself a real
+  // user gesture, and Safari in particular auto-resumes any suspended
+  // AudioContext on the page as a side effect of ANY such gesture, whether
+  // or not that gesture's own handler ever calls resume() itself. Without
+  // this, the global button could be left showing "start audio" — and the
+  // transport left stopped — even while sound is already playing.
+  const ctx = getAudioContext();
+  const syncToContextState = () => {
+    running = ctx.state === 'running';
+    if (running) startTransport();
+    else stopTransport();
+    setButtonState();
+  };
+  ctx.addEventListener('statechange', syncToContextState);
+  syncToContextState(); // in case it's already running by the time this attaches
+
+  // Dev-only console inspection hook (excluded from production builds by
+  // import.meta.env.DEV) — lets you check from real devtools whether
+  // signal is reaching the master node, the same check used to diagnose
+  // issues headless testing can't reach (device selection, tab mute,
+  // real output).
+  if (import.meta.env.DEV) {
+    const { getMasterChain } = await import('../audio/master');
+    const { getEntityNodes } = await import('../audio/graph');
+    (window as unknown as { __doom: unknown }).__doom = {
+      ctx,
+      master: getMasterChain(),
+      getEntityNodes,
+    };
+  }
+}
+
 async function toggleAudio(): Promise<void> {
-  if (!engineBuilt) {
-    engineBuilt = true;
+  const firstStart = !engineBuilt;
+  if (firstStart) {
     startButton.disabled = true;
     startButton.textContent = 'starting…';
-
-    await resumeAudioContext();
-    await initAudioEngine();
-    await buildFromEntityGraph(graph);
-
-    // Dev-only console inspection hook (excluded from production builds by
-    // import.meta.env.DEV) — lets you check from real devtools whether
-    // signal is reaching the master node, the same check used to diagnose
-    // issues headless testing can't reach (device selection, tab mute,
-    // real output).
-    if (import.meta.env.DEV) {
-      const { getAudioContext } = await import('../audio/context');
-      const { getMasterChain } = await import('../audio/master');
-      const { getEntityNodes } = await import('../audio/graph');
-      (window as unknown as { __doom: unknown }).__doom = {
-        ctx: getAudioContext(),
-        master: getMasterChain(),
-        getEntityNodes,
-      };
-    }
-
-    startButton.disabled = false;
-    running = true;
-    startTransport();
-    setButtonState();
-    return;
   }
 
+  // A near-instant no-op if the automatic prewarm below already finished
+  // by the time this runs, which it normally will have.
+  await ensureEngineBuilt();
+
+  // running/setButtonState/the transport are all driven by
+  // ensureEngineBuilt's own 'statechange' listener, not set directly here
+  // — so this stays correct even on the rarer path where the state ends up
+  // changing for a reason other than this specific call (see that
+  // listener's own comment).
   if (running) {
     await suspendAudioContext();
-    running = false;
-    stopTransport();
   } else {
+    // Reached from a real click, so — unlike the automatic prewarm below —
+    // this always has an actual user gesture behind it and won't hang on
+    // browsers' autoplay policy the way calling it automatically did.
     await resumeAudioContext();
-    running = true;
-    startTransport();
   }
-  setButtonState();
+
+  if (firstStart) startButton.disabled = false;
 }
 
 startButton.addEventListener('click', () => {
   toggleAudio();
+});
+
+// Pre-build the engine immediately on load, so the eventual first click
+// starts instantly — but deliberately don't attempt AudioContext.resume()
+// here (that's toggleAudio's own job, from a real click). Browsers'
+// autoplay policy (Safari in particular) leaves resume() pending
+// indefinitely without a genuine user gesture; calling it automatically
+// here previously left the button disabled and stuck on "starting…" with
+// no way to click it, since the code that re-enables it never ran. This
+// way the button stays enabled and reads "start audio" until the user's
+// own click actually starts sound — audio isn't literally playing before
+// that first gesture (no browser allows that), but everything up to it
+// (worklets, WASM, the entity graph) is already done by the time it happens.
+ensureEngineBuilt().catch((err) => {
+  console.error('Failed to pre-build the audio engine:', err);
 });
 
 exportButton.addEventListener('click', () => {
