@@ -6,6 +6,7 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { PROCESSOR_KINDS } from '../audio/graph';
 import { controlsFor, dotPosition, CONTROL_HIT_RADIUS } from './controlSpecs';
+import { getTexture } from './textures';
 
 export interface Point {
   x: number;
@@ -53,19 +54,46 @@ export interface DragContext {
   preview: { intoId: string; liveAbsolute: Point; entity: Entity } | null;
 }
 
-// An entity's actual on-screen rect: its own intrinsic width/height, grown
-// (never shrunk) to fully enclose every child's own effective rect and its
-// own control column (see below), with padding. Recursive, so a grandparent's
-// box automatically accounts for an already-expanded parent — and
-// recomputed fresh from current positions every call, so a container's
-// boundary is always correct for whatever's inside it right now rather than
-// needing an explicit resize step.
+// entity.width/height is always the entity's "preferred" box — never
+// mutated by texture assignment (ui/textureEditor.ts), so it's still there
+// to fall back to if a later-assigned image doesn't override it. This is
+// what effectiveBounds actually measures an entity's own footprint from:
+// the preferred box, or — if the kind currently has a texture assigned
+// whose own opaque content has a real shape (ui/textures.ts's
+// detectOpaqueBounds, surfaced as SavedTexture.opaqueSize) — that exact
+// size instead, magnitude included, not just its aspect ratio: whatever
+// size the user actually scaled the crop rect to in ui/textureEditor.ts's
+// opaqueBoundsPx editing mode (corner drag / magnifying glass / wheel) is
+// already in the same canvas-content coordinate space entity.width/height
+// live in (see that file's own header comment), so it's used verbatim
+// here as the object's real on-canvas size — which may end up quite a bit
+// smaller or larger than the entity's own preferred box, or than other
+// entities of a different kind.
+//
+// Deliberately not special-cased for PROCESSOR_KINDS ("filter") kinds,
+// whose aspect otherwise reflects their role as an audio-routing container
+// rather than literal content — whether a filter should keep its box's
+// aspect fixed regardless of an assigned image is an open policy question;
+// this is the one spot to gate that later if so.
+function actualSize(entity: Entity): { width: number; height: number } {
+  const texture = getTexture(entity.kind);
+  return texture?.opaqueSize ?? { width: entity.width, height: entity.height };
+}
+
+// An entity's actual on-screen rect: its own intrinsic width/height (see
+// actualSize above), grown (never shrunk) to fully enclose every child's
+// own effective rect and its own control column (see below), with
+// padding. Recursive, so a grandparent's box automatically accounts for an
+// already-expanded parent — and recomputed fresh from current positions
+// every call, so a container's boundary is always correct for whatever's
+// inside it right now rather than needing an explicit resize step.
 export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragContext): Rect {
   const pos = absolutePosition(graph, entity);
-  let left = pos.x - entity.width / 2;
-  let right = pos.x + entity.width / 2;
-  let top = pos.y - entity.height / 2;
-  let bottom = pos.y + entity.height / 2;
+  const size = actualSize(entity);
+  let left = pos.x - size.width / 2;
+  let right = pos.x + size.width / 2;
+  let top = pos.y - size.height / 2;
+  let bottom = pos.y + size.height / 2;
 
   const grow = (b: Rect) => {
     left = Math.min(left, b.x - b.width / 2 - CONTAINMENT_PADDING);
@@ -100,7 +128,7 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   const specs = controlsFor(entity.kind);
   const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
   if (specs.length > 0 && entity.type !== 'control' && entity.type !== 'feature' && !isEmptyFilter) {
-    const baseRect = { x: pos.x, y: pos.y, width: entity.width, height: entity.height };
+    const baseRect = { x: pos.x, y: pos.y, width: size.width, height: size.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);
     grow({

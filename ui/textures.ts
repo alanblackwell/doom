@@ -67,6 +67,67 @@ function scratchCanvas(width: number, height: number): CanvasRenderingContext2D 
   return ctx;
 }
 
+// Downsample cap for detectOpaqueBounds's alpha scan below — a source photo
+// can be several thousand px on a side, and the bbox only needs to be
+// accurate to within a pixel or two at final display size, not at source
+// resolution, so scanning at full res would just be wasted work.
+const OPAQUE_SCAN_MAX_DIM = 512;
+
+// Tightest bounding box of `image`'s opaque pixels, in the image's own
+// natural pixel coordinates (the same space TextureSourceRect already
+// uses) — or null if every pixel is opaque, meaning there's nothing to
+// treat differently and ui/textureEditor.ts should fall back to its
+// ordinary crop flow. A pixel counts as opaque once its alpha reaches
+// `threshold`; the default tolerates ordinary anti-aliasing/compression
+// noise right at a shape's edge without shrinking the box away from it.
+export function detectOpaqueBounds(image: HTMLImageElement, threshold = 250): TextureSourceRect | null {
+  const naturalW = image.naturalWidth;
+  const naturalH = image.naturalHeight;
+  if (naturalW === 0 || naturalH === 0) return null;
+
+  const scale = Math.min(1, OPAQUE_SCAN_MAX_DIM / Math.max(naturalW, naturalH));
+  const scanW = Math.max(1, Math.round(naturalW * scale));
+  const scanH = Math.max(1, Math.round(naturalH * scale));
+
+  const ctx = scratchCanvas(scanW, scanH);
+  ctx.drawImage(image, 0, 0, scanW, scanH);
+  const { data } = ctx.getImageData(0, 0, scanW, scanH);
+
+  let minX = scanW;
+  let minY = scanH;
+  let maxX = -1;
+  let maxY = -1;
+  let sawTransparent = false;
+  for (let y = 0; y < scanH; y++) {
+    for (let x = 0; x < scanW; x++) {
+      const alpha = data[(y * scanW + x) * 4 + 3];
+      if (alpha >= threshold) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      } else {
+        sawTransparent = true;
+      }
+    }
+  }
+
+  // Fully opaque (nothing below threshold anywhere), or the degenerate
+  // fully-transparent case (no opaque pixel to bound at all) — either way
+  // there's no meaningful opaque-content box to derive.
+  if (!sawTransparent || maxX < 0) return null;
+
+  // Scale the detected box back up from the downsampled scan to the
+  // image's own natural resolution.
+  const inv = 1 / scale;
+  return {
+    x: minX * inv,
+    y: minY * inv,
+    width: (maxX - minX + 1) * inv,
+    height: (maxY - minY + 1) * inv,
+  };
+}
+
 function clampByte(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
 }
@@ -246,6 +307,16 @@ export interface SavedTexture {
   // an exported pack's manifest.json stays associated with this asset
   // permanently, including into future re-exports.
   copyright: string;
+  // The exact on-canvas size the user scaled the opaque-content crop rect
+  // to in ui/textureEditor.ts's opaqueBoundsPx editing mode (corner drag /
+  // magnifying glass / wheel) — null for an ordinary opaque image.
+  // Magnitude, not just an aspect ratio: ui/layout.ts uses this verbatim
+  // as a kind's actual on-screen bounding box (control dots, wires,
+  // organelle port, drag/drop hit area all follow), which can end up
+  // quite a bit smaller or larger than the entity's own stored preferred
+  // width/height — that preferred size is never mutated, just no longer
+  // what's actually drawn while this is set.
+  opaqueSize: { width: number; height: number } | null;
 }
 
 // 'canvas' for the whole-canvas background, or an entity kind string (e.g.

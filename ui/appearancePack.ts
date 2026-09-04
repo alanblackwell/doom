@@ -32,6 +32,16 @@ interface AppearanceAsset {
   sourceRect: TextureSourceRect;
   adjustments: TextureAdjustments;
   copyright: string;
+  // The user-chosen on-canvas size from ui/textureEditor.ts's opaque-image
+  // editing mode (see SavedTexture.opaqueSize) — a real editing DECISION,
+  // not something re-derivable from the image alone (unlike sourceRect's
+  // own opaque bbox, which detectOpaqueBounds could recompute), so it has
+  // to round-trip through the manifest rather than being recomputed on
+  // import. Optional so a pack exported before this field existed still
+  // parses — absent means an ordinary, non-reshaping texture, same as
+  // opaqueWidth/opaqueHeight both undefined below.
+  opaqueWidth?: number;
+  opaqueHeight?: number;
 }
 
 interface AppearanceManifest {
@@ -93,6 +103,8 @@ export function exportAppearancePack(): void {
       sourceRect: texture.sourceRect,
       adjustments: texture.adjustments,
       copyright: texture.copyright,
+      opaqueWidth: texture.opaqueSize?.width,
+      opaqueHeight: texture.opaqueSize?.height,
     });
   }
 
@@ -163,6 +175,12 @@ async function applyManifest(
       console.error(`Appearance pack: failed to decode image file "${asset.file}"`);
       continue;
     }
+    // opaqueWidth/opaqueHeight are a real editing decision (the size the
+    // user scaled the crop rect to), not something re-derivable from the
+    // image's own pixels the way sourceRect's opaque bbox is — read
+    // straight from the manifest rather than recomputed. Either being
+    // absent (an older pack, or an ordinary non-reshaping texture) means
+    // opaqueSize stays null.
     const texture: SavedTexture = {
       image,
       sourceRect: asset.sourceRect,
@@ -170,6 +188,10 @@ async function applyManifest(
       fileName: asset.file,
       fileBytes: bytes,
       copyright: asset.copyright,
+      opaqueSize:
+        asset.opaqueWidth !== undefined && asset.opaqueHeight !== undefined
+          ? { width: asset.opaqueWidth, height: asset.opaqueHeight }
+          : null,
     };
     setTexture(asset.target, texture);
   }

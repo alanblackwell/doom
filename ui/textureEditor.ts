@@ -18,13 +18,19 @@
 // independent TextureSourceRect (see ui/textures.ts) — the actual image-
 // pixel crop window — so ui/render.ts never needs to know any of this
 // editor-space math.
+//
+// A dropped image with real transparent regions (ui/textures.ts's
+// detectOpaqueBounds) uses a different interaction mode, since cropping it
+// risks slicing through actual artwork rather than trimming empty photo
+// margins: see EditorState.opaqueBoundsPx below and the opaqueBoundsPx
+// branches through onPointerDown/onPointerMove/openTextureEditor.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { effectiveBounds, hitTest } from './layout';
 import type { Point, Rect } from './layout';
 import { viewportSize } from './stereoMix';
-import { drawAdjustedTexture, setTexture, DEFAULT_ADJUSTMENTS } from './textures';
-import type { TextureAdjustments, TextureTarget } from './textures';
+import { detectOpaqueBounds, drawAdjustedTexture, setTexture, DEFAULT_ADJUSTMENTS } from './textures';
+import type { TextureAdjustments, TextureSourceRect, TextureTarget } from './textures';
 import { ACCENT } from './palette';
 import { defaultCopyright } from './attribution';
 
@@ -63,6 +69,27 @@ interface EditorState {
   // in which case the crop rect's center is used instead — see
   // targetHandlePosition.
   targetAnchor: Point | null;
+
+  // Non-null only for a dropped image with real transparent regions (see
+  // ui/textures.ts's detectOpaqueBounds, run once at drop time) — the
+  // opaque-content bbox in the image's OWN fixed pixel space, independent
+  // of any pan/zoom/crop choice made in this editor session. Its presence
+  // switches onPointerDown/onPointerMove into the alternate interaction
+  // mode described in this file's own header comment: cropRect stops being
+  // independently draggable and instead becomes a value DERIVED every
+  // update from anchorTopLeft + imageScale + this rect's own width/height
+  // (see syncCropRectFromAnchor) — every other place that already reads
+  // cropRect (resize-handle positions, adjustTracks, save/cancel, the
+  // target reticle, the scale handle, drawTextureEditor as a whole) keeps
+  // working completely unchanged.
+  opaqueBoundsPx: TextureSourceRect | null;
+  // Screen-space top-left of the crop rect — authoritative (rather than
+  // cropRect.x/y) only while opaqueBoundsPx is set, so a scale (corner
+  // drag or the magnifying glass) can hold this fixed while growing the
+  // rect down-right from it (see onPointerMove's 'scale' case) without the
+  // magnifier's own position (scaleHandlePosition, anchored to this same
+  // corner) jumping mid-drag.
+  anchorTopLeft: Point | null;
 }
 
 let state: EditorState | null = null;
@@ -294,6 +321,45 @@ function clampToCoverage(): void {
   state.imageCenterY = clamp(state.imageCenterY, halfSrcH, state.image.naturalHeight - halfSrcH);
 }
 
+// The opaqueBoundsPx-mode counterpart to clampToCoverage above: recomputes
+// cropRect from anchorTopLeft + imageScale + the fixed opaque-content
+// bbox's own size, so cropRect always exactly traces where that bbox
+// currently projects to on screen. Width/height grow from the anchor
+// (never symmetric around a center), which is what keeps the magnifying
+// glass — anchored to the rect's own top-left, see scaleHandlePosition —
+// from moving mid-scale.
+function syncCropRectFromAnchor(): void {
+  if (!state?.opaqueBoundsPx || !state.anchorTopLeft) return;
+  const width = state.opaqueBoundsPx.width * state.imageScale;
+  const height = state.opaqueBoundsPx.height * state.imageScale;
+  state.cropRect = {
+    x: state.anchorTopLeft.x + width / 2,
+    y: state.anchorTopLeft.y + height / 2,
+    width,
+    height,
+  };
+}
+
+// Applies a new imageScale in the opaqueBoundsPx mode — the shared landing
+// point for a corner drag, the magnifying glass, and the wheel, all of
+// which scale rather than crop in this mode (see this file's own header
+// comment). Clamped to a sane minimum (never shrinking the rect below
+// MIN_CROP_SIZE on its short side, the same floor every other sizing path
+// here already uses) and, since the rect only ever grows down-right from
+// a fixed anchorTopLeft (syncCropRectFromAnchor), to the canvas's own
+// bottom edge as a hard maximum — the limit the user asked for, so growing
+// the object can't run it off-screen.
+function applyOpaqueScale(canvas: HTMLCanvasElement, requestedScale: number): void {
+  if (!state?.opaqueBoundsPx || !state.anchorTopLeft) return;
+  const bbox = state.opaqueBoundsPx;
+  const minScale = MIN_CROP_SIZE / Math.min(bbox.width, bbox.height);
+  const { height: vh } = viewportSize(canvas);
+  const viewport = canvas.parentElement as HTMLElement;
+  const maxScale = (viewport.scrollTop + vh - state.anchorTopLeft.y) / bbox.height;
+  state.imageScale = clamp(requestedScale, minScale, Math.max(minScale, maxScale));
+  syncCropRectFromAnchor();
+}
+
 // Opens the editor for a freshly-decoded dropped image. If the drop lands
 // directly on an entity's box, it's targeted immediately (same rule as
 // dragging the target handle onto it by hand afterward — see
@@ -304,9 +370,19 @@ function clampToCoverage(): void {
 // (viewport) aspect ratio, centered exactly on the drop point. Either way,
 // if a rect of the desired size centered there would extend past the
 // visible viewport on any side, it's shrunk (preserving aspect, still
-// centered on the same point) until it fits entirely within view — the
-// image's own zoom (coverScale) is derived from the crop rect's final
-// size, so it scales down to match automatically.
+// centered on the same point) until it fits entirely within view.
+//
+// `opaqueBoundsPx` (ui/textures.ts's detectOpaqueBounds, run by the caller
+// against the raw dropped image before any of this) switches the whole
+// session into the alternate interaction mode described in this file's own
+// header comment: the crop rect's ASPECT here is always the opaque
+// content's own — not the targeted entity/kind's current aspect, which is
+// exactly what's about to be replaced — sized the same viewport-fit way,
+// but landing on an imageScale (rather than a directly-set cropRect size)
+// and an anchorTopLeft, since those two are what stay authoritative for
+// the rest of the session (see syncCropRectFromAnchor). imageCenterX/Y
+// pin to the bbox's own center permanently — there's nothing to pan
+// within once "crop" always equals the full opaque content.
 export function openTextureEditor(
   canvas: HTMLCanvasElement,
   graph: EntityGraph,
@@ -314,13 +390,15 @@ export function openTextureEditor(
   objectUrl: string,
   dropPoint: Point,
   fileName: string,
-  fileBytes: Uint8Array
+  fileBytes: Uint8Array,
+  opaqueBoundsPx: TextureSourceRect | null
 ): void {
   const viewport = canvas.parentElement as HTMLElement;
   const { width: vw, height: vh } = viewportSize(canvas);
 
   const hitEntity = hitTest(graph, dropPoint, new Set());
-  const { target, aspect, anchor } = targetAndAspectFor(canvas, graph, hitEntity);
+  const { target, aspect: targetAspect, anchor } = targetAndAspectFor(canvas, graph, hitEntity);
+  const aspect = opaqueBoundsPx ? opaqueBoundsPx.width / opaqueBoundsPx.height : targetAspect;
   const center = anchor ?? dropPoint;
   const targetEntityId = anchor && hitEntity ? hitEntity.id : null;
   const entityBounds = targetEntityId ? effectiveBounds(graph, hitEntity!) : null;
@@ -346,6 +424,7 @@ export function openTextureEditor(
   const height = width / aspect;
 
   const cropRect: Rect = { x: center.x, y: center.y, width, height };
+  const anchorTopLeft = opaqueBoundsPx ? { x: center.x - width / 2, y: center.y - height / 2 } : null;
 
   state = {
     image,
@@ -356,21 +435,29 @@ export function openTextureEditor(
     cropRect,
     aspect,
     target,
-    imageCenterX: image.naturalWidth / 2,
-    imageCenterY: image.naturalHeight / 2,
-    imageScale: coverScale(cropRect, image),
+    imageCenterX: opaqueBoundsPx ? opaqueBoundsPx.x + opaqueBoundsPx.width / 2 : image.naturalWidth / 2,
+    imageCenterY: opaqueBoundsPx ? opaqueBoundsPx.y + opaqueBoundsPx.height / 2 : image.naturalHeight / 2,
+    imageScale: opaqueBoundsPx ? height / opaqueBoundsPx.height : coverScale(cropRect, image),
     adjustments: { ...DEFAULT_ADJUSTMENTS },
     drag: null,
     hoverTargetEntityId: null,
     targetAnchor: anchor,
+    opaqueBoundsPx,
+    anchorTopLeft,
   };
 }
 
 function retarget(target: TextureTarget, aspect: number, anchor: Point | null): void {
   if (!state) return;
   state.target = target;
-  state.aspect = aspect;
   state.targetAnchor = anchor;
+  // In opaqueBoundsPx mode, the crop rect's shape stays governed by the
+  // opaque content itself, never by whichever entity/kind is currently
+  // targeted — which entity gets skinned is about to be reshaped to match
+  // this same content, so re-aspecting the rect toward its OLD box here
+  // would just be showing something misleading mid-edit.
+  if (state.opaqueBoundsPx) return;
+  state.aspect = aspect;
   const height = state.cropRect.height;
   const width = Math.max(MIN_CROP_SIZE, height * aspect);
   state.cropRect = { ...state.cropRect, width };
@@ -442,6 +529,13 @@ function commitSave(): void {
     fileName: state.fileName,
     fileBytes: state.fileBytes,
     copyright: state.copyright,
+    // The crop rect's own final size IS the chosen on-canvas size — it
+    // lives in the same canvas-content coordinate space entity.width/
+    // height do (see this file's header comment), so it's saved verbatim
+    // rather than just its aspect ratio. ui/layout.ts uses it as this
+    // target's actual bounding box; null (an ordinary opaque image) leaves
+    // that at the entity's own preferred width/height, unchanged.
+    opaqueSize: state.opaqueBoundsPx ? { width: state.cropRect.width, height: state.cropRect.height } : null,
   });
   closeEditor();
 }
@@ -469,6 +563,12 @@ function onPointerDown(canvas: HTMLCanvasElement, graph: EntityGraph, point: Poi
   for (const handle of RESIZE_HANDLES) {
     const hp = handlePosition(state.cropRect, handle);
     if (Math.hypot(point.x - hp.x, point.y - hp.y) <= HANDLE_HIT_RADIUS) {
+      // Still a 'resize' drag in opaqueBoundsPx mode too — see the
+      // opaqueBoundsPx branch inside onPointerMove's own 'resize' case:
+      // dragging a handle directly resizes (aspect-locked, anchored at the
+      // fixed top-left), a separate and more direct gesture than the
+      // magnifying glass's own 'scale' drag, which keeps its rubber-band
+      // feedback to itself rather than this handle borrowing it.
       state.drag = { kind: 'resize', handle, startRect: { ...state.cropRect } };
       return;
     }
@@ -503,6 +603,20 @@ function onPointerDown(canvas: HTMLCanvasElement, graph: EntityGraph, point: Poi
     return;
   }
 
+  const b = cropBounds(state.cropRect);
+  const insideCrop = point.x >= b.left && point.x <= b.right && point.y >= b.top && point.y <= b.bottom;
+
+  // In opaqueBoundsPx mode there's no separate pan: the rect always
+  // exactly traces the opaque content (see this file's own header
+  // comment), so moving the image and moving the rect are the same
+  // operation — anywhere on or inside it just translates.
+  if (state.opaqueBoundsPx) {
+    if (isOnCropBorder(state.cropRect, point) || insideCrop) {
+      state.drag = { kind: 'move', startPointer: point, startRect: { ...state.cropRect } };
+    }
+    return;
+  }
+
   // The rect's edges (excluding the corner handles above, already checked)
   // move the whole rect; the deeper interior still pans the image within it.
   if (isOnCropBorder(state.cropRect, point)) {
@@ -510,8 +624,7 @@ function onPointerDown(canvas: HTMLCanvasElement, graph: EntityGraph, point: Poi
     return;
   }
 
-  const b = cropBounds(state.cropRect);
-  if (point.x >= b.left && point.x <= b.right && point.y >= b.top && point.y <= b.bottom) {
+  if (insideCrop) {
     state.drag = {
       kind: 'pan',
       startPointer: point,
@@ -539,12 +652,25 @@ function onPointerMove(canvas: HTMLCanvasElement, graph: EntityGraph, point: Poi
   }
 
   if (drag.kind === 'move') {
+    const dx = point.x - drag.startPointer.x;
+    const dy = point.y - drag.startPointer.y;
+    if (state.opaqueBoundsPx) {
+      // anchorTopLeft is what's actually authoritative in this mode (see
+      // syncCropRectFromAnchor) — cropRect itself is re-derived from it,
+      // rather than translated directly the way the else-branch below
+      // does. drag.startRect's own top-left is exactly where anchorTopLeft
+      // was when the drag began (they're always kept in sync), so it
+      // doubles as the drag's start reference without a separate field.
+      const startLeft = drag.startRect.x - drag.startRect.width / 2;
+      const startTop = drag.startRect.y - drag.startRect.height / 2;
+      state.anchorTopLeft = { x: startLeft + dx, y: startTop + dy };
+      syncCropRectFromAnchor();
+      return;
+    }
     // Slides the whole rect around the screen, carrying its current
     // framing with it unchanged — same image content, same zoom, just
     // repositioned — rather than touching imageCenterX/Y or imageScale at
     // all like pan/scale do.
-    const dx = point.x - drag.startPointer.x;
-    const dy = point.y - drag.startPointer.y;
     state.cropRect = { ...drag.startRect, x: drag.startRect.x + dx, y: drag.startRect.y + dy };
     return;
   }
@@ -563,12 +689,36 @@ function onPointerMove(canvas: HTMLCanvasElement, graph: EntityGraph, point: Poi
     // drag started (not incremental per-move deltas), same reasoning as
     // 'resize' below, so it can't drift from rounding/order-of-events.
     const dy = point.y - drag.startPointer.y;
-    state.imageScale = drag.startScale * Math.exp(-dy * 0.01);
+    const requestedScale = drag.startScale * Math.exp(-dy * 0.01);
+    if (state.opaqueBoundsPx) {
+      applyOpaqueScale(canvas, requestedScale);
+      return;
+    }
+    state.imageScale = requestedScale;
     clampToCoverage();
     return;
   }
 
   if (drag.kind === 'resize') {
+    // opaqueBoundsPx mode: a direct resize — the box grows/shrinks with
+    // the pointer, aspect-locked to the opaque content (state.aspect is
+    // pinned to it throughout this mode; see retarget) — rather than the
+    // magnifying glass's own vertical-delta zoom. Anchored at the fixed
+    // anchorTopLeft regardless of which corner was actually grabbed (same
+    // "expand downwards, nothing else moves" reasoning as applyOpaqueScale),
+    // so this always lands on the same requested overall scale that drag
+    // kind already knows how to apply/clamp — it just gets there by
+    // measuring the pointer's own distance from the anchor instead of a
+    // vertical delta from the press point.
+    if (state.opaqueBoundsPx && state.anchorTopLeft) {
+      const anchor = state.anchorTopLeft;
+      const dx = point.x - anchor.x;
+      const dy = point.y - anchor.y;
+      const width = Math.max(MIN_CROP_SIZE, Math.max(dx, dy * state.aspect));
+      applyOpaqueScale(canvas, width / state.opaqueBoundsPx.width);
+      return;
+    }
+
     const b0 = cropBounds(drag.startRect);
     const fixed =
       drag.handle === 'nw'
@@ -618,12 +768,16 @@ function onPointerUp(): void {
   state.drag = null;
 }
 
-function onWheel(point: Point, deltaY: number): boolean {
+function onWheel(canvas: HTMLCanvasElement, point: Point, deltaY: number): boolean {
   if (!state) return false;
   const b = cropBounds(state.cropRect);
   if (point.x < b.left || point.x > b.right || point.y < b.top || point.y > b.bottom) return false;
 
   const factor = Math.exp(-deltaY * 0.0015);
+  if (state.opaqueBoundsPx) {
+    applyOpaqueScale(canvas, state.imageScale * factor);
+    return true;
+  }
   state.imageScale *= factor;
   clampToCoverage();
   return true;
@@ -661,8 +815,12 @@ export function attachTextureEditor(canvas: HTMLCanvasElement, graph: EntityGrap
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
+      // Run once against the raw dropped image, before any crop/pan/zoom
+      // choice exists — null for an ordinary opaque image, in which case
+      // openTextureEditor's behavior is completely unchanged from before.
+      const opaqueBoundsPx = detectOpaqueBounds(img);
       file.arrayBuffer().then((buf) => {
-        openTextureEditor(canvas, graph, img, url, dropPoint, file.name, new Uint8Array(buf));
+        openTextureEditor(canvas, graph, img, url, dropPoint, file.name, new Uint8Array(buf), opaqueBoundsPx);
       });
     };
     img.onerror = () => {
@@ -697,7 +855,7 @@ export function attachTextureEditor(canvas: HTMLCanvasElement, graph: EntityGrap
     'wheel',
     (e) => {
       if (!state) return;
-      if (onWheel(canvasPoint(canvas, e), e.deltaY)) e.preventDefault();
+      if (onWheel(canvas, canvasPoint(canvas, e), e.deltaY)) e.preventDefault();
     },
     { passive: false }
   );
