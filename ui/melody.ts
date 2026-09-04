@@ -1212,6 +1212,40 @@ const CLEF_COLOR = 'rgba(255, 255, 255, 0.25)'; // dimmer than STAFF_COLOR — l
 const NOTE_COLOR = 'rgba(232, 220, 192, 0.95)'; // matches organelle.ts's CURVE_COLOR family
 const NOTE_COLOR_DIM = 'rgba(232, 220, 192, 0.55)'; // every note except the current selection (getSelectedItem)
 
+// entityId (the melody feature's own id, not its owner) -> the item
+// audio/melodyPlayer.ts's pulseMelody most recently triggered, and when —
+// a pure debug/feedback aid so opening this popup while pulses arrive
+// visually confirms which item the pulse logic actually picked, via a
+// brief glow (drawPlayingGlow below). Same warm-flash color convention
+// ui/render.ts already uses for a fired pad (PAD_FLASH_DURATION).
+const playingFlashes = new Map<string, { item: MelodyItem; time: number }>();
+const PLAYING_FLASH_DURATION_MS = 400;
+
+export function markItemPlaying(entityId: string, item: MelodyItem): void {
+  playingFlashes.set(entityId, { item, time: performance.now() });
+}
+
+function playingGlowStrength(entityId: string, item: MelodyItem): number {
+  const flash = playingFlashes.get(entityId);
+  if (!flash || flash.item !== item) return 0;
+  const elapsed = performance.now() - flash.time;
+  if (elapsed < 0 || elapsed > PLAYING_FLASH_DURATION_MS) return 0;
+  return 1 - elapsed / PLAYING_FLASH_DURATION_MS;
+}
+
+function drawPlayingGlow(ctx: CanvasRenderingContext2D, x: number, y: number, strength: number): void {
+  const radius = STAFF_SPACE_PX * 1.8;
+  const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  gradient.addColorStop(0, `rgba(255, 210, 150, ${0.6 * strength})`);
+  gradient.addColorStop(1, 'rgba(255, 210, 150, 0)');
+  ctx.save();
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function setBravuraFont(ctx: CanvasRenderingContext2D): void {
   ctx.font = `${BRAVURA_FONT_SIZE_PX}px ${BRAVURA_FONT_FAMILY}`;
   ctx.textAlign = 'left';
@@ -1495,6 +1529,11 @@ export function drawMelodyPopup(
         treblePos.x = dragOverride.x;
         bassPos.x = dragOverride.x;
       }
+      const restGlow = playingGlowStrength(entity.id, item);
+      if (restGlow > 0) {
+        drawPlayingGlow(ctx, treblePos.x, treblePos.y, restGlow);
+        drawPlayingGlow(ctx, bassPos.x, bassPos.y, restGlow);
+      }
       // Same item, same duration, drawn twice — one glyph per staff (see
       // restScreenPositions' own comment) — so the two are always in sync
       // by construction, never two separately-tracked rests to keep aligned.
@@ -1519,6 +1558,8 @@ export function drawMelodyPopup(
       ctx.lineTo(pos.x, stepToY(layout.middleCY, BASS_BOTTOM_STEP));
       ctx.stroke();
     } else if (bravuraReady) {
+      const noteGlow = playingGlowStrength(entity.id, item);
+      if (noteGlow > 0) drawPlayingGlow(ctx, pos.x, pos.y, noteGlow);
       const renderedStep = item.step + shift;
       const ledgerHalfWidth = noteheadWidthPxFor(item.durationIndex) / 2 + sp(LEGER_LINE_EXTENSION_SP);
       ctx.strokeStyle = STAFF_COLOR;

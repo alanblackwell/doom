@@ -12,7 +12,6 @@ import {
   getControlSetter,
   releaseEntity,
   triggerEntity,
-  toggleEntityPaused,
   isEntityPlaying,
   stopEntity,
   CONTINUOUS_KINDS,
@@ -492,10 +491,13 @@ export function attachInteraction(
         state.gatedId = hit.id;
       }
     } else if (CONTINUOUS_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
-      // Same pad/button, same press-fires-immediately reasoning as above,
-      // but a plain toggle rather than a trigger — no gatedId hold-release
-      // gesture involved, since play/pause has no envelope to gate.
-      toggleEntityPaused(hit.id);
+      // Same pad/button, same press-fires-immediately reasoning as above.
+      // Routed through activateEventTarget (not toggleEntityPaused directly)
+      // so a direct click and a wired-in pulse behave identically once this
+      // entity has a melody organelle attached — see activateEventTarget's
+      // own comment in audio/graph.ts. Falls back to the plain play/pause
+      // toggle for an entity with no melody (or an empty one).
+      activateEventTarget(hit.id);
       state.triggerFlashes.set(hit.id, performance.now());
     } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
       // Same "fires on press, still draggable" reasoning as a trigger pad

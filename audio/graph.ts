@@ -13,6 +13,7 @@
 import { getAudioContext } from './context';
 import { getMasterChain } from './master';
 import { getTempo, setTempo } from './transport';
+import { pulseMelody } from './melodyPlayer';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -193,13 +194,21 @@ export function isEntityPaused(entityId: string): boolean {
   return pausedEntities.has(entityId);
 }
 
-function setEntityPaused(entityId: string, paused: boolean): void {
+export function setEntityPaused(entityId: string, paused: boolean): void {
   const gate = pauseGatesByEntity.get(entityId);
   if (!gate) return;
   if (paused) pausedEntities.add(entityId);
   else pausedEntities.delete(entityId);
   gate.gain.setTargetAtTime(paused ? 0 : 1, getAudioContext().currentTime, 0.02);
 }
+
+// Owning entity id -> its attached melody organelle's own feature-entity id
+// (see ui/melody.ts), for whichever CONTINUOUS_KINDS entities have one.
+// Populated by the 'bass'/'bow' generator cases below. Checked first by
+// activateEventTarget: once a melody has notes, a pulse (pad click or wired
+// event) advances the melody (audio/melodyPlayer.ts's pulseMelody) instead
+// of toggling pause.
+const melodyOwnersByEntity = new Map<string, string>();
 
 export function toggleEntityPaused(entityId: string): void {
   setEntityPaused(entityId, !isEntityPaused(entityId));
@@ -213,6 +222,20 @@ export function toggleEntityPaused(entityId: string): void {
 // instead — exactly one of the two is ever a no-op for a given id, so
 // there's no need to look up the entity's kind here at all.
 export function activateEventTarget(entityId: string): void {
+  const melodyId = melodyOwnersByEntity.get(entityId);
+  if (melodyId && pulseMelody(melodyId, entityId)) {
+    // Once a melody is actually advancing, this pad's clicks/wired pulses
+    // never reach the toggleEntityPaused branch below again — so a
+    // pauseGate left muted (its own starting state, or wherever a pause
+    // toggle last left it before the melody had notes) would otherwise
+    // silence the voice permanently, with no remaining way to reopen it.
+    // Pause/resume is superseded by melodyGate once melody playback has
+    // taken over, so force pauseGate open here every time (a cheap no-op
+    // once it already is).
+    setEntityPaused(entityId, false);
+    return;
+  }
+
   if (triggersByEntity.has(entityId)) {
     triggerEntity(entityId);
   } else if (pauseGatesByEntity.has(entityId)) {
@@ -329,14 +352,25 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       level.connect(pauseGate);
       registerPauseGate(entity.id, pauseGate);
 
+      // A further gate stage for a melody organelle (ui/melody.ts) attached
+      // to this entity — kept separate from pauseGate so a manual full mute
+      // always wins regardless of melody note/rest state. Starts fully open
+      // so an entity with no melody (or an empty one) is a pure pass-through,
+      // unchanged from today.
+      const melodyGate = ctx.createGain();
+      pauseGate.connect(melodyGate);
+      const melody = graph.featuresOf(entity.id).find((f) => f.kind === 'melody');
+      if (melody) melodyOwnersByEntity.set(entity.id, melody.id);
+
       registerControls(entity.id, {
         level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
         // Genuinely click-free, unlike the bow's frequency control — see
         // bass_set_frequency's comment in dsp/rust/src/lib.rs.
         frequency: (value) => bass.port.postMessage({ type: 'setFrequency', value }),
+        melodyGate: (value) => melodyGate.gain.setTargetAtTime(value, ctx.currentTime, 0.008),
       });
 
-      return pauseGate;
+      return melodyGate;
     }
     case 'bow': {
       const bow = new AudioWorkletNode(ctx, 'bow-processor', {
@@ -363,6 +397,16 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       level.connect(pauseGate);
       registerPauseGate(entity.id, pauseGate);
 
+      // A further gate stage for a melody organelle (ui/melody.ts) attached
+      // to this entity — kept separate from pauseGate so a manual full mute
+      // always wins regardless of melody note/rest state. Starts fully open
+      // so an entity with no melody (or an empty one) is a pure pass-through,
+      // unchanged from today.
+      const melodyGate = ctx.createGain();
+      pauseGate.connect(melodyGate);
+      const melody = graph.featuresOf(entity.id).find((f) => f.kind === 'melody');
+      if (melody) melodyOwnersByEntity.set(entity.id, melody.id);
+
       // None of these are native AudioParams — frequency, bow speed, and
       // bow pressure are all baked into the WASM voice's internal state
       // rather than read per-sample, so live changes go through the
@@ -372,9 +416,10 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         frequency: (value) => bow.port.postMessage({ type: 'setFrequency', value }),
         bowVelocity: (value) => bow.port.postMessage({ type: 'setVelocity', value }),
         bowPressure: (value) => bow.port.postMessage({ type: 'setPressure', value }),
+        melodyGate: (value) => melodyGate.gain.setTargetAtTime(value, ctx.currentTime, 0.008),
       });
 
-      return pauseGate;
+      return melodyGate;
     }
     case 'kick': {
       const voiceOutput = ctx.createGain(); // summing point for each transient hit; not itself an envelope
