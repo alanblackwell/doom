@@ -590,13 +590,18 @@ export function attachInteraction(
     // above.
     const sequencerHit = hitTestSequencerPopup(graph, point);
     if (sequencerHit) {
-      // Every case below re-selects its own note except these six — for
+      // Every case below re-selects its own note except these seven — for
       // anything else (transport, scrollbars, the end marker, empty lane
       // space, background), a press deselects whatever note was current.
+      // noteDuplicateButton doesn't itself call selectNote (it hands off
+      // to duplicateSelectedNote, which selects the CLONE instead) but
+      // still needs the ORIGINAL to still be selected when that runs, so
+      // it's excluded here too.
       if (
         sequencerHit.kind !== 'noteResizeLeft' &&
         sequencerHit.kind !== 'noteResizeRight' &&
         sequencerHit.kind !== 'noteMove' &&
+        sequencerHit.kind !== 'noteDuplicateButton' &&
         sequencerHit.kind !== 'noteVelocityTextClick' &&
         sequencerHit.kind !== 'noteVelocitySliderDrag' &&
         sequencerHit.kind !== 'noteEnvelopeHandle'
@@ -707,6 +712,14 @@ export function attachInteraction(
             grabOffsetSeconds: sequencerHit.grabOffsetSeconds,
             snap: initialNoteSnapState(point, performance.now()),
           };
+          break;
+        case 'noteDuplicateButton':
+          // A discrete click, not a drag — no pointer capture needed, same
+          // as the transport buttons above. duplicateSelectedNote resolves
+          // the note to clone from its own current selection (still the
+          // ORIGINAL here — see this switch's own exclusion-list comment)
+          // and moves the selection to the clone itself.
+          duplicateSelectedNote(graph);
           break;
         case 'noteVelocityTextClick': {
           // Closing (already open) is a discrete toggle, nothing left to

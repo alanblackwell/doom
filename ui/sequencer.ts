@@ -1528,6 +1528,74 @@ function hitTestVelocitySlider(track: VelocityTrack, point: Point): boolean {
   );
 }
 
+// --- Duplicate button ----------------------------------------------------
+// A small "+" just past the selected note's own right edge, for
+// duplicateSelectedNote (below) — the only mouse-driven way to invoke it,
+// alongside the 'R' keyboard shortcut, in an app with no clipboard for a
+// canvas-drawn note to be copy/pasted through. Sits to the right because
+// duplicateSelectedNote's own clone lands there too (touching the
+// original's own end), so the button points at where the clone will
+// appear.
+
+const DUPLICATE_BUTTON_RADIUS = 5;
+const DUPLICATE_BUTTON_GAP = 12; // from the note's own right edge to the button's center — clear of the resize-edge grab zone (NOTE_EDGE_GRAB_PX), so the two never compete for the same click
+
+// Null if the note itself is scrolled out of view, if there's no room for
+// the button before the grid's own right edge (the margin past it belongs
+// to the zoom handle/scrollbar/connector column — see RIGHT_MARGIN), or if
+// the lane it's in is scrolled out of the visible vertical range — same
+// "quiet until it actually fits" rule as the pitch/velocity label's own
+// >= 14px cutoff (noteLabelGeometry).
+function duplicateButtonPosition(
+  grid: GridArea,
+  state: SequencerState,
+  channelIndex: number,
+  noteId: string
+): Point | null {
+  const channel = state.channels[channelIndex];
+  const note = channel?.notes.find((n) => n.id === noteId);
+  if (!note) return null;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  if (right < grid.left || right > grid.right) return null;
+  const x = right + DUPLICATE_BUTTON_GAP;
+  if (x + DUPLICATE_BUTTON_RADIUS > grid.right) return null;
+  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
+  const y = laneTop + LANE_HEIGHT / 2;
+  if (y - DUPLICATE_BUTTON_RADIUS < grid.rulerBottom || y + DUPLICATE_BUTTON_RADIUS > grid.bottom) return null;
+  return { x, y };
+}
+
+function hitTestDuplicateButton(
+  grid: GridArea,
+  state: SequencerState,
+  selected: { channelIndex: number; noteId: string } | null,
+  point: Point
+): boolean {
+  if (!selected) return false;
+  const center = duplicateButtonPosition(grid, state, selected.channelIndex, selected.noteId);
+  return !!center && dist(point, center) <= DUPLICATE_BUTTON_RADIUS + 3;
+}
+
+function drawDuplicateButton(ctx: CanvasRenderingContext2D, center: Point): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, DUPLICATE_BUTTON_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fill();
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.lineCap = 'round';
+  const s = DUPLICATE_BUTTON_RADIUS * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(center.x - s, center.y);
+  ctx.lineTo(center.x + s, center.y);
+  ctx.moveTo(center.x, center.y - s);
+  ctx.lineTo(center.x, center.y + s);
+  ctx.stroke();
+  ctx.restore();
+}
 
 // --- Note envelope shape ----------------------------------------------
 // Draggable ADSR-style handles on the currently-selected note, same
@@ -1771,6 +1839,7 @@ export type SequencerHit =
   | { entityId: string; kind: 'noteResizeLeft'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteResizeRight'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteMove'; channelIndex: number; noteId: string; grabOffsetSeconds: number }
+  | { entityId: string; kind: 'noteDuplicateButton'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteVelocityTextClick'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteVelocitySliderDrag'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteEnvelopeHandle'; channelIndex: number; noteId: string; handle: HandleKind }
@@ -1912,9 +1981,17 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
 
     // Every check below is only ever reachable for the CURRENT selection
     // (nothing of this shape is drawn for any other note — see
-    // drawSequencerNote/drawNoteEnvelopeShape/drawVelocitySlider), resolved
-    // once and reused rather than re-querying selectedNoteFor per check.
+    // drawSequencerNote/drawNoteEnvelopeShape/drawVelocitySlider/
+    // drawDuplicateButton), resolved once and reused rather than
+    // re-querying selectedNoteFor per check.
     const currentSelection = selectedNoteFor(entity.id);
+
+    // The duplicate ("+") button, just past the note's own right edge —
+    // checked ahead of everything else below since it sits outside the
+    // note's own bounds and has nothing to compete with there.
+    if (hitTestDuplicateButton(grid, state, currentSelection, point)) {
+      return { entityId: entity.id, kind: 'noteDuplicateButton', channelIndex: currentSelection!.channelIndex, noteId: currentSelection!.noteId };
+    }
 
     // The envelope handles, drawn on top of the note's own ADSR shape.
     const envelopeHandle = hitTestNoteEnvelopeHandle(grid, state, currentSelection, point);
@@ -2542,6 +2619,10 @@ function drawSequencerGrid(
     const openTrack = velocitySliderOpenFor(selectedNote.noteId);
     if (openTrack) {
       drawVelocitySlider(ctx, state, selectedNote.channelIndex, selectedNote.noteId, openTrack);
+    }
+    const duplicateButton = duplicateButtonPosition(grid, state, selectedNote.channelIndex, selectedNote.noteId);
+    if (duplicateButton) {
+      drawDuplicateButton(ctx, duplicateButton);
     }
   }
 
