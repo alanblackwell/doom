@@ -65,7 +65,10 @@ export interface SequencerNote {
   id: string;
   onsetSeconds: number;
   durationSeconds: number; // always > 0
-  pitch: number; // MIDI note number, default 60 ("C4" / middle C)
+  // MIDI note number, or null for a drum-like note with no pitch at all
+  // (the default — see createSequencerNoteAt) — rendered/reported as "X"
+  // until the user actually drags it into a pitch.
+  pitch: number | null;
   velocity: number; // 0..1
   // null until the user first touches one of the two seed handles (see
   // drawNoteEnvelopeShape/setNoteEnvelopeFromHandle) — a note with no
@@ -751,7 +754,11 @@ function connectorPosition(grid: GridArea, channelScrollPx: number, index: numbe
 
 const NOTE_EDGE_GRAB_PX = 6; // px on either side of a note's own edge that grabs it for resizing rather than moving
 const MIN_NOTE_WIDTH_PX = 8; // fixed visual minimum, converted through the current zoom like LINE_GRAB_TOLERANCE already is
-const DEFAULT_NOTE_PITCH = 60; // "C4" / middle C
+// The pitch a null note seeds to the moment it's first dragged (see
+// ui/interaction.ts's 'notePitchDrag' pointerdown case) — not the note's
+// own default (which is null/"X", see SequencerNote.pitch), just the
+// starting point for that first drag.
+export const DEFAULT_SEED_PITCH = 60; // "C4" / middle C
 const DEFAULT_NOTE_VELOCITY = 1;
 const NOTE_NUDGE_PX = 4; // arrow-key time nudge, converted through the current zoom like MIN_NOTE_WIDTH_PX
 
@@ -818,7 +825,7 @@ export function createSequencerNoteAt(
     id: `note-${nextNoteId++}`,
     onsetSeconds: onset,
     durationSeconds: minDuration,
-    pitch: DEFAULT_NOTE_PITCH,
+    pitch: null,
     velocity: DEFAULT_NOTE_VELOCITY,
     envelope: null,
   };
@@ -1034,34 +1041,47 @@ function applyNoteSnap(
 // needing their own separate "which note" plumbing.
 let selectedNote: { entityId: string; channelIndex: number; noteId: string } | null = null;
 
-// Which note (if any) currently has its velocity slider open — see
-// toggleVelocitySlider/velocitySliderOpenFor. Cleared whenever the
-// selection moves to a DIFFERENT note (or away entirely), but preserved
-// across a re-select of the SAME note — every note-grab pointerdown
-// (move/resize/pitch/envelope) calls selectNote again on its own already-
-// selected note, and that shouldn't slam the slider shut mid-interaction.
-let velocitySliderOpenNoteId: string | null = null;
+// Which note (if any) currently has its velocity slider open, and WHERE —
+// see toggleVelocitySlider/velocitySliderOpenFor. The track is fixed at
+// whatever position it had the moment the slider was opened (see
+// velocityDragTrackAtPointer) and stays there for as long as it's open,
+// including after a drag against it ends — recomputing a different
+// "resting" position once the pointer lifts would make the slider jump
+// somewhere else right as you let go of it, which is exactly the bug this
+// avoids. Cleared whenever the selection moves to a DIFFERENT note (or
+// away entirely), but preserved across a re-select of the SAME note —
+// every note-grab pointerdown (move/resize/pitch/envelope) calls
+// selectNote again on its own already-selected note, and that shouldn't
+// slam the slider shut mid-interaction.
+let velocitySliderOpen: { noteId: string; track: VelocityTrack } | null = null;
 
 export function selectNote(entityId: string, channelIndex: number, noteId: string): void {
-  if (velocitySliderOpenNoteId && velocitySliderOpenNoteId !== noteId) velocitySliderOpenNoteId = null;
+  if (velocitySliderOpen && velocitySliderOpen.noteId !== noteId) velocitySliderOpen = null;
   selectedNote = { entityId, channelIndex, noteId };
 }
 
 export function deselectNote(): void {
   selectedNote = null;
-  velocitySliderOpenNoteId = null;
+  velocitySliderOpen = null;
 }
 
-// Returns whether the slider ended up open (vs. just having been dismissed)
-// — ui/interaction.ts uses this to decide whether to also start a drag
-// immediately (opening) or not (closing has nothing left to drag).
-export function toggleVelocitySlider(noteId: string): boolean {
-  velocitySliderOpenNoteId = velocitySliderOpenNoteId === noteId ? null : noteId;
-  return velocitySliderOpenNoteId === noteId;
+// Returns the track to start dragging against if the slider ended up open
+// (vs. null, having just been dismissed) — ui/interaction.ts uses this to
+// decide whether to also start a drag immediately.
+export function toggleVelocitySlider(noteId: string, openAtTrack: VelocityTrack): VelocityTrack | null {
+  if (velocitySliderOpen && velocitySliderOpen.noteId === noteId) {
+    velocitySliderOpen = null;
+    return null;
+  }
+  velocitySliderOpen = { noteId, track: openAtTrack };
+  return openAtTrack;
 }
 
-export function velocitySliderOpenFor(noteId: string): boolean {
-  return velocitySliderOpenNoteId === noteId;
+// The slider's current track, if it's open for this note — the single
+// source of truth for both drawing and hit-testing, so the two can never
+// disagree about where it is.
+export function velocitySliderOpenFor(noteId: string): VelocityTrack | null {
+  return velocitySliderOpen && velocitySliderOpen.noteId === noteId ? velocitySliderOpen.track : null;
 }
 
 // Self-heals a stale selection (the note, or the channel it was in, no
@@ -1221,37 +1241,12 @@ export function pitchFromDrag(startPitch: number, deltaY: number): number {
   return clamp(Math.round(startPitch - deltaY / PITCH_DRAG_PX_PER_SEMITONE), 0, 127);
 }
 
-const INSPECTOR_GAP_ABOVE_NOTE = 18;
-
-interface NoteInspectorLayout {
-  pitchCenter: Point;
-}
-
-// Shared by drawing and by the exported hit-test/geometry helpers below so
-// they can't drift apart. Returns null if the note itself isn't currently
-// on screen — the inspector never draws or grabs off in the scrolled-away
-// part of the timeline.
-function noteInspectorLayout(grid: GridArea, state: SequencerState, channelIndex: number, noteId: string): NoteInspectorLayout | null {
-  const channel = state.channels[channelIndex];
-  const note = channel?.notes.find((n) => n.id === noteId);
-  if (!note) return null;
-  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
-  const noteLeft = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
-  const noteRight = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
-  if (noteRight < grid.left || noteLeft > grid.right) return null;
-
-  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
-  // Clamped so it never draws above the ruler — accepts sitting slightly
-  // into the first visible lane's own row rather than adding a second
-  // layout branch just for that edge case.
-  const y = Math.max(grid.rulerBottom + 10, laneTop - INSPECTOR_GAP_ABOVE_NOTE);
-
-  return { pitchCenter: { x: noteLeft, y } };
-}
-
-export function setNotePitch(graph: EntityGraph, entityId: string, channelIndex: number, noteId: string, pitch: number, drag?: DragContext): void {
-  const grid = resolveSequencerGrid(graph, entityId, drag);
-  if (!grid) return;
+// setNotePitch doesn't need to resolve the popup/grid at all — unlike
+// every other per-note setter in this file, pitch has no on-screen
+// geometry of its own to convert through (it's a relative-delta drag off
+// wherever the user first grabbed the pitch text — see pitchFromDrag —
+// not an absolute position within some track).
+export function setNotePitch(entityId: string, channelIndex: number, noteId: string, pitch: number): void {
   const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
   if (!found) return;
   found.channel.notes[found.index].pitch = clamp(pitch, 0, 127);
@@ -1267,7 +1262,6 @@ export function setNotePitch(graph: EntityGraph, entityId: string, channelIndex:
 
 const VELOCITY_SLIDER_HIT_WIDTH = 14; // matches the thumb stroke's own ±7px width (see drawVelocitySlider)
 const VELOCITY_SLIDER_HEIGHT = 50;
-const VELOCITY_SLIDER_GAP_ABOVE_NOTE = 10;
 const VELOCITY_SLIDER_HIT_MARGIN = 5;
 
 // A vertical fader track — same shape as ui/controls.ts's own Track, kept
@@ -1277,36 +1271,6 @@ export interface VelocityTrack {
   x: number;
   top: number;
   bottom: number;
-}
-
-// The slider's normal "at rest" position, floating just above the note —
-// used for drawing/hit-testing whenever it's open but not actively being
-// dragged, and independent of the current value (unlike
-// velocityDragTrackAtPointer below).
-function velocitySliderLayout(grid: GridArea, state: SequencerState, channelIndex: number, noteId: string): VelocityTrack | null {
-  const channel = state.channels[channelIndex];
-  const note = channel?.notes.find((n) => n.id === noteId);
-  if (!note) return null;
-  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
-  const noteLeft = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
-  const noteRight = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
-  if (noteRight < grid.left || noteLeft > grid.right) return null;
-
-  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
-  // Same "never draw above the ruler" clamp as noteInspectorLayout.
-  const bottom = Math.max(grid.rulerBottom + VELOCITY_SLIDER_HEIGHT + 2, laneTop - VELOCITY_SLIDER_GAP_ABOVE_NOTE);
-  return { x: (noteLeft + noteRight) / 2, top: bottom - VELOCITY_SLIDER_HEIGHT, bottom };
-}
-
-// Resolves grid/state from just (graph, entityId), same shape as this
-// file's other exported per-drag geometry helpers — lets
-// ui/interaction.ts capture the resting track ONCE at drag-start (grabbing
-// the slider directly, while it's already open) without needing to know
-// what a GridArea is.
-export function restingVelocitySliderTrack(graph: EntityGraph, entityId: string, channelIndex: number, noteId: string, drag?: DragContext): VelocityTrack | null {
-  const grid = resolveSequencerGrid(graph, entityId, drag);
-  if (!grid) return null;
-  return velocitySliderLayout(grid, sequencerStateFor(entityId), channelIndex, noteId);
 }
 
 // Same idea as ui/controls.ts's own trackGeometry — positions the track so
@@ -1336,78 +1300,51 @@ export function setNoteVelocityFromTrack(entityId: string, channelIndex: number,
 // Same visual language as a knob/synth control's own slider (see
 // ui/render.ts's drawControls): a thin rounded track line, a short
 // horizontal thumb stroke in the accent color at the current value, and a
-// text readout above. `activeTrack`, while an drag is actually in
-// progress, overrides the normal resting position so the drawn slider
-// stays exactly where setNoteVelocityFromTrack is reading the pointer
-// against — otherwise the visual would stay parked above the note while
-// the drag (anchored at the click point) worked from a different track
-// entirely.
-function drawVelocitySlider(
-  ctx: CanvasRenderingContext2D,
-  grid: GridArea,
-  state: SequencerState,
-  channelIndex: number,
-  noteId: string,
-  activeTrack: VelocityTrack | null
-): void {
-  const layout = activeTrack ?? velocitySliderLayout(grid, state, channelIndex, noteId);
+// text readout above. `track` is always velocitySliderOpenFor's own
+// stored value — fixed at wherever the slider was opened, whether or not
+// a drag against it happens to be active right now (see its own comment
+// on why this must never be recomputed from the note's position instead).
+function drawVelocitySlider(ctx: CanvasRenderingContext2D, state: SequencerState, channelIndex: number, noteId: string, track: VelocityTrack): void {
   const note = state.channels[channelIndex]?.notes.find((n) => n.id === noteId);
-  if (!layout || !note) return;
+  if (!note) return;
 
   ctx.save();
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
   ctx.lineWidth = 3;
   ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.moveTo(layout.x, layout.top);
-  ctx.lineTo(layout.x, layout.bottom);
+  ctx.moveTo(track.x, track.top);
+  ctx.lineTo(track.x, track.bottom);
   ctx.stroke();
 
-  const thumbY = layout.bottom - note.velocity * (layout.bottom - layout.top);
+  const thumbY = track.bottom - note.velocity * (track.bottom - track.top);
   ctx.strokeStyle = ACCENT;
   ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(layout.x - 7, thumbY);
-  ctx.lineTo(layout.x + 7, thumbY);
+  ctx.moveTo(track.x - 7, thumbY);
+  ctx.lineTo(track.x + 7, thumbY);
   ctx.stroke();
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
   ctx.font = '9px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`velocity ${Math.round(note.velocity * 100)}%`, layout.x, layout.top - 6);
+  ctx.fillText(`velocity ${Math.round(note.velocity * 100)}%`, track.x, track.top - 6);
   ctx.restore();
 }
 
-// Only the resting position is ever hit-tested — reachable exclusively when
-// the slider is already open and NOT being dragged (a fresh pointerdown),
-// so there's no "active track" variant of this to worry about.
-function hitTestVelocitySlider(grid: GridArea, state: SequencerState, channelIndex: number, noteId: string, point: Point): boolean {
-  const layout = velocitySliderLayout(grid, state, channelIndex, noteId);
-  if (!layout) return false;
+// Against velocitySliderOpenFor's own stored track — reachable only when
+// the slider is already open (a fresh pointerdown; a drag in progress
+// captures its own track once and never re-hit-tests).
+function hitTestVelocitySlider(track: VelocityTrack, point: Point): boolean {
   return (
-    point.x >= layout.x - VELOCITY_SLIDER_HIT_WIDTH / 2 - VELOCITY_SLIDER_HIT_MARGIN &&
-    point.x <= layout.x + VELOCITY_SLIDER_HIT_WIDTH / 2 + VELOCITY_SLIDER_HIT_MARGIN &&
-    point.y >= layout.top - VELOCITY_SLIDER_HIT_MARGIN &&
-    point.y <= layout.bottom + VELOCITY_SLIDER_HIT_MARGIN
+    point.x >= track.x - VELOCITY_SLIDER_HIT_WIDTH / 2 - VELOCITY_SLIDER_HIT_MARGIN &&
+    point.x <= track.x + VELOCITY_SLIDER_HIT_WIDTH / 2 + VELOCITY_SLIDER_HIT_MARGIN &&
+    point.y >= track.top - VELOCITY_SLIDER_HIT_MARGIN &&
+    point.y <= track.bottom + VELOCITY_SLIDER_HIT_MARGIN
   );
 }
 
-// Pitch only — velocity has no visual here any more (see drawSequencerNote's
-// own opacity + centered percentage, and drawVelocitySlider above).
-function drawNoteInspector(ctx: CanvasRenderingContext2D, grid: GridArea, state: SequencerState, channelIndex: number, noteId: string): void {
-  const layout = noteInspectorLayout(grid, state, channelIndex, noteId);
-  const note = state.channels[channelIndex]?.notes.find((n) => n.id === noteId);
-  if (!layout || !note) return;
-
-  ctx.save();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '9px monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(midiNoteName(note.pitch), layout.pitchCenter.x, layout.pitchCenter.y);
-  ctx.restore();
-}
 
 // --- Note envelope shape ----------------------------------------------
 // Draggable ADSR-style handles on the currently-selected note, same
@@ -1655,26 +1592,50 @@ export type SequencerHit =
   | { entityId: string; kind: 'noteEnvelopeHandle'; channelIndex: number; noteId: string; handle: HandleKind }
   | { entityId: string; kind: 'background' };
 
-const INSPECTOR_PITCH_HIT_RADIUS = 10;
+// Shared by hitTestPitchText/hitTestVelocityText below: the note's own
+// visible left/right/center-y, or null if it's not currently on screen or
+// too narrow for the "pitch:velocity" label to be drawn at all (matching
+// drawSequencerNote's own >= 14px cutoff) — the two text halves are only
+// ever grabbable where they're actually visible.
+function noteLabelGeometry(
+  grid: GridArea,
+  state: SequencerState,
+  channelIndex: number,
+  noteId: string
+): { cx: number; cy: number } | null {
+  const channel = state.channels[channelIndex];
+  const note = channel?.notes.find((n) => n.id === noteId);
+  if (!note) return null;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  if (right < grid.left || left > grid.right || right - left < 14) return null;
+  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
+  return { cx: (left + right) / 2, cy: laneTop + LANE_HEIGHT / 2 };
+}
 
-// Only reachable for the currently-selected note — the pitch label isn't
-// drawn (see drawNoteInspector) for anything else, so it shouldn't be
-// grabbable either.
-function hitTestNoteInspector(
+// The "X" (or note name) half of the centered label, just left of the
+// colon — only reachable for the currently-selected note, matching what's
+// actually drawn/grabbable there (see drawSequencerNote).
+function hitTestPitchText(
   grid: GridArea,
   state: SequencerState,
   selected: { channelIndex: number; noteId: string } | null,
   point: Point
-): { kind: 'notePitchDrag'; channelIndex: number; noteId: string } | null {
-  if (!selected) return null;
-  const layout = noteInspectorLayout(grid, state, selected.channelIndex, selected.noteId);
-  if (!layout || dist(point, layout.pitchCenter) > INSPECTOR_PITCH_HIT_RADIUS) return null;
-  return { kind: 'notePitchDrag', channelIndex: selected.channelIndex, noteId: selected.noteId };
+): boolean {
+  if (!selected) return false;
+  const geometry = noteLabelGeometry(grid, state, selected.channelIndex, selected.noteId);
+  if (!geometry) return false;
+  return (
+    point.x >= geometry.cx - NOTE_LABEL_HALF_GAP - 16 &&
+    point.x <= geometry.cx - NOTE_LABEL_HALF_GAP &&
+    Math.abs(point.y - geometry.cy) <= 7
+  );
 }
 
-// Roughly the centered percentage text's own bounding box (see
-// drawSequencerNote) — only reachable for the currently-selected note,
-// same reasoning as hitTestNoteInspector above.
+// The percentage half of the centered label, just right of the colon —
+// moved off-center (see drawSequencerNote) to make room for the pitch half
+// added alongside it; same "only reachable while selected" reasoning.
 function hitTestVelocityText(
   grid: GridArea,
   state: SequencerState,
@@ -1682,17 +1643,13 @@ function hitTestVelocityText(
   point: Point
 ): boolean {
   if (!selected) return false;
-  const channel = state.channels[selected.channelIndex];
-  const note = channel?.notes.find((n) => n.id === selected.noteId);
-  if (!note) return false;
-  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
-  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
-  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
-  if (right < grid.left || left > grid.right || right - left < 14) return false;
-  const laneTop = grid.rulerBottom - state.channelScrollPx + selected.channelIndex * LANE_HEIGHT;
-  const cx = (left + right) / 2;
-  const cy = laneTop + LANE_HEIGHT / 2;
-  return Math.abs(point.x - cx) <= 14 && Math.abs(point.y - cy) <= 7;
+  const geometry = noteLabelGeometry(grid, state, selected.channelIndex, selected.noteId);
+  if (!geometry) return false;
+  return (
+    point.x >= geometry.cx + NOTE_LABEL_HALF_GAP &&
+    point.x <= geometry.cx + NOTE_LABEL_HALF_GAP + 20 &&
+    Math.abs(point.y - geometry.cy) <= 7
+  );
 }
 
 type NoteHit =
@@ -1788,56 +1745,58 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
       };
     }
 
-    // The selected note's own pitch/velocity inspector, if any, sits
-    // visually on top of everything else in the lanes — checked before a
-    // plain note-edge/body grab so it doesn't compete with resizing/moving
-    // the same note it's floating just above.
-    const inspectorHit = hitTestNoteInspector(grid, state, selectedNoteFor(entity.id), point);
-    if (inspectorHit) {
-      return { entityId: entity.id, ...inspectorHit };
+    // Every check below is only ever reachable for the CURRENT selection
+    // (nothing of this shape is drawn for any other note — see
+    // drawSequencerNote/drawNoteEnvelopeShape/drawVelocitySlider), resolved
+    // once and reused rather than re-querying selectedNoteFor per check.
+    const currentSelection = selectedNoteFor(entity.id);
+
+    // The pitch half of the centered label ("X" or a note name, left of
+    // the colon) — checked before a plain note-edge/body grab so it
+    // doesn't compete with resizing/moving the same note it's drawn on.
+    if (hitTestPitchText(grid, state, currentSelection, point)) {
+      return { entityId: entity.id, kind: 'notePitchDrag', channelIndex: currentSelection!.channelIndex, noteId: currentSelection!.noteId };
     }
 
-    // The selected note's own envelope handles, drawn on top of its shape
-    // (see drawNoteEnvelopeShape) — same "only reachable for the current
-    // selection, checked before a plain note grab" reasoning as the
-    // inspector above.
-    const selectedForEnvelope = selectedNoteFor(entity.id);
-    const envelopeHandle = hitTestNoteEnvelopeHandle(grid, state, selectedForEnvelope, point);
-    if (envelopeHandle && selectedForEnvelope) {
+    // The envelope handles, drawn on top of the note's own ADSR shape.
+    const envelopeHandle = hitTestNoteEnvelopeHandle(grid, state, currentSelection, point);
+    if (envelopeHandle && currentSelection) {
       return {
         entityId: entity.id,
         kind: 'noteEnvelopeHandle',
-        channelIndex: selectedForEnvelope.channelIndex,
-        noteId: selectedForEnvelope.noteId,
+        channelIndex: currentSelection.channelIndex,
+        noteId: currentSelection.noteId,
         handle: envelopeHandle,
       };
     }
 
     // The velocity slider, if the selected note currently has it open —
-    // floats above the note, same "checked ahead of a plain note grab"
-    // reasoning as the pitch/envelope checks above.
-    if (selectedForEnvelope && velocitySliderOpenFor(selectedForEnvelope.noteId)) {
-      if (hitTestVelocitySlider(grid, state, selectedForEnvelope.channelIndex, selectedForEnvelope.noteId, point)) {
+    // wherever it was opened (see velocitySliderOpenFor's own comment),
+    // same "checked ahead of a plain note grab" reasoning as the pitch/
+    // envelope checks above.
+    if (currentSelection) {
+      const openTrack = velocitySliderOpenFor(currentSelection.noteId);
+      if (openTrack && hitTestVelocitySlider(openTrack, point)) {
         return {
           entityId: entity.id,
           kind: 'noteVelocitySliderDrag',
-          channelIndex: selectedForEnvelope.channelIndex,
-          noteId: selectedForEnvelope.noteId,
+          channelIndex: currentSelection.channelIndex,
+          noteId: currentSelection.noteId,
         };
       }
     }
 
-    // The centered percentage text on the selected note — click to toggle
-    // the velocity slider above. Checked before a plain note-body grab
-    // (hitTestNotes' 'noteMove') since it sits right in the middle of the
-    // note, the same spot a move-drag would otherwise start from; grabbing
-    // anywhere else on the same note still moves it normally.
-    if (selectedForEnvelope && hitTestVelocityText(grid, state, selectedForEnvelope, point)) {
+    // The percentage half of the centered label, right of the colon —
+    // click to toggle the velocity slider above. Checked before a plain
+    // note-body grab (hitTestNotes' 'noteMove') since it sits inside the
+    // note itself; grabbing anywhere else on the same note still moves it
+    // normally.
+    if (hitTestVelocityText(grid, state, currentSelection, point)) {
       return {
         entityId: entity.id,
         kind: 'noteVelocityTextClick',
-        channelIndex: selectedForEnvelope.channelIndex,
-        noteId: selectedForEnvelope.noteId,
+        channelIndex: currentSelection!.channelIndex,
+        noteId: currentSelection!.noteId,
       };
     }
 
@@ -2139,6 +2098,7 @@ const NOTE_DIMMED_ALPHA = 0.25; // how far a non-selected note fades once someth
 // dimmed/selected would otherwise render it — a multiplier on top of the
 // existing dimmed alpha, not a replacement for it.
 const MIN_VELOCITY_ALPHA_FACTOR = 0.4;
+const NOTE_LABEL_HALF_GAP = 3; // px from the note's own horizontal center to where the pitch/velocity text starts, on either side of the colon
 
 function drawSequencerNote(
   ctx: CanvasRenderingContext2D,
@@ -2172,23 +2132,37 @@ function drawSequencerNote(
   ctx.fillRect(right - 2, top, 2, bottom - top);
   ctx.restore();
 
-  // The velocity readout stays legible regardless of how transparent the
-  // fill above is (that's the whole point of having it) — it only fades
-  // with `dimmed`, not with velocity itself. At the default (untouched)
-  // velocity there's nothing worth surfacing, so it only shows up while
-  // this note is the selection (also its only clickable moment — see
-  // hitTestVelocityText); once actually changed away from the default,
-  // it stays visible regardless of selection, same as any other
-  // deliberately-set value.
+  // A "pitch:velocity" readout, colon fixed at the note's own horizontal
+  // center — pitch to its left (a MIDI note name, or "X" for a drum-like
+  // note with no pitch at all — see midiNoteName/SequencerNote.pitch),
+  // velocity to its right (see hitTestVelocityText's own comment on why
+  // it moved off-center to make room). Stays legible regardless of how
+  // transparent the fill above is (that's the whole point of having it) —
+  // it only fades with `dimmed`, not with velocity itself. Each half is
+  // independently hidden at its own default (no pitch / full velocity)
+  // unless this note is selected, same "quiet until it's either the
+  // selection or actually been touched" rule as the rest of this file's
+  // per-note UI; the colon itself only appears if at least one half does.
+  const showPitchText = selected || note.pitch !== null;
   const showVelocityText = selected || note.velocity !== DEFAULT_NOTE_VELOCITY;
-  if (showVelocityText && right - left >= 14) {
+  if ((showPitchText || showVelocityText) && right - left >= 14) {
+    const cx = (left + right) / 2;
+    const cy = (top + bottom) / 2;
     ctx.save();
     ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
     ctx.font = '7px monospace';
-    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`${Math.round(note.velocity * 100)}%`, (left + right) / 2, (top + bottom) / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText(':', cx, cy);
+    if (showPitchText) {
+      ctx.textAlign = 'right';
+      ctx.fillText(note.pitch === null ? 'X' : midiNoteName(note.pitch), cx - NOTE_LABEL_HALF_GAP, cy);
+    }
+    if (showVelocityText) {
+      ctx.textAlign = 'left';
+      ctx.fillText(`${Math.round(note.velocity * 100)}%`, cx + NOTE_LABEL_HALF_GAP, cy);
+    }
     ctx.restore();
   }
 
@@ -2258,8 +2232,7 @@ function drawSequencerGrid(
   now: number,
   noteSnap: NoteSnapIndicator | null,
   selectedNote: { channelIndex: number; noteId: string } | null,
-  activeEnvelopeHandle: HandleKind | null,
-  activeVelocityDrag: { noteId: string; track: VelocityTrack } | null
+  activeEnvelopeHandle: HandleKind | null
 ): void {
   updateSequencerPlayback(grid, state);
   const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
@@ -2354,10 +2327,9 @@ function drawSequencerGrid(
     drawNoteSnapIndicator(ctx, grid, state, noteSnap);
   }
   if (selectedNote) {
-    drawNoteInspector(ctx, grid, state, selectedNote.channelIndex, selectedNote.noteId);
-    if (velocitySliderOpenFor(selectedNote.noteId)) {
-      const activeTrack = activeVelocityDrag && activeVelocityDrag.noteId === selectedNote.noteId ? activeVelocityDrag.track : null;
-      drawVelocitySlider(ctx, grid, state, selectedNote.channelIndex, selectedNote.noteId, activeTrack);
+    const openTrack = velocitySliderOpenFor(selectedNote.noteId);
+    if (openTrack) {
+      drawVelocitySlider(ctx, state, selectedNote.channelIndex, selectedNote.noteId, openTrack);
     }
   }
 
@@ -2395,7 +2367,6 @@ export function drawSequencerPopup(
   resizing: boolean,
   noteSnap: NoteSnapIndicator | null,
   activeEnvelopeHandle: HandleKind | null,
-  activeVelocityDrag: { noteId: string; track: VelocityTrack } | null,
   drag?: DragContext
 ): void {
   const popup = sequencerPopupRect(graph, entity.id, owner, drag);
@@ -2452,7 +2423,7 @@ export function drawSequencerPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
-  drawSequencerGrid(ctx, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle, activeVelocityDrag);
+  drawSequencerGrid(ctx, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle);
   ctx.restore();
 
   drawVScrollbar(ctx, popup, grid, state);

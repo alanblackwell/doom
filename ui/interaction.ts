@@ -95,6 +95,7 @@ import {
   applySequencerResize,
   attackDecayHandlesCoincide,
   createSequencerNoteAt,
+  DEFAULT_SEED_PITCH,
   deleteSelectedNote,
   deselectNote,
   duplicateSelectedNote,
@@ -105,7 +106,6 @@ import {
   moveSequencerNote,
   nudgeSelectedNoteTime,
   pitchFromDrag,
-  restingVelocitySliderTrack,
   resizeSequencerNoteLeft,
   resizeSequencerNoteRight,
   rewindSequencer,
@@ -124,6 +124,7 @@ import {
   updateSequencerChannelScrollFromTrackY,
   updateSequencerScrollFromTrackX,
   velocityDragTrackAtPointer,
+  velocitySliderOpenFor,
   zoomFromDrag,
 } from './sequencer';
 import type { NoteSnapState, SequencerResizeStart, VelocityTrack } from './sequencer';
@@ -708,7 +709,7 @@ export function attachInteraction(
             startPointerY: point.y,
             startPitch: sequencerStateFor(sequencerHit.entityId).channels[sequencerHit.channelIndex].notes.find(
               (n) => n.id === sequencerHit.noteId
-            )?.pitch ?? 60,
+            )?.pitch ?? DEFAULT_SEED_PITCH,
           };
           break;
         case 'noteVelocityTextClick': {
@@ -718,19 +719,22 @@ export function attachInteraction(
           // cursor already is, at the current value" pattern as this
           // app's other sliders (ui/controls.ts's own trackGeometry) —
           // rather than requiring a second click to then find and grab
-          // the handle whrere it happens to have appeared.
-          const opened = toggleVelocitySlider(sequencerHit.noteId);
-          if (opened) {
+          // the handle where it happens to have appeared. That track then
+          // stays put for as long as the slider is open (see
+          // toggleVelocitySlider's own comment) — it must never be
+          // recomputed once the drag ends, or the slider would jump.
+          const currentVelocity =
+            sequencerStateFor(sequencerHit.entityId).channels[sequencerHit.channelIndex].notes.find(
+              (n) => n.id === sequencerHit.noteId
+            )?.velocity ?? 1;
+          const track = toggleVelocitySlider(sequencerHit.noteId, velocityDragTrackAtPointer(point, currentVelocity));
+          if (track) {
             canvas.setPointerCapture(e.pointerId);
-            const currentVelocity =
-              sequencerStateFor(sequencerHit.entityId).channels[sequencerHit.channelIndex].notes.find(
-                (n) => n.id === sequencerHit.noteId
-              )?.velocity ?? 1;
             state.sequencerVelocityDrag = {
               entityId: sequencerHit.entityId,
               channelIndex: sequencerHit.channelIndex,
               noteId: sequencerHit.noteId,
-              track: velocityDragTrackAtPointer(point, currentVelocity),
+              track,
             };
           }
           break;
@@ -738,9 +742,10 @@ export function attachInteraction(
         case 'noteVelocitySliderDrag': {
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
-          // Captured once here (the slider's normal resting position) and
-          // reused for the whole drag — see setNoteVelocityFromTrack.
-          const track = restingVelocitySliderTrack(graph, sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          // The slider's own stored track (wherever it was opened) —
+          // reused as-is, never recomputed, so grabbing it again can't
+          // make it jump either.
+          const track = velocitySliderOpenFor(sequencerHit.noteId);
           if (track) {
             setNoteVelocityFromTrack(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId, track, point.y); // jump to the click, then keep tracking on move
             state.sequencerVelocityDrag = {
@@ -1053,7 +1058,7 @@ export function attachInteraction(
 
     if (state.sequencerPitchDrag) {
       const { entityId, channelIndex, noteId, startPointerY, startPitch } = state.sequencerPitchDrag;
-      setNotePitch(graph, entityId, channelIndex, noteId, pitchFromDrag(startPitch, point.y - startPointerY));
+      setNotePitch(entityId, channelIndex, noteId, pitchFromDrag(startPitch, point.y - startPointerY));
       return;
     }
 

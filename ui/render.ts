@@ -1048,9 +1048,7 @@ export function renderFrame(
         }
         const envelopeDrag = interaction.sequencerEnvelopeDrag;
         const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
-        const velocityDrag = interaction.sequencerVelocityDrag;
-        const activeVelocityDrag = velocityDrag && velocityDrag.entityId === feature.id ? { noteId: velocityDrag.noteId, track: velocityDrag.track } : null;
-        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, noteSnap, activeEnvelopeHandle, activeVelocityDrag, drag);
+        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, noteSnap, activeEnvelopeHandle, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
