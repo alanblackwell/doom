@@ -96,7 +96,6 @@ import {
   attackDecayHandlesCoincide,
   closeVelocitySlider,
   createSequencerNoteAt,
-  DEFAULT_SEED_PITCH,
   deleteSelectedNote,
   deselectNote,
   duplicateSelectedNote,
@@ -106,7 +105,6 @@ import {
   moveSequencerNote,
   nudgeSelectedNotePitch,
   nudgeSelectedNoteTime,
-  pitchFromDrag,
   resizeSequencerNoteLeft,
   resizeSequencerNoteRight,
   rewindSequencer,
@@ -116,7 +114,6 @@ import {
   sequencerResizeStart,
   sequencerStateFor,
   setNoteEnvelopeFromHandle,
-  setNotePitch,
   setNoteVelocityFromTrack,
   setSelectedNoteEdgeFocus,
   setSelectedNotePitchClass,
@@ -293,11 +290,6 @@ export interface InteractionState {
     snap: NoteSnapState;
   } | null;
 
-  // The selected sequencer note's own pitch-inspector label being dragged —
-  // a relative-delta drag (same shape as draggingTimeAxis's zoomFromDrag),
-  // not an absolute position, so the start value is snapshotted once.
-  sequencerPitchDrag: { entityId: string; channelIndex: number; noteId: string; startPointerY: number; startPitch: number } | null;
-
   // The selected sequencer note's own velocity slider being dragged — an
   // absolute-position "fader" drag against a FIXED track captured once at
   // drag-start (see setNoteVelocityFromTrack), same "don't let the track
@@ -356,7 +348,6 @@ export function createInteractionState(): InteractionState {
     sequencerVScrollDrag: null,
     draggingSequencerEnd: null,
     sequencerNoteDrag: null,
-    sequencerPitchDrag: null,
     sequencerVelocityDrag: null,
     sequencerEnvelopeDrag: null,
   };
@@ -599,14 +590,13 @@ export function attachInteraction(
     // above.
     const sequencerHit = hitTestSequencerPopup(graph, point);
     if (sequencerHit) {
-      // Every case below re-selects its own note except these seven — for
+      // Every case below re-selects its own note except these six — for
       // anything else (transport, scrollbars, the end marker, empty lane
       // space, background), a press deselects whatever note was current.
       if (
         sequencerHit.kind !== 'noteResizeLeft' &&
         sequencerHit.kind !== 'noteResizeRight' &&
         sequencerHit.kind !== 'noteMove' &&
-        sequencerHit.kind !== 'notePitchDrag' &&
         sequencerHit.kind !== 'noteVelocityTextClick' &&
         sequencerHit.kind !== 'noteVelocitySliderDrag' &&
         sequencerHit.kind !== 'noteEnvelopeHandle'
@@ -716,20 +706,6 @@ export function attachInteraction(
             startPointer: point,
             grabOffsetSeconds: sequencerHit.grabOffsetSeconds,
             snap: initialNoteSnapState(point, performance.now()),
-          };
-          break;
-        case 'notePitchDrag':
-          canvas.setPointerCapture(e.pointerId);
-          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
-          closeVelocitySlider();
-          state.sequencerPitchDrag = {
-            entityId: sequencerHit.entityId,
-            channelIndex: sequencerHit.channelIndex,
-            noteId: sequencerHit.noteId,
-            startPointerY: point.y,
-            startPitch: sequencerStateFor(sequencerHit.entityId).channels[sequencerHit.channelIndex].notes.find(
-              (n) => n.id === sequencerHit.noteId
-            )?.pitch ?? DEFAULT_SEED_PITCH,
           };
           break;
         case 'noteVelocityTextClick': {
@@ -1087,12 +1063,6 @@ export function attachInteraction(
       return;
     }
 
-    if (state.sequencerPitchDrag) {
-      const { entityId, channelIndex, noteId, startPointerY, startPitch } = state.sequencerPitchDrag;
-      setNotePitch(entityId, channelIndex, noteId, pitchFromDrag(startPitch, point.y - startPointerY));
-      return;
-    }
-
     if (state.sequencerVelocityDrag) {
       const { entityId, channelIndex, noteId, track } = state.sequencerVelocityDrag;
       setNoteVelocityFromTrack(entityId, channelIndex, noteId, track, point.y);
@@ -1345,12 +1315,6 @@ export function attachInteraction(
       // to do here besides releasing capture and clearing the drag.
       canvas.releasePointerCapture(e.pointerId);
       state.sequencerNoteDrag = null;
-      return;
-    }
-
-    if (state.sequencerPitchDrag) {
-      canvas.releasePointerCapture(e.pointerId);
-      state.sequencerPitchDrag = null;
       return;
     }
 

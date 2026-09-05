@@ -807,10 +807,10 @@ function connectorPosition(popup: Rect, grid: GridArea, channelScrollPx: number,
 
 const NOTE_EDGE_GRAB_PX = 6; // px on either side of a note's own edge that grabs it for resizing rather than moving
 const MIN_NOTE_WIDTH_PX = 8; // fixed visual minimum, converted through the current zoom like LINE_GRAB_TOLERANCE already is
-// The pitch a null note seeds to the moment it's first dragged (see
-// ui/interaction.ts's 'notePitchDrag' pointerdown case) — not the note's
-// own default (which is null/"X", see SequencerNote.pitch), just the
-// starting point for that first drag.
+// The pitch a null note seeds to the moment the keyboard first gives it
+// one (nudgeSelectedNotePitch/setSelectedNotePitchClass/Octave below) —
+// not the note's own default (which is null/"X", see
+// SequencerNote.pitch), just the starting point for that first keypress.
 export const DEFAULT_SEED_PITCH = 60; // "C4" / middle C
 const DEFAULT_NOTE_VELOCITY = 1;
 const NOTE_NUDGE_PX = 4; // arrow-key time nudge, converted through the current zoom like MIN_NOTE_WIDTH_PX
@@ -1224,8 +1224,8 @@ export function velocitySliderOpenFor(noteId: string): VelocityTrack | null {
 // Unconditionally dismisses the slider, regardless of which note (if any)
 // it's open for — every action on the selected note OTHER than dragging
 // the slider itself calls this, mouse (ui/interaction.ts's own
-// noteResizeLeft/Right, noteMove, notePitchDrag, noteEnvelopeHandle
-// pointerdown cases) and keyboard alike (nudgeSelectedNotePitch/Time,
+// noteResizeLeft/Right, noteMove, noteEnvelopeHandle pointerdown cases)
+// and keyboard alike (nudgeSelectedNotePitch/Time,
 // setSelectedNotePitchClass/Octave, sharpenSelectedNote below), so the
 // slider never lingers open over an action that has nothing to do with
 // velocity. selectNote's own same-note preservation (above) is only ever
@@ -1349,9 +1349,8 @@ function selectedNoteObject(): SequencerNote | null {
 
 // Up/Down keyboard shortcut (ui/interaction.ts): moves the selected note
 // exactly one semitone. A null pitch ("X", SequencerNote.pitch) has
-// nothing to offset from, so the first press instead lands it on
-// DEFAULT_SEED_PITCH (middle C) regardless of direction, same "reveal a
-// concrete starting point" idea as ui/interaction.ts's notePitchDrag seed
+// nothing to offset from, so the first press instead reveals a concrete
+// starting point at DEFAULT_SEED_PITCH (middle C) regardless of direction
 // — only the second and later presses actually move by a semitone.
 export function nudgeSelectedNotePitch(direction: -1 | 1): void {
   const note = selectedNoteObject();
@@ -1424,31 +1423,16 @@ export function applySequencerNoteSnap(
 // rather than living in some fixed corner of the popup — there's no
 // meaningful "pitch axis" in this piano-roll (a lane's own vertical axis is
 // which channel, not pitch — see TODO.md's own note on this), so pitch and
-// velocity get their own tiny controls instead of a spatial position.
-
-const PITCH_DRAG_PX_PER_SEMITONE = 6; // relative-delta drag, same shape as zoomFromDrag
+// velocity get their own tiny controls instead of a spatial position. Pitch
+// is keyboard-only (nudgeSelectedNotePitch/setSelectedNotePitchClass/
+// setSelectedNotePitchOctave/sharpenSelectedNote) — the label here is a
+// plain readout, not a drag handle, so it doesn't compete with the
+// note-body drag for the same click.
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 function midiNoteName(midi: number): string {
   const octave = Math.floor(midi / 12) - 1;
   return `${NOTE_NAMES[((midi % 12) + 12) % 12]}${octave}`;
-}
-
-// Pure (startValue, pixelDelta) -> newValue, same shape as zoomFromDrag —
-// up is higher pitch, so a negative (upward) deltaY increases it.
-export function pitchFromDrag(startPitch: number, deltaY: number): number {
-  return clamp(Math.round(startPitch - deltaY / PITCH_DRAG_PX_PER_SEMITONE), 0, 127);
-}
-
-// setNotePitch doesn't need to resolve the popup/grid at all — unlike
-// every other per-note setter in this file, pitch has no on-screen
-// geometry of its own to convert through (it's a relative-delta drag off
-// wherever the user first grabbed the pitch text — see pitchFromDrag —
-// not an absolute position within some track).
-export function setNotePitch(entityId: string, channelIndex: number, noteId: string, pitch: number): void {
-  const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
-  if (!found) return;
-  found.channel.notes[found.index].pitch = clamp(pitch, 0, 127);
 }
 
 // --- Velocity slider ---------------------------------------------------
@@ -1787,17 +1771,16 @@ export type SequencerHit =
   | { entityId: string; kind: 'noteResizeLeft'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteResizeRight'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteMove'; channelIndex: number; noteId: string; grabOffsetSeconds: number }
-  | { entityId: string; kind: 'notePitchDrag'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteVelocityTextClick'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteVelocitySliderDrag'; channelIndex: number; noteId: string }
   | { entityId: string; kind: 'noteEnvelopeHandle'; channelIndex: number; noteId: string; handle: HandleKind }
   | { entityId: string; kind: 'background' };
 
-// Shared by hitTestPitchText/hitTestVelocityText below: the note's own
-// visible left/right/center-y, or null if it's not currently on screen or
-// too narrow for the "pitch:velocity" label to be drawn at all (matching
-// drawSequencerNote's own >= 14px cutoff) — the two text halves are only
-// ever grabbable where they're actually visible.
+// Shared by hitTestVelocityText below: the note's own visible
+// left/right/center-y, or null if it's not currently on screen or too
+// narrow for the "pitch:velocity" label to be drawn at all (matching
+// drawSequencerNote's own >= 14px cutoff) — the text is only ever
+// grabbable where it's actually visible.
 function noteLabelGeometry(
   grid: GridArea,
   state: SequencerState,
@@ -1813,25 +1796,6 @@ function noteLabelGeometry(
   if (right < grid.left || left > grid.right || right - left < 14) return null;
   const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
   return { cx: (left + right) / 2, cy: laneTop + LANE_HEIGHT / 2 };
-}
-
-// The "X" (or note name) half of the centered label, just left of the
-// colon — only reachable for the currently-selected note, matching what's
-// actually drawn/grabbable there (see drawSequencerNote).
-function hitTestPitchText(
-  grid: GridArea,
-  state: SequencerState,
-  selected: { channelIndex: number; noteId: string } | null,
-  point: Point
-): boolean {
-  if (!selected) return false;
-  const geometry = noteLabelGeometry(grid, state, selected.channelIndex, selected.noteId);
-  if (!geometry) return false;
-  return (
-    point.x >= geometry.cx - NOTE_LABEL_HALF_GAP - 16 &&
-    point.x <= geometry.cx - NOTE_LABEL_HALF_GAP &&
-    Math.abs(point.y - geometry.cy) <= 7
-  );
 }
 
 // The percentage half of the centered label, just right of the colon —
@@ -1951,13 +1915,6 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
     // drawSequencerNote/drawNoteEnvelopeShape/drawVelocitySlider), resolved
     // once and reused rather than re-querying selectedNoteFor per check.
     const currentSelection = selectedNoteFor(entity.id);
-
-    // The pitch half of the centered label ("X" or a note name, left of
-    // the colon) — checked before a plain note-edge/body grab so it
-    // doesn't compete with resizing/moving the same note it's drawn on.
-    if (hitTestPitchText(grid, state, currentSelection, point)) {
-      return { entityId: entity.id, kind: 'notePitchDrag', channelIndex: currentSelection!.channelIndex, noteId: currentSelection!.noteId };
-    }
 
     // The envelope handles, drawn on top of the note's own ADSR shape.
     const envelopeHandle = hitTestNoteEnvelopeHandle(grid, state, currentSelection, point);
