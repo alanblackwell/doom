@@ -382,30 +382,50 @@ const WIRE_HANDLE_COLOR = '#c8a05a'; // warm brass — reads as "output jack"
 // Shared body for every control-type entity (knob, clock, ...): the
 // circular case, its shadow/gradient/selection border. Returns the radius
 // so callers can position their own center indicator and label off it.
-export function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean): number {
+// `kind` is the entity's own kind (knob/clock/tap/sequencer) — the same key
+// getTexture(entity.kind) uses for a source's box (drawBox above), so a
+// texture assigned to a control's kind (ui/textureEditor.ts) actually shows
+// up on its circular body too, not just boxes.
+export function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean, kind: string): number {
   const radius = Math.min(bounds.width, bounds.height) / 2;
+  const texture = getTexture(kind);
 
   ctx.save();
   ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
   ctx.shadowBlur = 6;
   ctx.shadowOffsetY = 2;
 
+  if (texture) {
+    // Same "the image's own bounds/alpha define the visible shape" treatment
+    // drawBox gives a source's box above — no forced circular clip, so a
+    // texture renders exactly as uploaded/cropped in the editor rather than
+    // being masked into a circle on top of that.
+    drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+    ctx.shadowColor = 'transparent';
+  } else {
+    ctx.beginPath();
+    ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+    const gradient = ctx.createRadialGradient(
+      bounds.x,
+      bounds.y - radius * 0.25,
+      radius * 0.1,
+      bounds.x,
+      bounds.y,
+      radius
+    );
+    gradient.addColorStop(0, shadeColor(KNOB_BODY_COLOR, 1.6));
+    gradient.addColorStop(1, shadeColor(KNOB_BODY_COLOR, 0.8));
+    ctx.fillStyle = gradient;
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+  }
+
+  // A fresh path (rather than reusing the gradient branch's own arc, which
+  // the texture branch above never draws at all) — this outline is a thin
+  // selection/framing ring around the body, independent of whatever's
+  // actually filled it.
   ctx.beginPath();
   ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
-  const gradient = ctx.createRadialGradient(
-    bounds.x,
-    bounds.y - radius * 0.25,
-    radius * 0.1,
-    bounds.x,
-    bounds.y,
-    radius
-  );
-  gradient.addColorStop(0, shadeColor(KNOB_BODY_COLOR, 1.6));
-  gradient.addColorStop(1, shadeColor(KNOB_BODY_COLOR, 0.8));
-  ctx.fillStyle = gradient;
-  ctx.fill();
-
-  ctx.shadowColor = 'transparent';
   ctx.lineWidth = selected ? 2.5 : 1.5;
   ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
   ctx.stroke();
@@ -476,7 +496,7 @@ export function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, 
 }
 
 function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
-  const radius = drawControlBody(ctx, bounds, selected);
+  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
   const angle = knobIndicatorAngle(value);
 
@@ -509,7 +529,7 @@ function drawClock(
   selected: boolean,
   now: number
 ): void {
-  const radius = drawControlBody(ctx, bounds, selected);
+  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const bpm = Math.round(entity.params.bpm ?? 80);
 
   drawWireBump(ctx, bounds, getBeatFlashGlow(now));
@@ -541,7 +561,7 @@ function drawTap(
   now: number,
   interaction: InteractionState
 ): void {
-  drawControlBody(ctx, bounds, highlighted);
+  drawControlBody(ctx, bounds, highlighted, entity.kind);
 
   const flashAt = interaction.triggerFlashes.get(entity.id);
   const elapsed = flashAt === undefined ? Infinity : now - flashAt;

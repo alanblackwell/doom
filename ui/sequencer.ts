@@ -2384,7 +2384,7 @@ export function drawSequencerBody(
   interaction: InteractionState,
   now: number
 ): void {
-  const radius = drawControlBody(ctx, bounds, selected);
+  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   drawBodyBulge(ctx, bounds);
   const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'sequencer');
   drawSequencerPlayButton(ctx, bounds, feature ? sequencerStateFor(feature.id).playing : false, interaction, entity.id, now);

@@ -482,7 +482,12 @@ function targetAndAspectFor(
   graph: EntityGraph,
   hitEntity: Entity | null
 ): { target: TextureTarget; aspect: number; anchor: Point | null } {
-  if (hitEntity && hitEntity.type === 'source') {
+  // Control-type entities (knob/clock/tap/sequencer) are valid targets too
+  // — their circular body (ui/render.ts's drawControlBody) looks up
+  // getTexture(entity.kind) the same way a source's box does. Excluding
+  // them here used to silently fall through to the 'canvas' branch below,
+  // exactly as if nothing had been hit at all.
+  if (hitEntity && (hitEntity.type === 'source' || hitEntity.type === 'control')) {
     const bounds = effectiveBounds(graph, hitEntity);
     if (bounds.width > 0 && bounds.height > 0) {
       return { target: hitEntity.kind, aspect: bounds.width / bounds.height, anchor: { x: bounds.x, y: bounds.y } };
