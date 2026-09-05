@@ -117,6 +117,7 @@ import {
   setNoteEnvelopeFromHandle,
   setNotePitch,
   setNoteVelocityFromTrack,
+  setSelectedNoteEdgeFocus,
   setSelectedNotePitchClass,
   setSelectedNotePitchOctave,
   sharpenSelectedNote,
@@ -679,6 +680,7 @@ export function attachInteraction(
         case 'noteResizeRight':
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          setSelectedNoteEdgeFocus(sequencerHit.kind === 'noteResizeLeft' ? 'left' : 'right');
           state.sequencerNoteDrag = {
             entityId: sequencerHit.entityId,
             channelIndex: sequencerHit.channelIndex,
@@ -692,6 +694,7 @@ export function attachInteraction(
         case 'noteMove':
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          setSelectedNoteEdgeFocus(null);
           state.sequencerNoteDrag = {
             entityId: sequencerHit.entityId,
             channelIndex: sequencerHit.channelIndex,
@@ -1035,6 +1038,7 @@ export function attachInteraction(
         noteDrag.noteId = noteId;
         noteDrag.mode = mode;
         selectNote(noteDrag.entityId, noteDrag.channelIndex, noteId);
+        setSelectedNoteEdgeFocus('right');
       }
       if (noteId === null) return;
 

@@ -1055,14 +1055,43 @@ let selectedNote: { entityId: string; channelIndex: number; noteId: string } | n
 // slam the slider shut mid-interaction.
 let velocitySliderOpen: { noteId: string; track: VelocityTrack } | null = null;
 
+// Which edge (if any) Left/Right's keyboard nudge (nudgeSelectedNoteTime)
+// currently acts on, for the selected note — set whenever a resize-edge
+// drag is grabbed (ui/interaction.ts's noteResizeLeft/noteResizeRight
+// pointerdown, and the 'create' drag's own immediate transition into
+// resizeRight), and cleared back to null (whole-note move) by a plain
+// body-move grab. Same "cleared on a DIFFERENT note, preserved across a
+// re-select of the SAME note" shape as velocitySliderOpen above — a
+// resize-edge grab always re-selects its own already-selected note, so
+// that path re-sets this deliberately rather than relying on the clear.
+let noteEdgeFocus: { noteId: string; edge: 'left' | 'right' } | null = null;
+
 export function selectNote(entityId: string, channelIndex: number, noteId: string): void {
   if (velocitySliderOpen && velocitySliderOpen.noteId !== noteId) velocitySliderOpen = null;
+  if (noteEdgeFocus && noteEdgeFocus.noteId !== noteId) noteEdgeFocus = null;
   selectedNote = { entityId, channelIndex, noteId };
 }
 
 export function deselectNote(): void {
   selectedNote = null;
   velocitySliderOpen = null;
+  noteEdgeFocus = null;
+}
+
+// Records which edge (or null, for the whole note) the LAST move/resize
+// grab touched — ui/interaction.ts calls this right after selectNote from
+// every one of the note-drag pointerdown cases, so it always reflects the
+// most recent grab regardless of whether the drag actually moved anything.
+export function setSelectedNoteEdgeFocus(edge: 'left' | 'right' | null): void {
+  if (!selectedNote) return;
+  noteEdgeFocus = edge === null ? null : { noteId: selectedNote.noteId, edge };
+}
+
+// The orange edge highlight (drawSequencerNote) and nudgeSelectedNoteTime
+// both key off this rather than the module-private `noteEdgeFocus`
+// directly, so a stale focus for some other note can never leak through.
+export function selectedNoteEdgeFocus(noteId: string): 'left' | 'right' | null {
+  return noteEdgeFocus && noteEdgeFocus.noteId === noteId ? noteEdgeFocus.edge : null;
 }
 
 // Returns the track to start dragging against if the slider ended up open
@@ -1156,6 +1185,12 @@ export function duplicateSelectedNote(graph: EntityGraph): string | null {
   return clone.id;
 }
 
+// Left/Right keyboard shortcut (ui/interaction.ts): by default nudges the
+// whole note, but if the last move/resize grab was against one of its
+// edges (see setSelectedNoteEdgeFocus), nudges just that edge instead —
+// same resize/move split the mouse drags already make, just applied to
+// whichever edge was touched most recently rather than requiring a fresh
+// grab every time.
 export function nudgeSelectedNoteTime(graph: EntityGraph, direction: -1 | 1): void {
   if (!selectedNote) return;
   const { entityId, channelIndex, noteId } = selectedNote;
@@ -1166,8 +1201,15 @@ export function nudgeSelectedNoteTime(graph: EntityGraph, direction: -1 | 1): vo
   const found = findNote(state, channelIndex, noteId);
   if (!found) return;
   const note = found.channel.notes[found.index];
-  const step = NOTE_NUDGE_PX / pxPerSecond(grid, state.zoomSeconds);
-  moveSequencerNote(graph, entityId, channelIndex, noteId, note.onsetSeconds + direction * step);
+  const step = direction * (NOTE_NUDGE_PX / pxPerSecond(grid, state.zoomSeconds));
+  const edge = selectedNoteEdgeFocus(noteId);
+  if (edge === 'left') {
+    resizeSequencerNoteLeft(graph, entityId, channelIndex, noteId, note.onsetSeconds + step);
+  } else if (edge === 'right') {
+    resizeSequencerNoteRight(graph, entityId, channelIndex, noteId, note.onsetSeconds + note.durationSeconds + step);
+  } else {
+    moveSequencerNote(graph, entityId, channelIndex, noteId, note.onsetSeconds + step);
+  }
 }
 
 // Resolves the selected note's own SequencerNote object, self-healing via
@@ -2139,7 +2181,8 @@ function drawSequencerNote(
   note: SequencerNote,
   selected: boolean,
   dimmed: boolean,
-  activeEnvelopeHandle: HandleKind | null
+  activeEnvelopeHandle: HandleKind | null,
+  edgeFocus: 'left' | 'right' | null
 ): void {
   const baseAlpha = dimmed ? NOTE_DIMMED_ALPHA : 1;
   const velocityAlpha = MIN_VELOCITY_ALPHA_FACTOR + (1 - MIN_VELOCITY_ALPHA_FACTOR) * note.velocity;
@@ -2196,11 +2239,28 @@ function drawSequencerNote(
     ctx.restore();
   }
 
+  // Left/Right's keyboard nudge (nudgeSelectedNoteTime) acts on just one
+  // edge once the last move/resize grab touched it (see
+  // setSelectedNoteEdgeFocus) — the highlight follows suit, narrowing from
+  // the full-rect outline down to a single edge stroke so it's clear which
+  // one a keyboard nudge would move next.
   if (selected) {
     ctx.save();
     ctx.strokeStyle = ACCENT;
     ctx.lineWidth = 2;
-    ctx.strokeRect(left + 1, top + 1, Math.max(1, right - left) - 2, bottom - top - 2);
+    if (edgeFocus === 'left') {
+      ctx.beginPath();
+      ctx.moveTo(left + 1, top + 1);
+      ctx.lineTo(left + 1, bottom - 1);
+      ctx.stroke();
+    } else if (edgeFocus === 'right') {
+      ctx.beginPath();
+      ctx.moveTo(right - 1, top + 1);
+      ctx.lineTo(right - 1, bottom - 1);
+      ctx.stroke();
+    } else {
+      ctx.strokeRect(left + 1, top + 1, Math.max(1, right - left) - 2, bottom - top - 2);
+    }
     ctx.restore();
   }
 }
@@ -2341,7 +2401,8 @@ function drawSequencerGrid(
         note,
         selected,
         dimmed,
-        selected ? activeEnvelopeHandle : null
+        selected ? activeEnvelopeHandle : null,
+        selected ? selectedNoteEdgeFocus(note.id) : null
       );
     }
   }
