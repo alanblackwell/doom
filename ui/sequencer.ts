@@ -431,14 +431,18 @@ export function sequencerResizeStart(state: SequencerState): SequencerResizeStar
 //     (resizeHandlePosition) to match: it's the corner that actually
 //     moves. So dragging UP (negative dy) is what adds tracks here, not
 //     down — the desired lane-CONTENT height tracks -dy directly (floored
-//     at the default channel count's worth — never fewer), the frame's
-//     own height grows to match up to MAX_POPUP_HEIGHT, and channel count
-//     always matches how much content height is desired regardless of
-//     whether the frame is still growing or has already capped out. Past
-//     the cap, the frame stops growing but channel count keeps
-//     increasing, and a vertical scrollbar takes over for the overflow
-//     (see maxChannelScrollPxFor) — so "drag up adds tracks" stays true
-//     even once the frame itself can't get any taller.
+//     at the default channel count's worth — never fewer), and the
+//     frame's own height grows to match up to MAX_POPUP_HEIGHT. Past the
+//     cap, the frame stops growing but channel count keeps increasing,
+//     and a vertical scrollbar takes over for the overflow (see
+//     maxChannelScrollPxFor) — so "drag up adds tracks" stays true even
+//     once the frame itself can't get any taller.
+//       Channel count only ever grows from this drag, never shrinks —
+//     dragging back down just shrinks the frame (and, once it's below
+//     what the existing channels need, brings the scrollbar back rather
+//     than deleting anything). A channel, once created, holds onto its
+//     notes until something more deliberate than a resize removes it —
+//     there's no such action yet (TODO.md), so today that means never.
 export function applySequencerResize(state: SequencerState, start: SequencerResizeStart, dx: number, dy: number): void {
   const newWidth = clamp(start.popupWidth + dx, MIN_POPUP_WIDTH, MAX_POPUP_WIDTH);
   const gridWidthBefore = start.popupWidth - RESIZE_CHROME_WIDTH;
@@ -450,7 +454,7 @@ export function applySequencerResize(state: SequencerState, start: SequencerResi
   const startContentHeight = start.popupHeight - RESIZE_CHROME_HEIGHT;
   const desiredContentHeight = Math.max(DEFAULT_CHANNEL_COUNT * LANE_HEIGHT, startContentHeight - dy);
   state.popupHeight = clamp(RESIZE_CHROME_HEIGHT + desiredContentHeight, MIN_POPUP_HEIGHT, MAX_POPUP_HEIGHT);
-  const desiredCount = Math.max(DEFAULT_CHANNEL_COUNT, Math.round(desiredContentHeight / LANE_HEIGHT));
+  const desiredCount = Math.max(DEFAULT_CHANNEL_COUNT, state.channels.length, Math.round(desiredContentHeight / LANE_HEIGHT));
   state.channels = resizeChannels(state.channels, desiredCount);
   state.channelScrollPx = clamp(state.channelScrollPx, 0, maxChannelScrollPxFor(state));
 }
