@@ -4,20 +4,28 @@
 // ADSR envelope/melody/sampler organelles (ui/organelle.ts), just a
 // multi-channel timeline editor instead of a curve or staff.
 //
-// Phase 1 only, per TODO.md: the popup itself, a zoomable real-time grid
-// (0.1s/1s/10s gridlines, finer spacing fading in only once zoomed in —
-// reusing ui/organelle.ts's own gridStepSeconds), fixed-height channel
-// lanes (empty — no notes yet, see TODO.md's Phase 2), a working local
-// playback line (animated, scrubbable, with play/stop/rewind), a
-// top-right handle that resizes the frame (horizontal: reveal more/less
-// of the timeline at the same zoom; vertical: add/remove channels —
-// dragging UP adds them, since every popup here grows upward from a fixed
-// bottom anchor, see applySequencerResize's own comment — with
-// horizontal/vertical scrollbars taking over once there's more timeline
-// or more channels than the current frame size shows), and a per-channel
-// output connector (visual/positional only — Phase 3 gives it real wiring
-// — that pulses when Phase 2/3 gives it something to pulse for). No
-// notes, no wiring, no pitch/velocity annotation yet.
+// Phase 1: the popup itself, a zoomable real-time grid (0.1s/1s/10s
+// gridlines, finer spacing fading in only once zoomed in — reusing
+// ui/organelle.ts's own gridStepSeconds), fixed-height channel lanes, a
+// working local playback line (animated, scrubbable, with play/stop/
+// rewind and a loop/stop track-end marker), a top-right handle that
+// resizes the frame (horizontal: reveal more/less of the timeline at the
+// same zoom; vertical: add/remove channels — dragging UP adds them, since
+// every popup here grows upward from a fixed bottom anchor, see
+// applySequencerResize's own comment — with horizontal/vertical
+// scrollbars taking over once there's more timeline or more channels than
+// the current frame size shows), and a per-channel output connector
+// (visual/positional only — Phase 3 gives it real wiring — that pulses
+// when Phase 2/3 gives it something to pulse for).
+//
+// Phase 2 (this pass): note authoring within a channel's own lane — drag
+// to paint a note (onset at drag-start, offset at drag-end), drag an
+// existing note's edge to resize it or its middle to move it, and a
+// speed-gated snap that aligns a dragged edge to another note's boundary
+// anywhere on the timeline (see the "--- Notes ---" section below). No
+// pitch/velocity annotation yet, and no real per-channel wiring — a
+// note's own onset still isn't connected to anything audible (that's
+// Phase 3, once ui/eventWiring.ts's EventWire has a port dimension).
 //
 // Coordinate model, deliberately parallel to ui/organelle.ts's envelope
 // popup: `zoomSeconds` is how many seconds the grid's fixed pixel width
@@ -37,10 +45,41 @@ import {
   CLOSE_BUTTON_RADIUS,
   TITLE_HEIGHT,
 } from './organelle';
+import type { HandleKind } from './organelle';
 import { ACCENT } from './palette';
+
+// Amplitude shape, contained entirely within a note's own [onsetSeconds,
+// onsetSeconds + durationSeconds] — see noteEnvelopePoints. attack/decay/
+// release are fractions of durationSeconds (not absolute seconds) so
+// resizing the note rescales its shape proportionally with no reclamping;
+// their sum is always <= 1 (see the individual clamps in
+// setNoteEnvelopeFromHandle).
+export interface NoteEnvelope {
+  attack: number;
+  decay: number;
+  sustain: number; // level, 0..1
+  release: number;
+}
+
+export interface SequencerNote {
+  id: string;
+  onsetSeconds: number;
+  durationSeconds: number; // always > 0
+  pitch: number; // MIDI note number, default 60 ("C4" / middle C)
+  velocity: number; // 0..1
+  // null until the user first touches one of the two seed handles (see
+  // drawNoteEnvelopeShape/setNoteEnvelopeFromHandle) — a note with no
+  // envelope at all reads as "unshaped," not as some particular default
+  // shape.
+  envelope: NoteEnvelope | null;
+}
 
 export interface SequencerChannel {
   name: string;
+  // Kept sorted by onsetSeconds — every create/move/resize clamps against
+  // the immediately adjacent note(s) here (array-adjacent, given the sort)
+  // so notes within one channel can never overlap or cross each other.
+  notes: SequencerNote[];
 }
 
 export interface SequencerState {
@@ -139,7 +178,7 @@ export function sequencerStateFor(entityId: string): SequencerState {
   let state = statesByEntity.get(entityId);
   if (!state) {
     state = {
-      channels: Array.from({ length: DEFAULT_CHANNEL_COUNT }, (_, i) => ({ name: String(i + 1) })),
+      channels: Array.from({ length: DEFAULT_CHANNEL_COUNT }, (_, i) => ({ name: String(i + 1), notes: [] })),
       zoomSeconds: DEFAULT_ZOOM_SECONDS,
       scrollSeconds: 0,
       playing: false,
@@ -345,11 +384,15 @@ export function toggleLoopAtEnd(state: SequencerState): void {
 
 // --- Resizing (top-right handle) -----------------------------------------
 
+// Shrinking (dragging the resize handle back down) truncates the excess
+// channels' notes along with the channels themselves — no confirmation,
+// same as this file's other resize behavior; nothing yet warns before an
+// otherwise-destructive drag anywhere in this popup.
 function resizeChannels(channels: SequencerChannel[], desiredCount: number): SequencerChannel[] {
   if (desiredCount === channels.length) return channels;
   if (desiredCount < channels.length) return channels.slice(0, desiredCount);
   const grown = channels.slice();
-  for (let i = grown.length; i < desiredCount; i++) grown.push({ name: String(i + 1) });
+  for (let i = grown.length; i < desiredCount; i++) grown.push({ name: String(i + 1), notes: [] });
   return grown;
 }
 
@@ -698,6 +741,770 @@ function connectorPosition(grid: GridArea, channelScrollPx: number, index: numbe
   return { x: grid.right + CONNECTOR_OFFSET, y: grid.rulerBottom - channelScrollPx + index * LANE_HEIGHT + LANE_HEIGHT / 2 };
 }
 
+// --- Notes ---------------------------------------------------------------
+// Click-drag in a lane's empty space to paint a note (onset at drag-start,
+// offset at drag-end); drag an existing note's edge to resize it, or its
+// middle to move it without changing its length. A channel's own notes
+// array stays sorted by onsetSeconds, so every create/move/resize below
+// clamps against the immediately adjacent note(s) — array-adjacent, given
+// the sort — rather than needing a general overlap search.
+
+const NOTE_EDGE_GRAB_PX = 6; // px on either side of a note's own edge that grabs it for resizing rather than moving
+const MIN_NOTE_WIDTH_PX = 8; // fixed visual minimum, converted through the current zoom like LINE_GRAB_TOLERANCE already is
+const DEFAULT_NOTE_PITCH = 60; // "C4" / middle C
+const DEFAULT_NOTE_VELOCITY = 0.8;
+const NOTE_NUDGE_PX = 4; // arrow-key time nudge, converted through the current zoom like MIN_NOTE_WIDTH_PX
+
+let nextNoteId = 1;
+
+function channelIndexAtY(grid: GridArea, state: SequencerState, y: number): number | null {
+  const relativeY = y - grid.rulerBottom + state.channelScrollPx;
+  if (relativeY < 0) return null;
+  const index = Math.floor(relativeY / LANE_HEIGHT);
+  return index >= 0 && index < state.channels.length ? index : null;
+}
+
+function minNoteDurationSeconds(grid: GridArea, state: SequencerState): number {
+  return MIN_NOTE_WIDTH_PX / pxPerSecond(grid, state.zoomSeconds);
+}
+
+function insertNoteSorted(channel: SequencerChannel, note: SequencerNote): void {
+  const insertAt = channel.notes.findIndex((n) => n.onsetSeconds > note.onsetSeconds);
+  if (insertAt === -1) channel.notes.push(note);
+  else channel.notes.splice(insertAt, 0, note);
+}
+
+// Resolves owner/grid/state from just (graph, entityId) — the same
+// "geometry stays private to this file" shape as secondsAtPopupX/
+// updateSequencerScrollFromTrackX — so ui/interaction.ts never needs to
+// know what a GridArea even is. Returns null if the feature/owner is gone
+// (e.g. popup closed mid-drag).
+function resolveSequencerGrid(graph: EntityGraph, entityId: string, drag?: DragContext): GridArea | null {
+  const entity = graph.get(entityId);
+  const owner = entity && ownerOf(graph, entity);
+  if (!entity || !owner) return null;
+  return gridAreaFor(sequencerPopupRect(graph, entityId, owner, drag));
+}
+
+// Inserts a new minimal-duration note at `onsetSeconds`, clamped against
+// whichever existing note in the channel it would otherwise land on or
+// cross. Returns the new note's id, or null if the feature/owner is gone.
+export function createSequencerNoteAt(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  onsetSeconds: number,
+  drag?: DragContext
+): string | null {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return null;
+  const state = sequencerStateFor(entityId);
+  const channel = state.channels[channelIndex];
+  if (!channel) return null;
+  const minDuration = minNoteDurationSeconds(grid, state);
+
+  // Clamp the starting onset itself against whatever's already there —
+  // painting a new note doesn't get to start on top of (or past) an
+  // existing one; see resizeSequencerNoteRight's own comment for why a
+  // fresh note is otherwise handled as "immediately resize its own right
+  // edge" rather than as a separate code path.
+  let onset = Math.max(0, onsetSeconds);
+  for (const existing of channel.notes) {
+    const end = existing.onsetSeconds + existing.durationSeconds;
+    if (onset >= existing.onsetSeconds && onset < end) onset = end;
+  }
+
+  const note: SequencerNote = {
+    id: `note-${nextNoteId++}`,
+    onsetSeconds: onset,
+    durationSeconds: minDuration,
+    pitch: DEFAULT_NOTE_PITCH,
+    velocity: DEFAULT_NOTE_VELOCITY,
+    envelope: null,
+  };
+  insertNoteSorted(channel, note);
+  return note.id;
+}
+
+function findNote(state: SequencerState, channelIndex: number, noteId: string): { channel: SequencerChannel; index: number } | null {
+  const channel = state.channels[channelIndex];
+  if (!channel) return null;
+  const index = channel.notes.findIndex((n) => n.id === noteId);
+  return index === -1 ? null : { channel, index };
+}
+
+// Moves the note's start, keeping its END fixed (so its length changes) —
+// clamped so it can never cross the previous note's own end, nor push
+// past this note's own end minus the minimum width.
+export function resizeSequencerNoteLeft(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  newOnsetSeconds: number,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const { channel, index } = found;
+  const note = channel.notes[index];
+  const end = note.onsetSeconds + note.durationSeconds;
+  const minDuration = minNoteDurationSeconds(grid, state);
+  const lowerBound = index > 0 ? channel.notes[index - 1].onsetSeconds + channel.notes[index - 1].durationSeconds : 0;
+  const onset = clamp(newOnsetSeconds, Math.max(0, lowerBound), end - minDuration);
+  note.onsetSeconds = onset;
+  note.durationSeconds = end - onset;
+}
+
+// Moves the note's end, keeping its START fixed — clamped so it can never
+// cross the next note's own start, nor shrink past the minimum width.
+// Also what a fresh 'create' drag turns into the moment it crosses
+// DRAG_START_THRESHOLD (see ui/interaction.ts) — painting a note IS
+// resizing its own just-created right edge, so there's no separate
+// "grow a note while painting it" code path to keep in sync with this one.
+export function resizeSequencerNoteRight(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  newEndSeconds: number,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const { channel, index } = found;
+  const note = channel.notes[index];
+  const minDuration = minNoteDurationSeconds(grid, state);
+  const upperBound = index < channel.notes.length - 1 ? channel.notes[index + 1].onsetSeconds : Infinity;
+  const end = clamp(newEndSeconds, note.onsetSeconds + minDuration, upperBound);
+  note.durationSeconds = end - note.onsetSeconds;
+}
+
+// Moves the whole note (both onset and end shift together, duration
+// unchanged) to `newOnsetSeconds`, clamped between the previous note's own
+// end and the next note's own start minus this note's own length.
+export function moveSequencerNote(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  newOnsetSeconds: number,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const { channel, index } = found;
+  const note = channel.notes[index];
+  const lowerBound = index > 0 ? channel.notes[index - 1].onsetSeconds + channel.notes[index - 1].durationSeconds : 0;
+  const upperBound =
+    index < channel.notes.length - 1 ? channel.notes[index + 1].onsetSeconds - note.durationSeconds : Infinity;
+  note.onsetSeconds = clamp(newOnsetSeconds, Math.max(0, lowerBound), upperBound);
+}
+
+// --- Note edge snap --------------------------------------------------------
+// Speed-gated hold-to-snap: a dragged note edge/position only locks onto
+// another note's boundary (anywhere on the timeline, any channel) after
+// the cursor has been both close to that boundary AND moving slowly for
+// SNAP_HOLD_MS continuously — a fast drag glides straight past nearby
+// boundaries with no snap at all. All four constants below are first-guess
+// defaults, same spirit as this file's own ZOOM_DRAG_SENSITIVITY/
+// END_MARKER_LOOKAHEAD_PX — reasonable, meant to be tuned by feel once
+// tried live, not derived from a formula.
+const SNAP_PROXIMITY_PX = 8; // must be this close on screen to be an eligible candidate
+const SNAP_RELEASE_PROXIMITY_PX = 16; // hysteresis: once snapped, must move this far to release
+const SNAP_SPEED_THRESHOLD_PX_PER_MS = 0.3; // "slow enough" for the hold to count at all
+const SNAP_HOLD_MS = 350; // how long "slow and near" has to hold before it locks
+
+export interface NoteSnapState {
+  lastPointer: Point;
+  lastMoveAt: number; // performance.now()
+  snapCandidateSeconds: number | null; // shown as a guide line whenever set, whether or not the hold has completed
+  snapHoldStartAt: number | null; // null unless actively counting down toward a lock
+  snapped: boolean;
+}
+
+export function initialNoteSnapState(pointer: Point, now: number): NoteSnapState {
+  return { lastPointer: pointer, lastMoveAt: now, snapCandidateSeconds: null, snapHoldStartAt: null, snapped: false };
+}
+
+// null once snapped (nothing left to count down) or not currently holding
+// (moving too fast, or just arrived at a different candidate) — exported
+// so ui/render.ts can turn this into the countdown dial's fill fraction
+// without needing SNAP_HOLD_MS itself.
+export function noteSnapHoldFraction(snap: NoteSnapState, now: number): number | null {
+  if (snap.snapped || snap.snapHoldStartAt === null) return null;
+  return Math.min(1, (now - snap.snapHoldStartAt) / SNAP_HOLD_MS);
+}
+
+// Every note boundary (onset and offset) across every channel, except the
+// note currently being edited — not restricted to *other* channels only,
+// since aligning with a neighboring note on the very same channel is just
+// as useful and excluding it would need extra per-channel special-casing
+// for no real benefit.
+function snapCandidatesFor(state: SequencerState, excludeNoteId: string | null): number[] {
+  const candidates: number[] = [];
+  for (const channel of state.channels) {
+    for (const note of channel.notes) {
+      if (note.id === excludeNoteId) continue;
+      candidates.push(note.onsetSeconds, note.onsetSeconds + note.durationSeconds);
+    }
+  }
+  return candidates;
+}
+
+function applyNoteSnap(
+  snap: NoteSnapState,
+  candidates: number[],
+  rawSeconds: number,
+  pointer: Point,
+  now: number,
+  pxPerSec: number
+): number {
+  const dtMs = Math.max(1, now - snap.lastMoveAt); // avoid div-by-zero on a same-tick call
+  const speedPxPerMs = dist(pointer, snap.lastPointer) / dtMs;
+  snap.lastPointer = pointer;
+  snap.lastMoveAt = now;
+
+  // Stay snapped as long as we're within the (larger) release tolerance of
+  // whatever we snapped to, regardless of speed — deliberate hysteresis so
+  // a snapped edge doesn't immediately chatter loose from a tiny jitter.
+  if (snap.snapped && snap.snapCandidateSeconds !== null) {
+    const releaseSeconds = SNAP_RELEASE_PROXIMITY_PX / pxPerSec;
+    if (Math.abs(rawSeconds - snap.snapCandidateSeconds) <= releaseSeconds) {
+      return snap.snapCandidateSeconds;
+    }
+    snap.snapped = false;
+    snap.snapCandidateSeconds = null;
+    snap.snapHoldStartAt = null;
+  }
+
+  const proximitySeconds = SNAP_PROXIMITY_PX / pxPerSec;
+  let nearest: number | null = null;
+  let nearestDist = Infinity;
+  for (const c of candidates) {
+    const d = Math.abs(rawSeconds - c);
+    if (d <= proximitySeconds && d < nearestDist) {
+      nearest = c;
+      nearestDist = d;
+    }
+  }
+
+  if (nearest === null) {
+    snap.snapCandidateSeconds = null;
+    snap.snapHoldStartAt = null;
+    return rawSeconds;
+  }
+
+  // In range — always shown as a guide line (snapCandidateSeconds set),
+  // but the hold-timeout countdown only actually runs while the cursor
+  // stays slow at THIS candidate; picking up speed, or drifting to a
+  // different one, restarts it from zero rather than carrying over
+  // partial progress.
+  const candidateChanged = snap.snapCandidateSeconds !== nearest;
+  const tooFast = speedPxPerMs >= SNAP_SPEED_THRESHOLD_PX_PER_MS;
+  snap.snapCandidateSeconds = nearest;
+
+  if (tooFast || candidateChanged) {
+    snap.snapHoldStartAt = tooFast ? null : now;
+    return rawSeconds;
+  }
+  if (snap.snapHoldStartAt === null) {
+    snap.snapHoldStartAt = now;
+  } else if (now - snap.snapHoldStartAt >= SNAP_HOLD_MS) {
+    snap.snapped = true;
+    return nearest;
+  }
+  return rawSeconds;
+}
+
+// --- Note selection --------------------------------------------------------
+// A single selected note, app-wide (like ui/sampler.ts's own selectedMarker
+// module state) — dims every other note in the same sequencer so it reads
+// as "this one is now the focus," and is the hook future note-specific
+// interactions (delete, pitch/velocity, ...) will act on rather than
+// needing their own separate "which note" plumbing.
+let selectedNote: { entityId: string; channelIndex: number; noteId: string } | null = null;
+
+export function selectNote(entityId: string, channelIndex: number, noteId: string): void {
+  selectedNote = { entityId, channelIndex, noteId };
+}
+
+export function deselectNote(): void {
+  selectedNote = null;
+}
+
+// Self-heals a stale selection (the note, or the channel it was in, no
+// longer exists — e.g. deleted, or its channel was removed by shrinking
+// the track) the same way ui/sampler.ts's hasSelectedMarker verifies its
+// own module state before trusting it, rather than requiring every caller
+// that mutates channels/notes to remember to clear this separately.
+export function selectedNoteFor(entityId: string): { channelIndex: number; noteId: string } | null {
+  if (!selectedNote || selectedNote.entityId !== entityId) return null;
+  const state = sequencerStateFor(entityId);
+  const channel = state.channels[selectedNote.channelIndex];
+  if (!channel || !channel.notes.some((n) => n.id === selectedNote!.noteId)) {
+    selectedNote = null;
+    return null;
+  }
+  return { channelIndex: selectedNote.channelIndex, noteId: selectedNote.noteId };
+}
+
+export function hasSelectedNote(): boolean {
+  return !!selectedNote && selectedNoteFor(selectedNote.entityId) !== null;
+}
+
+// --- Selected-note actions ---------------------------------------------
+// Delete/duplicate/nudge, all driven by ui/interaction.ts's keyboard
+// handling (see attachKeyboard) and all resolving the current
+// `selectedNote` internally rather than taking it as a parameter — same
+// "resolve everything from module state" shape selection itself already
+// uses, so callers just need to know THAT something is selected
+// (hasSelectedNote), not which one.
+
+export function deleteSelectedNote(): void {
+  if (!selectedNote) return;
+  const { entityId, channelIndex, noteId } = selectedNote;
+  if (!selectedNoteFor(entityId)) return;
+  const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
+  if (!found) return;
+  found.channel.notes.splice(found.index, 1);
+  deselectNote();
+}
+
+// Clones the selected note immediately after itself (touching its own end),
+// clamped against whatever note follows it — same clamp shape
+// createSequencerNoteAt uses for a fresh note. No-ops (returns null) if
+// there's no room at all, e.g. the next note already touches this one's end.
+export function duplicateSelectedNote(graph: EntityGraph): string | null {
+  if (!selectedNote) return null;
+  const { entityId, channelIndex, noteId } = selectedNote;
+  if (!selectedNoteFor(entityId)) return null;
+  const grid = resolveSequencerGrid(graph, entityId);
+  if (!grid) return null;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return null;
+  const { channel, index } = found;
+  const original = channel.notes[index];
+  const minDuration = minNoteDurationSeconds(grid, state);
+  const onset = original.onsetSeconds + original.durationSeconds;
+  const upperBound = index < channel.notes.length - 1 ? channel.notes[index + 1].onsetSeconds : Infinity;
+  const duration = Math.min(original.durationSeconds, upperBound - onset);
+  if (duration < minDuration) return null;
+
+  const clone: SequencerNote = {
+    id: `note-${nextNoteId++}`,
+    onsetSeconds: onset,
+    durationSeconds: duration,
+    pitch: original.pitch,
+    velocity: original.velocity,
+    envelope: original.envelope ? { ...original.envelope } : null,
+  };
+  insertNoteSorted(channel, clone);
+  selectNote(entityId, channelIndex, clone.id);
+  return clone.id;
+}
+
+export function nudgeSelectedNoteTime(graph: EntityGraph, direction: -1 | 1): void {
+  if (!selectedNote) return;
+  const { entityId, channelIndex, noteId } = selectedNote;
+  if (!selectedNoteFor(entityId)) return;
+  const grid = resolveSequencerGrid(graph, entityId);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const note = found.channel.notes[found.index];
+  const step = NOTE_NUDGE_PX / pxPerSecond(grid, state.zoomSeconds);
+  moveSequencerNote(graph, entityId, channelIndex, noteId, note.onsetSeconds + direction * step);
+}
+
+// Moving a note to a different channel has no existing neighbor-clamp to
+// reuse (moveSequencerNote only ever slides a note within its OWN channel)
+// — rather than inventing a reflow, this only succeeds if the note's exact
+// current time range is entirely free in the target channel; otherwise
+// it's a no-op, same "always prevent overlap, never resolve it after the
+// fact" spirit as every other note edit in this file.
+export function moveSelectedNoteChannel(direction: -1 | 1): void {
+  if (!selectedNote) return;
+  const { entityId, channelIndex, noteId } = selectedNote;
+  if (!selectedNoteFor(entityId)) return;
+  const state = sequencerStateFor(entityId);
+  const targetIndex = channelIndex + direction;
+  if (targetIndex < 0 || targetIndex >= state.channels.length) return;
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const note = found.channel.notes[found.index];
+  const targetChannel = state.channels[targetIndex];
+  const noteEnd = note.onsetSeconds + note.durationSeconds;
+  const blocked = targetChannel.notes.some(
+    (n) => note.onsetSeconds < n.onsetSeconds + n.durationSeconds && noteEnd > n.onsetSeconds
+  );
+  if (blocked) return;
+  found.channel.notes.splice(found.index, 1);
+  insertNoteSorted(targetChannel, note);
+  selectNote(entityId, targetIndex, noteId);
+}
+
+// Resolves grid/state/candidates from just (graph, entityId), same shape
+// as this file's other exported per-drag update functions — `snap` is
+// mutated in place, and the seconds value to actually apply is returned.
+export function applySequencerNoteSnap(
+  graph: EntityGraph,
+  entityId: string,
+  snap: NoteSnapState,
+  excludeNoteId: string | null,
+  rawSeconds: number,
+  pointer: Point,
+  now: number,
+  drag?: DragContext
+): number {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return rawSeconds;
+  const state = sequencerStateFor(entityId);
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const candidates = snapCandidatesFor(state, excludeNoteId);
+  return applyNoteSnap(snap, candidates, rawSeconds, pointer, now, pxPerSec);
+}
+
+// --- Note inspector (pitch/velocity) ---------------------------------------
+// A small cluster shown only for the currently-selected note, anchored in
+// screen space just above it (so it scrolls/zooms along with the note
+// itself, using the same secondsToX/lane-top math the note is drawn with)
+// rather than living in some fixed corner of the popup — there's no
+// meaningful "pitch axis" in this piano-roll (a lane's own vertical axis is
+// which channel, not pitch — see TODO.md's own note on this), so pitch and
+// velocity get their own tiny controls instead of a spatial position.
+
+const PITCH_DRAG_PX_PER_SEMITONE = 6; // relative-delta drag, same shape as zoomFromDrag
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function midiNoteName(midi: number): string {
+  const octave = Math.floor(midi / 12) - 1;
+  return `${NOTE_NAMES[((midi % 12) + 12) % 12]}${octave}`;
+}
+
+// Pure (startValue, pixelDelta) -> newValue, same shape as zoomFromDrag —
+// up is higher pitch, so a negative (upward) deltaY increases it.
+export function pitchFromDrag(startPitch: number, deltaY: number): number {
+  return clamp(Math.round(startPitch - deltaY / PITCH_DRAG_PX_PER_SEMITONE), 0, 127);
+}
+
+const INSPECTOR_GAP_ABOVE_NOTE = 18;
+const INSPECTOR_METER_WIDTH = 6;
+const INSPECTOR_METER_HEIGHT = 16;
+const INSPECTOR_METER_GAP = 20; // horizontal offset of the velocity meter from the pitch label
+
+interface NoteInspectorLayout {
+  pitchCenter: Point;
+  meterX: number;
+  meterTop: number;
+  meterBottom: number;
+}
+
+// Shared by drawing and by the exported hit-test/geometry helpers below so
+// they can't drift apart. Returns null if the note itself isn't currently
+// on screen — the inspector never draws or grabs off in the scrolled-away
+// part of the timeline.
+function noteInspectorLayout(grid: GridArea, state: SequencerState, channelIndex: number, noteId: string): NoteInspectorLayout | null {
+  const channel = state.channels[channelIndex];
+  const note = channel?.notes.find((n) => n.id === noteId);
+  if (!note) return null;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const noteLeft = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const noteRight = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  if (noteRight < grid.left || noteLeft > grid.right) return null;
+
+  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
+  // Clamped so it never draws above the ruler — accepts sitting slightly
+  // into the first visible lane's own row rather than adding a second
+  // layout branch just for that edge case.
+  const y = Math.max(grid.rulerBottom + INSPECTOR_METER_HEIGHT / 2 + 2, laneTop - INSPECTOR_GAP_ABOVE_NOTE);
+
+  return {
+    pitchCenter: { x: noteLeft, y },
+    meterX: noteLeft + INSPECTOR_METER_GAP,
+    meterTop: y - INSPECTOR_METER_HEIGHT / 2,
+    meterBottom: y + INSPECTOR_METER_HEIGHT / 2,
+  };
+}
+
+export function setNotePitch(graph: EntityGraph, entityId: string, channelIndex: number, noteId: string, pitch: number, drag?: DragContext): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
+  if (!found) return;
+  found.channel.notes[found.index].pitch = clamp(pitch, 0, 127);
+}
+
+// Absolute-position "fader" set, same idiom as updateSequencerScrollFromTrackX
+// — pointerdown jumps straight to the clicked position, pointermove keeps
+// tracking, both calling this same function.
+export function setNoteVelocityFromPointerY(graph: EntityGraph, entityId: string, channelIndex: number, noteId: string, y: number, drag?: DragContext): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const layout = noteInspectorLayout(grid, state, channelIndex, noteId);
+  if (!layout) return;
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const fraction = 1 - (y - layout.meterTop) / (layout.meterBottom - layout.meterTop);
+  found.channel.notes[found.index].velocity = clamp(fraction, 0, 1);
+}
+
+function drawNoteInspector(ctx: CanvasRenderingContext2D, grid: GridArea, state: SequencerState, channelIndex: number, noteId: string): void {
+  const layout = noteInspectorLayout(grid, state, channelIndex, noteId);
+  const note = state.channels[channelIndex]?.notes.find((n) => n.id === noteId);
+  if (!layout || !note) return;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(midiNoteName(note.pitch), layout.pitchCenter.x, layout.pitchCenter.y);
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(layout.meterX, layout.meterTop, INSPECTOR_METER_WIDTH, layout.meterBottom - layout.meterTop);
+  const fillHeight = (layout.meterBottom - layout.meterTop) * note.velocity;
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(layout.meterX, layout.meterBottom - fillHeight, INSPECTOR_METER_WIDTH, fillHeight);
+  ctx.restore();
+}
+
+// --- Note envelope shape ----------------------------------------------
+// Draggable ADSR-style handles on the currently-selected note, same
+// HandleKind names as ui/organelle.ts's own envelope organelle
+// (imported directly rather than redefining an identical type) — but a
+// separate, much smaller geometry: this shape always fits entirely inside
+// the note's own [onset, onset+duration] box (no zoom/timeScale, no
+// drawing or dragging past the note's own edges), the way a DAW clip's
+// fade handles never extend past the clip itself. attack/decay/release are
+// stored as fractions of the note's own duration (see SequencerNote), so
+// resizing the note rescales the shape for free.
+
+const NOTE_CURVE_COLOR = 'rgba(232, 220, 192, 0.9)'; // matches ui/organelle.ts's own CURVE_COLOR
+const NOTE_HANDLE_RADIUS = 3.5; // small — a lane is only ~16px tall once inset
+const NOTE_HANDLE_HIT_RADIUS = 7;
+const NOTE_SEED_HANDLE_RADIUS = 2; // smaller/fainter than a real handle — these two haven't shaped anything yet
+const NOTE_SEED_HANDLE_COLOR = 'rgba(255, 255, 255, 0.35)';
+
+// The envelope every note starts as before its first edit — attack=0,
+// decay=0, release=0 and sustain=1 is a no-op shape (instant on, instant
+// off, full level throughout), which conveniently also means its
+// attackPeak/decayCorner sit exactly at the note's own top-left corner and
+// its releaseStart sits exactly at the top-right — precisely where the two
+// subtle "seed" handles are drawn/hit-tested for a note with no envelope
+// yet (see drawNoteEnvelopeShape/hitTestNoteEnvelopeHandle), so no separate
+// geometry is needed for that state.
+const IDENTITY_ENVELOPE: NoteEnvelope = { attack: 0, decay: 0, sustain: 1, release: 0 };
+
+interface NoteEnvelopePoints {
+  start: Point;
+  attackPeak: Point;
+  decayCorner: Point;
+  releaseStart: Point;
+  end: Point;
+}
+
+function noteEnvelopePoints(left: number, right: number, top: number, bottom: number, envelope: NoteEnvelope): NoteEnvelopePoints {
+  const width = right - left;
+  const height = bottom - top;
+  const sustainY = top + (1 - envelope.sustain) * height;
+  return {
+    start: { x: left, y: bottom },
+    attackPeak: { x: left + envelope.attack * width, y: top },
+    decayCorner: { x: left + (envelope.attack + envelope.decay) * width, y: sustainY },
+    releaseStart: { x: right - envelope.release * width, y: sustainY },
+    end: { x: right, y: bottom },
+  };
+}
+
+function drawNoteEnvelopeHandle(ctx: CanvasRenderingContext2D, p: Point, active: boolean): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, active ? NOTE_HANDLE_RADIUS + 1 : NOTE_HANDLE_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = active ? ACCENT : NOTE_CURVE_COLOR;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawNoteSeedHandle(ctx: CanvasRenderingContext2D, p: Point, active: boolean): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, active ? NOTE_SEED_HANDLE_RADIUS + 1 : NOTE_SEED_HANDLE_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = active ? ACCENT : NOTE_SEED_HANDLE_COLOR;
+  ctx.fill();
+  ctx.restore();
+}
+
+// Selected-note body: a note with no envelope yet keeps its plain flat
+// fill, with only the two subtle seed handles (top-left/top-right) drawn
+// on top — no curve, since there's no shape to show. Once an envelope
+// exists (first touch of either seed handle — see
+// setNoteEnvelopeFromHandle), the full ADSR polyline becomes the note's
+// own body instead, with all three real handles.
+function drawNoteEnvelopeShape(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  note: SequencerNote,
+  activeHandle: HandleKind | null
+): void {
+  if (!note.envelope) {
+    ctx.save();
+    ctx.fillStyle = NOTE_FILL;
+    ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
+    ctx.restore();
+    const pts = noteEnvelopePoints(left, right, top, bottom, IDENTITY_ENVELOPE);
+    drawNoteSeedHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+    drawNoteSeedHandle(ctx, pts.releaseStart, activeHandle === 'release');
+    return;
+  }
+
+  const pts = noteEnvelopePoints(left, right, top, bottom, note.envelope);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(pts.start.x, pts.start.y);
+  ctx.lineTo(pts.attackPeak.x, pts.attackPeak.y);
+  ctx.lineTo(pts.decayCorner.x, pts.decayCorner.y);
+  ctx.lineTo(pts.releaseStart.x, pts.releaseStart.y);
+  ctx.lineTo(pts.end.x, pts.end.y);
+  ctx.lineTo(pts.end.x, bottom);
+  ctx.closePath();
+  ctx.fillStyle = NOTE_FILL;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(pts.start.x, pts.start.y);
+  ctx.lineTo(pts.attackPeak.x, pts.attackPeak.y);
+  ctx.lineTo(pts.decayCorner.x, pts.decayCorner.y);
+  ctx.lineTo(pts.releaseStart.x, pts.releaseStart.y);
+  ctx.lineTo(pts.end.x, pts.end.y);
+  ctx.strokeStyle = NOTE_CURVE_COLOR;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  drawNoteEnvelopeHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+  drawNoteEnvelopeHandle(ctx, pts.decayCorner, activeHandle === 'decaySustain');
+  drawNoteEnvelopeHandle(ctx, pts.releaseStart, activeHandle === 'release');
+}
+
+// Before an envelope exists, only the two seed handles (attack/release) are
+// reachable — there's no decaySustain handle to grab since decay/sustain
+// haven't been shaped yet, matching what's actually drawn.
+function hitTestNoteEnvelopeHandle(
+  grid: GridArea,
+  state: SequencerState,
+  selected: { channelIndex: number; noteId: string } | null,
+  point: Point
+): HandleKind | null {
+  if (!selected) return null;
+  const channel = state.channels[selected.channelIndex];
+  const note = channel?.notes.find((n) => n.id === selected.noteId);
+  if (!note) return null;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  const laneTop = grid.rulerBottom - state.channelScrollPx + selected.channelIndex * LANE_HEIGHT;
+  const top = laneTop + NOTE_VERTICAL_INSET;
+  const bottom = laneTop + LANE_HEIGHT - NOTE_VERTICAL_INSET;
+  const pts = noteEnvelopePoints(left, right, top, bottom, note.envelope ?? IDENTITY_ENVELOPE);
+
+  if (dist(point, pts.attackPeak) <= NOTE_HANDLE_HIT_RADIUS) return 'attack';
+  if (note.envelope && dist(point, pts.decayCorner) <= NOTE_HANDLE_HIT_RADIUS) return 'decaySustain';
+  if (dist(point, pts.releaseStart) <= NOTE_HANDLE_HIT_RADIUS) return 'release';
+  return null;
+}
+
+// True while the decay/sustain handle sits exactly on top of the attack
+// handle (decay=0 and sustain=1 — including a note with no envelope at
+// all yet, which is the same identity shape) — the two are otherwise
+// indistinguishable by position, so ui/interaction.ts uses this to decide
+// whether a press on 'attack' needs to stay ambiguous (resolved by drag
+// direction — see its own comment) rather than committing immediately.
+export function attackDecayHandlesCoincide(entityId: string, channelIndex: number, noteId: string): boolean {
+  const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
+  const envelope = found?.channel.notes[found.index].envelope;
+  return !envelope || (envelope.decay === 0 && envelope.sustain === 1);
+}
+
+// Absolute-position drag, same shape as setNoteVelocityFromPointerY — the
+// handle's new value IS wherever the pointer currently is, converted back
+// through the note's own box geometry, mirroring
+// ui/organelle.ts's envelopeValuesFromHandle. Each value is clamped only
+// against the OTHER two's current values (attack+decay+release <= 1),
+// same single-value-clamp spirit as resizeSequencerNoteLeft/Right. Release
+// and decaySustain both set sustain from the vertical position (they sit on
+// the same flat sustain line — see noteEnvelopePoints), so dragging either
+// one vertically moves the other's handle along with it.
+export function setNoteEnvelopeFromHandle(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  handle: HandleKind,
+  point: Point,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const note = found.channel.notes[found.index];
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  const width = right - left;
+  if (width <= 0) return;
+
+  // First touch of either seed handle materializes the envelope (as the
+  // identity shape — see IDENTITY_ENVELOPE) before applying this specific
+  // handle's own drag on top of it, so touching just one handle doesn't
+  // also jump the other, still-untouched dimensions to some arbitrary
+  // default.
+  if (!note.envelope) note.envelope = { ...IDENTITY_ENVELOPE };
+  const envelope = note.envelope;
+
+  if (handle === 'attack') {
+    envelope.attack = clamp((point.x - left) / width, 0, 1 - envelope.decay - envelope.release);
+    return;
+  }
+
+  // Both release and decaySustain sit on the flat sustain line, so a
+  // vertical drag on either one raises/lowers that same line — moving the
+  // OTHER handle right along with it, since they share this one y value.
+  const laneTop = grid.rulerBottom - state.channelScrollPx + channelIndex * LANE_HEIGHT;
+  const top = laneTop + NOTE_VERTICAL_INSET;
+  const bottom = laneTop + LANE_HEIGHT - NOTE_VERTICAL_INSET;
+  envelope.sustain = clamp(1 - (point.y - top) / (bottom - top), 0, 1);
+
+  if (handle === 'release') {
+    envelope.release = clamp((right - point.x) / width, 0, 1 - envelope.attack - envelope.decay);
+  } else {
+    const attackPeakX = left + envelope.attack * width;
+    envelope.decay = clamp((point.x - attackPeakX) / width, 0, 1 - envelope.attack - envelope.release);
+  }
+}
+
 // --- Hit-testing -------------------------------------------------------
 
 export type SequencerHit =
@@ -711,7 +1518,79 @@ export type SequencerHit =
   | { entityId: string; kind: 'vScroll' }
   | { entityId: string; kind: 'endMarkerToggle' }
   | { entityId: string; kind: 'endMarkerDrag'; seconds: number }
+  | { entityId: string; kind: 'noteCreate'; channelIndex: number; seconds: number }
+  | { entityId: string; kind: 'noteResizeLeft'; channelIndex: number; noteId: string }
+  | { entityId: string; kind: 'noteResizeRight'; channelIndex: number; noteId: string }
+  | { entityId: string; kind: 'noteMove'; channelIndex: number; noteId: string; grabOffsetSeconds: number }
+  | { entityId: string; kind: 'notePitchDrag'; channelIndex: number; noteId: string }
+  | { entityId: string; kind: 'noteVelocityDrag'; channelIndex: number; noteId: string }
+  | { entityId: string; kind: 'noteEnvelopeHandle'; channelIndex: number; noteId: string; handle: HandleKind }
   | { entityId: string; kind: 'background' };
+
+const INSPECTOR_PITCH_HIT_RADIUS = 10;
+
+type InspectorHit =
+  | { kind: 'notePitchDrag'; channelIndex: number; noteId: string }
+  | { kind: 'noteVelocityDrag'; channelIndex: number; noteId: string };
+
+// Only reachable for the currently-selected note — the inspector cluster
+// isn't drawn (see drawNoteInspector) for anything else, so it shouldn't be
+// grabbable either.
+function hitTestNoteInspector(
+  grid: GridArea,
+  state: SequencerState,
+  selected: { channelIndex: number; noteId: string } | null,
+  point: Point
+): InspectorHit | null {
+  if (!selected) return null;
+  const layout = noteInspectorLayout(grid, state, selected.channelIndex, selected.noteId);
+  if (!layout) return null;
+  if (dist(point, layout.pitchCenter) <= INSPECTOR_PITCH_HIT_RADIUS) {
+    return { kind: 'notePitchDrag', channelIndex: selected.channelIndex, noteId: selected.noteId };
+  }
+  if (
+    point.x >= layout.meterX - 3 &&
+    point.x <= layout.meterX + INSPECTOR_METER_WIDTH + 3 &&
+    point.y >= layout.meterTop - 3 &&
+    point.y <= layout.meterBottom + 3
+  ) {
+    return { kind: 'noteVelocityDrag', channelIndex: selected.channelIndex, noteId: selected.noteId };
+  }
+  return null;
+}
+
+type NoteHit =
+  | { kind: 'noteResizeLeft'; channelIndex: number; noteId: string }
+  | { kind: 'noteResizeRight'; channelIndex: number; noteId: string }
+  | { kind: 'noteMove'; channelIndex: number; noteId: string; grabOffsetSeconds: number };
+
+// Existing notes only — a click on empty lane space falls through to
+// hitTestSequencerPopup's own 'noteCreate' fallback instead. Edge grabs
+// (within NOTE_EDGE_GRAB_PX) take priority over a body grab so a resize is
+// always reachable even on a very short note.
+function hitTestNotes(grid: GridArea, state: SequencerState, point: Point): NoteHit | null {
+  if (point.x < grid.left || point.x > grid.right) return null;
+  const channelIndex = channelIndexAtY(grid, state, point.y);
+  if (channelIndex === null) return null;
+  const channel = state.channels[channelIndex];
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  for (const note of channel.notes) {
+    const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+    const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+    if (point.x < left - NOTE_EDGE_GRAB_PX || point.x > right + NOTE_EDGE_GRAB_PX) continue;
+    if (Math.abs(point.x - left) <= NOTE_EDGE_GRAB_PX) {
+      return { kind: 'noteResizeLeft', channelIndex, noteId: note.id };
+    }
+    if (Math.abs(point.x - right) <= NOTE_EDGE_GRAB_PX) {
+      return { kind: 'noteResizeRight', channelIndex, noteId: note.id };
+    }
+    if (point.x >= left && point.x <= right) {
+      const grabOffsetSeconds = xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) - note.onsetSeconds;
+      return { kind: 'noteMove', channelIndex, noteId: note.id, grabOffsetSeconds };
+    }
+  }
+  return null;
+}
 
 export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: DragContext): SequencerHit | null {
   for (const entity of graph.all()) {
@@ -773,14 +1652,47 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
       };
     }
 
+    // The selected note's own pitch/velocity inspector, if any, sits
+    // visually on top of everything else in the lanes — checked before a
+    // plain note-edge/body grab so it doesn't compete with resizing/moving
+    // the same note it's floating just above.
+    const inspectorHit = hitTestNoteInspector(grid, state, selectedNoteFor(entity.id), point);
+    if (inspectorHit) {
+      return { entityId: entity.id, ...inspectorHit };
+    }
+
+    // The selected note's own envelope handles, drawn on top of its shape
+    // (see drawNoteEnvelopeShape) — same "only reachable for the current
+    // selection, checked before a plain note grab" reasoning as the
+    // inspector above.
+    const selectedForEnvelope = selectedNoteFor(entity.id);
+    const envelopeHandle = hitTestNoteEnvelopeHandle(grid, state, selectedForEnvelope, point);
+    if (envelopeHandle && selectedForEnvelope) {
+      return {
+        entityId: entity.id,
+        kind: 'noteEnvelopeHandle',
+        channelIndex: selectedForEnvelope.channelIndex,
+        noteId: selectedForEnvelope.noteId,
+        handle: envelopeHandle,
+      };
+    }
+
+    // An existing note's edge/body takes priority over the playback line
+    // grabbed at the same spot below — checked before the ruler/playback
+    // checks so a note sitting right under the playhead is still directly
+    // editable rather than always starting a scrub.
+    const noteHit = hitTestNotes(grid, state, point);
+    if (noteHit) {
+      return { entityId: entity.id, ...noteHit };
+    }
+
     // Two ways to start a scrub: anywhere along the ruler row (a "click to
     // jump there" strip, like a DAW timeline ruler), or a grab directly on
     // the drawn playback line itself — which spans the FULL grid height
     // through the lanes (see drawSequencerGrid), not just the ruler — so
     // dragging it works wherever it's actually visible, not only in that
     // thin top strip. The near-the-line band is deliberately narrow so it
-    // won't meaningfully compete with Phase 2's future note-painting in
-    // the lanes below.
+    // doesn't meaningfully compete with note-painting in the lanes below.
     const inRulerRow = point.x >= grid.left && point.x <= grid.right && point.y >= grid.top && point.y <= grid.rulerBottom;
     const playX = secondsToX(grid, pxPerSec, state.scrollSeconds, currentPlaybackSeconds(state));
     // Matches drawSequencerGrid's own visibility condition exactly — a
@@ -795,6 +1707,17 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
       point.y <= grid.bottom;
     if (inRulerRow || onPlaybackLine) {
       return { entityId: entity.id, kind: 'scrub', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
+    }
+
+    // Empty lane space, below the ruler — starts painting a brand-new note.
+    const emptyLaneChannel = channelIndexAtY(grid, state, point.y);
+    if (emptyLaneChannel !== null && point.x >= grid.left && point.x <= grid.right) {
+      return {
+        entityId: entity.id,
+        kind: 'noteCreate',
+        channelIndex: emptyLaneChannel,
+        seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x),
+      };
     }
 
     if (withinAxisHandleZone(popup, grid, point)) {
@@ -1042,7 +1965,108 @@ function drawEndMarker(ctx: CanvasRenderingContext2D, grid: GridArea, state: Seq
   drawLoopStopIcon(ctx, toggle, state.loopAtEnd);
 }
 
-function drawSequencerGrid(ctx: CanvasRenderingContext2D, grid: GridArea, entityId: string, state: SequencerState, now: number): void {
+const NOTE_FILL = 'rgba(90, 160, 200, 0.55)';
+const NOTE_EDGE_HILITE = 'rgba(200, 230, 245, 0.8)';
+const NOTE_VERTICAL_INSET = 3; // keeps a note visually clear of its own lane's dividers
+const NOTE_DIMMED_ALPHA = 0.25; // how far a non-selected note fades once something else is selected
+
+function drawSequencerNote(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  note: SequencerNote,
+  selected: boolean,
+  dimmed: boolean,
+  activeEnvelopeHandle: HandleKind | null
+): void {
+  ctx.save();
+  if (dimmed) ctx.globalAlpha = NOTE_DIMMED_ALPHA;
+  // The selected note trades its plain flat fill for its own ADSR shape —
+  // every other note (never dimmed AND selected at once) keeps the flat
+  // rect.
+  if (selected) {
+    drawNoteEnvelopeShape(ctx, left, right, top, bottom, note, activeEnvelopeHandle);
+  } else {
+    ctx.fillStyle = NOTE_FILL;
+    ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
+  }
+  // A brighter sliver at each edge hints "grab here to resize" — same
+  // spirit as the end marker's own solid-once-touched edge treatment.
+  ctx.fillStyle = NOTE_EDGE_HILITE;
+  ctx.fillRect(left, top, 2, bottom - top);
+  ctx.fillRect(right - 2, top, 2, bottom - top);
+  ctx.restore();
+
+  if (selected) {
+    ctx.save();
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(left + 1, top + 1, Math.max(1, right - left) - 2, bottom - top - 2);
+    ctx.restore();
+  }
+}
+
+// Shown for a note-edge/move drag while a snap candidate is in range —
+// whether or not the hold has completed. The dial only appears while
+// still counting down (holdFraction !== null); once actually snapped, the
+// guide line alone (brighter/thicker) is enough feedback.
+export interface NoteSnapIndicator {
+  candidateSeconds: number;
+  channelIndex: number;
+  snapped: boolean;
+  holdFraction: number | null;
+}
+
+const SNAP_DIAL_RADIUS = 5;
+
+function drawNoteSnapIndicator(ctx: CanvasRenderingContext2D, grid: GridArea, state: SequencerState, indicator: NoteSnapIndicator): void {
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, indicator.candidateSeconds);
+  if (x < grid.left || x > grid.right) return;
+
+  ctx.save();
+  ctx.strokeStyle = indicator.snapped ? ACCENT : 'rgba(255, 255, 255, 0.4)';
+  ctx.lineWidth = indicator.snapped ? 2 : 1;
+  ctx.beginPath();
+  ctx.moveTo(x, grid.top);
+  ctx.lineTo(x, grid.bottom);
+  ctx.stroke();
+  ctx.restore();
+
+  if (indicator.holdFraction === null) return;
+  const laneTop = grid.rulerBottom - state.channelScrollPx + indicator.channelIndex * LANE_HEIGHT;
+  const center = { x, y: laneTop + LANE_HEIGHT / 2 };
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, SNAP_DIAL_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const startAngle = -Math.PI / 2;
+  const endAngle = startAngle + indicator.holdFraction * Math.PI * 2;
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.moveTo(center.x, center.y);
+  ctx.arc(center.x, center.y, SNAP_DIAL_RADIUS, startAngle, endAngle);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSequencerGrid(
+  ctx: CanvasRenderingContext2D,
+  grid: GridArea,
+  entityId: string,
+  state: SequencerState,
+  now: number,
+  noteSnap: NoteSnapIndicator | null,
+  selectedNote: { channelIndex: number; noteId: string } | null,
+  activeEnvelopeHandle: HandleKind | null
+): void {
   updateSequencerPlayback(grid, state);
   const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
   const step = gridStepSeconds(pxPerSec);
@@ -1104,12 +2128,40 @@ function drawSequencerGrid(ctx: CanvasRenderingContext2D, grid: GridArea, entity
   }
 
   for (let i = 0; i < state.channels.length; i++) {
+    const laneTop = grid.rulerBottom - state.channelScrollPx + i * LANE_HEIGHT;
+    for (const note of state.channels[i].notes) {
+      const noteLeft = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+      const noteRight = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+      if (noteRight < grid.left || noteLeft > grid.right) continue;
+      const selected = note.id === selectedNote?.noteId;
+      const dimmed = selectedNote !== null && !selected;
+      drawSequencerNote(
+        ctx,
+        noteLeft,
+        noteRight,
+        laneTop + NOTE_VERTICAL_INSET,
+        laneTop + LANE_HEIGHT - NOTE_VERTICAL_INSET,
+        note,
+        selected,
+        dimmed,
+        selected ? activeEnvelopeHandle : null
+      );
+    }
+  }
+
+  for (let i = 0; i < state.channels.length; i++) {
     drawChannelConnector(ctx, connectorPosition(grid, state.channelScrollPx, i), connectorGlow(entityId, i, now));
   }
 
   ctx.restore();
 
   drawEndMarker(ctx, grid, state);
+  if (noteSnap) {
+    drawNoteSnapIndicator(ctx, grid, state, noteSnap);
+  }
+  if (selectedNote) {
+    drawNoteInspector(ctx, grid, state, selectedNote.channelIndex, selectedNote.noteId);
+  }
 
   // The playback line — bright, glowing while actually playing (a plain
   // static marker while stopped reads as "paused here," not "about to
@@ -1143,6 +2195,8 @@ export function drawSequencerPopup(
   now: number,
   draggingAxis: boolean,
   resizing: boolean,
+  noteSnap: NoteSnapIndicator | null,
+  activeEnvelopeHandle: HandleKind | null,
   drag?: DragContext
 ): void {
   const popup = sequencerPopupRect(graph, entity.id, owner, drag);
@@ -1199,7 +2253,7 @@ export function drawSequencerPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
-  drawSequencerGrid(ctx, grid, entity.id, state, now);
+  drawSequencerGrid(ctx, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle);
   ctx.restore();
 
   drawVScrollbar(ctx, popup, grid, state);

@@ -35,7 +35,8 @@ import { drawPopup, drawPorthole } from './organelle';
 import { drawMelodyPopup, itemScreenX } from './melody';
 import type { MelodyItem } from './melody';
 import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
-import { drawSequencerBody, drawSequencerPopup } from './sequencer';
+import { drawSequencerBody, drawSequencerPopup, noteSnapHoldFraction } from './sequencer';
+import type { NoteSnapIndicator } from './sequencer';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1035,7 +1036,19 @@ export function renderFrame(
       } else if (feature.kind === 'sequencer') {
         const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
         const resizing = interaction.resizingSequencer?.entityId === feature.id;
-        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, drag);
+        const noteDrag = interaction.sequencerNoteDrag;
+        let noteSnap: NoteSnapIndicator | null = null;
+        if (noteDrag && noteDrag.entityId === feature.id && noteDrag.snap.snapCandidateSeconds !== null) {
+          noteSnap = {
+            candidateSeconds: noteDrag.snap.snapCandidateSeconds,
+            channelIndex: noteDrag.channelIndex,
+            snapped: noteDrag.snap.snapped,
+            holdFraction: noteSnapHoldFraction(noteDrag.snap, now),
+          };
+        }
+        const envelopeDrag = interaction.sequencerEnvelopeDrag;
+        const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
+        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, noteSnap, activeEnvelopeHandle, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

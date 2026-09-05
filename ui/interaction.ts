@@ -91,13 +91,31 @@ import {
   updateMarkerDrag,
 } from './sampler';
 import {
+  applySequencerNoteSnap,
   applySequencerResize,
+  attackDecayHandlesCoincide,
+  createSequencerNoteAt,
+  deleteSelectedNote,
+  deselectNote,
+  duplicateSelectedNote,
+  hasSelectedNote,
   hitTestSequencerPopup,
+  initialNoteSnapState,
+  moveSelectedNoteChannel,
+  moveSequencerNote,
+  nudgeSelectedNoteTime,
+  pitchFromDrag,
+  resizeSequencerNoteLeft,
+  resizeSequencerNoteRight,
   rewindSequencer,
   scrubSequencer,
   secondsAtPopupX,
+  selectNote,
   sequencerResizeStart,
   sequencerStateFor,
+  setNoteEnvelopeFromHandle,
+  setNotePitch,
+  setNoteVelocityFromPointerY,
   setTrackEnd,
   toggleLoopAtEnd,
   toggleSequencer,
@@ -105,7 +123,7 @@ import {
   updateSequencerScrollFromTrackX,
   zoomFromDrag,
 } from './sequencer';
-import type { SequencerResizeStart } from './sequencer';
+import type { NoteSnapState, SequencerResizeStart } from './sequencer';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -245,6 +263,54 @@ export interface InteractionState {
   // dragged, if any — same "jump to the click, continue tracking" shape
   // as the scrub/scrollbar drags above (see ui/sequencer.ts's setTrackEnd).
   draggingSequencerEnd: string | null;
+
+  // A note being painted, moved, or resized in a sequencer's lanes — same
+  // press/threshold shape as melodyPress above: a fresh 'create' drag
+  // starts with noteId: null (nothing inserted yet) and only actually
+  // creates the note once DRAG_START_THRESHOLD is crossed, at which point
+  // it behaves exactly like 'resizeRight' on the newly-created note (see
+  // ui/sequencer.ts's resizeSequencerNoteRight's own comment on why that's
+  // not a separate code path). `snap` is mutated in place every
+  // pointermove by ui/sequencer.ts's applySequencerNoteSnap.
+  sequencerNoteDrag: {
+    entityId: string;
+    channelIndex: number;
+    noteId: string | null;
+    mode: 'create' | 'move' | 'resizeLeft' | 'resizeRight';
+    startPointer: Point;
+    grabOffsetSeconds: number; // 'move' only — preserves where within the note you grabbed it
+    snap: NoteSnapState;
+  } | null;
+
+  // The selected sequencer note's own pitch-inspector label being dragged —
+  // a relative-delta drag (same shape as draggingTimeAxis's zoomFromDrag),
+  // not an absolute position, so the start value is snapshotted once.
+  sequencerPitchDrag: { entityId: string; channelIndex: number; noteId: string; startPointerY: number; startPitch: number } | null;
+
+  // The selected sequencer note's own velocity meter being dragged — an
+  // absolute-position "fader" drag (see setNoteVelocityFromPointerY), same
+  // "jump to the click, then track" shape as melodyScrollDrag above, so no
+  // start value needs to be kept here.
+  sequencerVelocityDrag: { entityId: string; channelIndex: number; noteId: string } | null;
+
+  // The selected sequencer note's own envelope handle (attack/decaySustain/
+  // release) being dragged — absolute-position, same shape as
+  // sequencerVelocityDrag above (see setNoteEnvelopeFromHandle). `handle`
+  // starts as whatever hitTestSequencerPopup resolved, but a press that
+  // lands on 'attack' while it visually coincides with the decaySustain
+  // handle (see attackDecayHandlesCoincide) leaves `pendingAxisFrom` set
+  // instead of applying anything immediately — pointermove then decides
+  // between the two the first time the drag moves far enough (mirroring
+  // melodyPress's own "decide the axis once, freeze it" pattern), rewrites
+  // `handle` to match, and clears `pendingAxisFrom` for the rest of the
+  // drag.
+  sequencerEnvelopeDrag: {
+    entityId: string;
+    channelIndex: number;
+    noteId: string;
+    handle: HandleKind;
+    pendingAxisFrom: Point | null;
+  } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -274,6 +340,10 @@ export function createInteractionState(): InteractionState {
     sequencerHScrollDrag: null,
     sequencerVScrollDrag: null,
     draggingSequencerEnd: null,
+    sequencerNoteDrag: null,
+    sequencerPitchDrag: null,
+    sequencerVelocityDrag: null,
+    sequencerEnvelopeDrag: null,
   };
 }
 
@@ -401,12 +471,24 @@ export function attachInteraction(
 
     const point = canvasPoint(e);
 
+    // A press landing on anything other than a sequencer note (or its own
+    // inspector) deselects the current note — see the sequencerHit switch
+    // below for the note-related exceptions, which (re-)select instead.
+    // This can't be done as a single unconditional call up front: the
+    // sequencer popup's own hit-test (below) depends on reading the
+    // CURRENT selection to know where its inspector cluster is, so
+    // clearing it before that hit-test runs would make the inspector
+    // ungrabbable. Every branch below that isn't the sequencer popup's own
+    // switch is unaffected by selection state, so deselecting there is
+    // safe regardless of order.
+
     // An open melody popup (ui/melody.ts) sits visually on top of everything
     // else too, same reasoning as the envelope popup right below — checked
     // first since it's a distinct feature kind with its own hit-testing
     // (organelle.ts's hitTestPopup only handles kind 'envelope').
     const melodyHit = hitTestMelodyPopup(graph, point);
     if (melodyHit) {
+      deselectNote(); // a press elsewhere always clears the sequencer's own note selection
       const melody = melodyStateFor(melodyHit.entityId);
       switch (melodyHit.kind) {
         case 'close': {
@@ -458,6 +540,7 @@ export function attachInteraction(
     // everything else too, same reasoning as the melody popup above.
     const samplerHit = hitTestSamplerPopup(graph, point);
     if (samplerHit) {
+      deselectNote(); // a press elsewhere always clears the sequencer's own note selection
       switch (samplerHit.kind) {
         case 'close': {
           const feature = graph.get(samplerHit.entityId);
@@ -501,6 +584,19 @@ export function attachInteraction(
     // above.
     const sequencerHit = hitTestSequencerPopup(graph, point);
     if (sequencerHit) {
+      // Every case below re-selects its own note except these six — for
+      // anything else (transport, scrollbars, the end marker, empty lane
+      // space, background), a press deselects whatever note was current.
+      if (
+        sequencerHit.kind !== 'noteResizeLeft' &&
+        sequencerHit.kind !== 'noteResizeRight' &&
+        sequencerHit.kind !== 'noteMove' &&
+        sequencerHit.kind !== 'notePitchDrag' &&
+        sequencerHit.kind !== 'noteVelocityDrag' &&
+        sequencerHit.kind !== 'noteEnvelopeHandle'
+      ) {
+        deselectNote();
+      }
       switch (sequencerHit.kind) {
         case 'close': {
           const feature = graph.get(sequencerHit.entityId);
@@ -552,11 +648,102 @@ export function attachInteraction(
           setTrackEnd(sequencerStateFor(sequencerHit.entityId), sequencerHit.seconds); // jump to the click, then keep tracking on move
           state.draggingSequencerEnd = sequencerHit.entityId;
           break;
+        case 'noteCreate':
+          // Nothing is actually inserted yet — noteId stays null until
+          // pointermove crosses DRAG_START_THRESHOLD, so a plain click on
+          // empty lane space (no drag at all) creates nothing.
+          canvas.setPointerCapture(e.pointerId);
+          state.sequencerNoteDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: null,
+            mode: 'create',
+            startPointer: point,
+            grabOffsetSeconds: 0,
+            snap: initialNoteSnapState(point, performance.now()),
+          };
+          break;
+        case 'noteResizeLeft':
+        case 'noteResizeRight':
+          canvas.setPointerCapture(e.pointerId);
+          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          state.sequencerNoteDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: sequencerHit.noteId,
+            mode: sequencerHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
+            startPointer: point,
+            grabOffsetSeconds: 0,
+            snap: initialNoteSnapState(point, performance.now()),
+          };
+          break;
+        case 'noteMove':
+          canvas.setPointerCapture(e.pointerId);
+          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          state.sequencerNoteDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: sequencerHit.noteId,
+            mode: 'move',
+            startPointer: point,
+            grabOffsetSeconds: sequencerHit.grabOffsetSeconds,
+            snap: initialNoteSnapState(point, performance.now()),
+          };
+          break;
+        case 'notePitchDrag':
+          canvas.setPointerCapture(e.pointerId);
+          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          state.sequencerPitchDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: sequencerHit.noteId,
+            startPointerY: point.y,
+            startPitch: sequencerStateFor(sequencerHit.entityId).channels[sequencerHit.channelIndex].notes.find(
+              (n) => n.id === sequencerHit.noteId
+            )?.pitch ?? 60,
+          };
+          break;
+        case 'noteVelocityDrag':
+          canvas.setPointerCapture(e.pointerId);
+          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          setNoteVelocityFromPointerY(graph, sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId, point.y); // jump to the click, then keep tracking on move
+          state.sequencerVelocityDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: sequencerHit.noteId,
+          };
+          break;
+        case 'noteEnvelopeHandle': {
+          canvas.setPointerCapture(e.pointerId);
+          selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          // A press on 'attack' while it's stacked on the still-untouched
+          // decaySustain handle stays undecided until the drag actually
+          // moves (see pointermove) — applying nothing yet avoids a
+          // visible jump if it turns out the user meant to drag decay/
+          // sustain instead.
+          const ambiguous = sequencerHit.handle === 'attack' && attackDecayHandlesCoincide(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          if (!ambiguous) {
+            setNoteEnvelopeFromHandle(graph, sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId, sequencerHit.handle, point); // jump to the click, then keep tracking on move
+          }
+          state.sequencerEnvelopeDrag = {
+            entityId: sequencerHit.entityId,
+            channelIndex: sequencerHit.channelIndex,
+            noteId: sequencerHit.noteId,
+            handle: sequencerHit.handle,
+            pendingAxisFrom: ambiguous ? point : null,
+          };
+          break;
+        }
         // 'background' is absorbed with no further action, same as the
         // melody/sampler/envelope popups' own catch-all.
       }
       return;
     }
+
+    // Nothing past this point is the sequencer popup or one of its notes
+    // (that branch always returned above) — a press anywhere else on the
+    // canvas always clears the sequencer's own note selection.
+    deselectNote();
 
     // An open envelope popup (ui/organelle.ts) sits visually on top of
     // everything else on the canvas, so its own hit-test goes first — a
@@ -772,6 +959,86 @@ export function attachInteraction(
       // marker band's own tight vertical bounds.
       const seconds = secondsAtPopupX(graph, state.draggingSequencerEnd, point.x);
       if (seconds !== null) setTrackEnd(sequencerStateFor(state.draggingSequencerEnd), seconds);
+      return;
+    }
+
+    if (state.sequencerNoteDrag) {
+      const noteDrag = state.sequencerNoteDrag;
+      const rawSeconds = secondsAtPopupX(graph, noteDrag.entityId, point.x);
+      if (rawSeconds === null) return;
+
+      let noteId = noteDrag.noteId;
+      let mode = noteDrag.mode;
+
+      if (mode === 'create' && noteId === null) {
+        const dx = point.x - noteDrag.startPointer.x;
+        const dy = point.y - noteDrag.startPointer.y;
+        if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+        // Crossing the threshold inserts the note anchored at the original
+        // press location, then behaves exactly like resizeRight on it from
+        // here on — see createSequencerNoteAt's own comment on why
+        // "painting" a note is just resizing its own just-created right
+        // edge, not a separate code path.
+        const onsetSeconds = secondsAtPopupX(graph, noteDrag.entityId, noteDrag.startPointer.x);
+        if (onsetSeconds === null) return;
+        const createdId = createSequencerNoteAt(graph, noteDrag.entityId, noteDrag.channelIndex, onsetSeconds);
+        if (createdId === null) return;
+        noteId = createdId;
+        mode = 'resizeRight';
+        noteDrag.noteId = noteId;
+        noteDrag.mode = mode;
+        selectNote(noteDrag.entityId, noteDrag.channelIndex, noteId);
+      }
+      if (noteId === null) return;
+
+      const targetSeconds = mode === 'move' ? rawSeconds - noteDrag.grabOffsetSeconds : rawSeconds;
+      const snappedSeconds = applySequencerNoteSnap(
+        graph,
+        noteDrag.entityId,
+        noteDrag.snap,
+        noteId,
+        targetSeconds,
+        point,
+        performance.now()
+      );
+
+      if (mode === 'resizeLeft') {
+        resizeSequencerNoteLeft(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+      } else if (mode === 'resizeRight') {
+        resizeSequencerNoteRight(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+      } else if (mode === 'move') {
+        moveSequencerNote(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+      }
+      return;
+    }
+
+    if (state.sequencerPitchDrag) {
+      const { entityId, channelIndex, noteId, startPointerY, startPitch } = state.sequencerPitchDrag;
+      setNotePitch(graph, entityId, channelIndex, noteId, pitchFromDrag(startPitch, point.y - startPointerY));
+      return;
+    }
+
+    if (state.sequencerVelocityDrag) {
+      const { entityId, channelIndex, noteId } = state.sequencerVelocityDrag;
+      setNoteVelocityFromPointerY(graph, entityId, channelIndex, noteId, point.y);
+      return;
+    }
+
+    if (state.sequencerEnvelopeDrag) {
+      const envelopeDrag = state.sequencerEnvelopeDrag;
+      if (envelopeDrag.pendingAxisFrom) {
+        const dx = point.x - envelopeDrag.pendingAxisFrom.x;
+        const dy = point.y - envelopeDrag.pendingAxisFrom.y;
+        if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+        // Decided once, frozen for the rest of the drag — same pattern as
+        // melodyPress's own axis decision. A predominantly-downward move
+        // means "shape decay/sustain instead"; anything else (including
+        // upward, which has nowhere to go from the attack handle's fixed
+        // top position) stays a plain attack drag.
+        envelopeDrag.handle = Math.abs(dy) > Math.abs(dx) && dy > 0 ? 'decaySustain' : 'attack';
+        envelopeDrag.pendingAxisFrom = null;
+      }
+      setNoteEnvelopeFromHandle(graph, envelopeDrag.entityId, envelopeDrag.channelIndex, envelopeDrag.noteId, envelopeDrag.handle, point);
       return;
     }
 
@@ -996,6 +1263,34 @@ export function attachInteraction(
       return;
     }
 
+    if (state.sequencerNoteDrag) {
+      // A plain click that never crossed the threshold (noteId still null)
+      // creates nothing — the note's final state is otherwise already
+      // committed live by every pointermove above, so there's nothing else
+      // to do here besides releasing capture and clearing the drag.
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerNoteDrag = null;
+      return;
+    }
+
+    if (state.sequencerPitchDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerPitchDrag = null;
+      return;
+    }
+
+    if (state.sequencerVelocityDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerVelocityDrag = null;
+      return;
+    }
+
+    if (state.sequencerEnvelopeDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerEnvelopeDrag = null;
+      return;
+    }
+
     if (state.draggingSamplerMarker) {
       canvas.releasePointerCapture(e.pointerId);
       const { entityId, ownerId, edge } = state.draggingSamplerMarker;
@@ -1202,6 +1497,17 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
+      // Falls through to a selected sequencer note when there's no active
+      // melody selection, same priority order as every other key below —
+      // moves the note to the adjacent channel, no-op if that channel
+      // already has something in the same time range (see
+      // moveSelectedNoteChannel's own comment on why this refuses rather
+      // than reflowing).
+      if (hasSelectedNote()) {
+        moveSelectedNoteChannel(e.code === 'ArrowUp' ? -1 : 1);
+        e.preventDefault();
+        return;
+      }
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       if (activeSelectedItem(graph)) {
         selectAdjacentItem(e.code === 'ArrowRight' ? 'next' : 'previous');
@@ -1217,12 +1523,28 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
+      // Then a selected sequencer note, same fall-through order as above.
+      if (hasSelectedNote()) {
+        nudgeSelectedNoteTime(graph, e.code === 'ArrowRight' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       if (activeSelectedItem(graph)) {
         deleteSelectedItem();
         e.preventDefault();
         return;
       }
+      if (hasSelectedNote()) {
+        deleteSelectedNote();
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code === 'KeyR' && hasSelectedNote()) {
+      // Not in LETTER_KEY_INDEX below (C/D/E/F/G/A/B only), so this never
+      // competes with the melody organelle's own letter-key note entry.
+      duplicateSelectedNote(graph);
+      e.preventDefault();
     } else if (e.code in LETTER_KEY_INDEX) {
       // A-G add a new natural note right after the current selection, at
       // whichever octave lands it closest in pitch (TODO.md's melody
