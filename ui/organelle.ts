@@ -33,6 +33,7 @@ import { controlsFor, CONTROL_HIT_RADIUS } from './controlSpecs';
 import type { ControlSpec } from './controlSpecs';
 import type { ControlHit } from './controls';
 import { ACCENT } from './palette';
+import { wireHandlePosition } from './knobs';
 import { getEnvelopePlayback } from '../audio/graph';
 import type { EnvelopePlayback } from '../audio/graph';
 
@@ -57,6 +58,12 @@ export function ownerOf(graph: EntityGraph, entity: Entity): Entity | undefined 
 
 export function portholePosition(graph: EntityGraph, owner: Entity, drag?: DragContext): Point {
   const bounds = effectiveBounds(graph, owner, drag);
+  // A control-type owner (currently only the sequencer, ui/sequencer.ts) has
+  // no box corner to inset a porthole into — it shares the same right-edge
+  // bulge every control already has for its wire-output jack (ui/knobs.ts's
+  // wireHandlePosition), just repurposed here as the door into its
+  // authoring popup instead of a wire connector.
+  if (owner.type === 'control') return wireHandlePosition(bounds);
   return { x: bounds.x + bounds.width / 2 - PORTHOLE_INSET, y: bounds.y + bounds.height / 2 - PORTHOLE_INSET };
 }
 

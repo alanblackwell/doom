@@ -153,7 +153,7 @@ function drawEntity(
       const highlighted = entity.id === interaction.selectedId || interaction.hoveredTapId === entity.id;
       drawTap(ctx, entity, bounds, highlighted, now, interaction);
     } else if (entity.kind === 'sequencer') {
-      drawSequencerBody(ctx, entity, bounds, entity.id === interaction.selectedId);
+      drawSequencerBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }
@@ -382,7 +382,7 @@ const WIRE_HANDLE_COLOR = '#c8a05a'; // warm brass — reads as "output jack"
 // Shared body for every control-type entity (knob, clock, ...): the
 // circular case, its shadow/gradient/selection border. Returns the radius
 // so callers can position their own center indicator and label off it.
-function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean): number {
+export function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean): number {
   const radius = Math.min(bounds.width, bounds.height) / 2;
 
   ctx.save();
@@ -437,7 +437,37 @@ function drawWireBump(ctx: CanvasRenderingContext2D, bounds: Rect, glow: number)
   ctx.restore();
 }
 
-function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, radius: number): void {
+// A plain circular protrusion in the same body material as drawControlBody's
+// own gradient, for a control whose right-edge bulge houses something other
+// than a wire jack (drawWireBump) — currently only the sequencer
+// (ui/sequencer.ts's drawSequencerBody), whose bulge instead frames its own
+// organelle porthole (ui/organelle.ts's drawPorthole, drawn afterward at the
+// same spot by the generic per-feature render pass — see portholePosition's
+// control-type-owner case).
+export function drawBodyBulge(ctx: CanvasRenderingContext2D, bounds: Rect): void {
+  const handle = wireHandlePosition(bounds);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(handle.x, handle.y, WIRE_BUMP_RADIUS, 0, Math.PI * 2);
+  const gradient = ctx.createRadialGradient(
+    handle.x,
+    handle.y - WIRE_BUMP_RADIUS * 0.3,
+    WIRE_BUMP_RADIUS * 0.1,
+    handle.x,
+    handle.y,
+    WIRE_BUMP_RADIUS
+  );
+  gradient.addColorStop(0, shadeColor(KNOB_BODY_COLOR, 1.6));
+  gradient.addColorStop(1, shadeColor(KNOB_BODY_COLOR, 0.8));
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, radius: number): void {
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
   ctx.font = '11px monospace';
   ctx.textAlign = 'center';

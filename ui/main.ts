@@ -10,7 +10,7 @@ import { getTempo, start as startTransport, stop as stopTransport } from '../aud
 import { startSequencerScheduler, stopSequencerScheduler } from '../audio/sequencerPlayer';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
-import { attachInteraction, attachKeyboard, createInteractionState } from './interaction';
+import { attachInteraction, attachKeyboard, createInteractionState, updateSequencerDragAutoscroll } from './interaction';
 import { attachClockPulse } from './clockPulse';
 import { attachSampleDrop } from './sampleDrop';
 import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
@@ -357,14 +357,16 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
-// The sequencer (TODO.md item 3), also a Control entity — a bigger
-// rounded box (ui/render.ts's drawSequencerBody) rather than a small round
-// knob/clock/tap body, since Phase 3 gives it several output ports along
-// its own edge rather than one shared wire-output bump. Its porthole
-// (bottom-right corner, same mechanism as every other feature) opens the
-// piano-roll-style authoring popup (ui/sequencer.ts) — Phase 1 only for
-// now: a zoomable real-time grid and a working local playback line, no
-// notes/wiring/pitch-velocity yet. See TODO.md's sequencer spec.
+// The sequencer (TODO.md item 3), also a Control entity — same small round
+// body as knob/clock/tap (ui/sequencer.ts's drawSequencerBody), now that its
+// real output ports (one per channel) live on connectors inside the
+// authoring popup itself (ui/eventWiring.ts's EventWire.sourcePort) rather
+// than needing room on the collapsed body. Its right-edge bulge — the same
+// spot knob/clock/tap use for their wire-output jack — instead houses this
+// control's own organelle porthole (ui/organelle.ts's portholePosition
+// special-cases a control-type owner for exactly this), opening the
+// piano-roll-style authoring popup. The center doubles as a play/pause
+// button, same as a 'sample' source's own center pad.
 graph.add({
   id: 'sequencer-1',
   type: 'control',
@@ -374,8 +376,8 @@ graph.add({
   params: {},
   x: 60,
   y: 320,
-  width: 130,
-  height: 90,
+  width: 30,
+  height: 30,
   seed: 18,
   docked: false, // controls never dock — see ui/docking.ts's isDockable
   ownerId: null,
@@ -638,6 +640,7 @@ function draw(now: number): void {
   // every place a sample can be added/removed.
   exportButton.disabled = !hasExportableSamples(graph);
   exportAppearanceButton.disabled = !hasExportableAppearance();
+  updateSequencerDragAutoscroll(graph, interaction, now);
   renderFrame(ctx2d, canvas, graph, interaction, now);
   requestAnimationFrame(draw);
 }

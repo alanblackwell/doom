@@ -13,7 +13,13 @@ import { activateEventTarget, releaseEntity } from './graph';
 import type { TriggerOverrides } from './graph';
 import { getEventWiresFrom } from '../ui/eventWiring';
 import { recordSourcePulse } from '../ui/eventPulse';
-import { advancePastTrackEnd, currentPlaybackSeconds, flashChannelConnector, sequencerStateFor } from '../ui/sequencer';
+import {
+  advancePastTrackEnd,
+  currentPlaybackSeconds,
+  flashChannelConnector,
+  sequencerStateFor,
+  toggleSequencer,
+} from '../ui/sequencer';
 import type { SequencerNote, SequencerState } from '../ui/sequencer';
 
 // Same shape as audio/transport.ts's own lookahead scheduler (see its
@@ -46,6 +52,26 @@ export function registerSequencerForPlayback(controlEntityId: string, featureEnt
     featureEntityId,
     dispatchedUpTo: currentPlaybackSeconds(sequencerStateFor(featureEntityId)),
   });
+}
+
+// The sequencer control's own event-wire target: wiring a tap/clock's
+// output onto its center play/pause button (ui/interaction.ts's
+// eventWireHoverTarget detection, extended to recognize a 'sequencer' pad)
+// toggles playback exactly like clicking that button would. Called from
+// audio/graph.ts's activateEventTarget — the single dispatch point every
+// event source (a click, a beat, a wired sequencer channel) already funnels
+// through — same "check a registry, act if this id is one of ours, report
+// back whether it was" shape as pulseMelody's own return value. A linear
+// scan over what's normally one or two registered sequencers, not worth a
+// second reverse-keyed map.
+export function activateSequencerControl(controlEntityId: string): boolean {
+  for (const entry of registered.values()) {
+    if (entry.controlEntityId === controlEntityId) {
+      toggleSequencer(sequencerStateFor(entry.featureEntityId));
+      return true;
+    }
+  }
+  return false;
 }
 
 // A4 (440Hz) is MIDI 69 — standard equal-temperament conversion. Written

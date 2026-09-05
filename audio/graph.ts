@@ -14,7 +14,7 @@ import { getAudioContext } from './context';
 import { getMasterChain } from './master';
 import { getTempo, setTempo } from './transport';
 import { pulseMelody } from './melodyPlayer';
-import { registerSequencerForPlayback } from './sequencerPlayer';
+import { activateSequencerControl, registerSequencerForPlayback } from './sequencerPlayer';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -235,11 +235,13 @@ export function toggleEntityPaused(entityId: string): void {
 
 // What "fire an event at this entity" (ui/interaction.ts's
 // fireEventWireTargets — a wire's target, or the clock's every-beat
-// targets) actually means depends on which of these two mutually exclusive
-// registries the target's own generator case populated: a TRIGGERED_KINDS
-// entity re-hits (triggerEntity), a CONTINUOUS_KINDS one toggles play/pause
-// instead — exactly one of the two is ever a no-op for a given id, so
-// there's no need to look up the entity's kind here at all.
+// targets) actually means depends on which of these registries the
+// target's own generator case (or, for a sequencer control, its own
+// buildFromEntityGraph registration) populated: a TRIGGERED_KINDS entity
+// re-hits (triggerEntity), a CONTINUOUS_KINDS one toggles play/pause
+// instead, a sequencer control toggles ITS OWN playback (same as clicking
+// its center button) — exactly one of these is ever a no-op for a given
+// id, so there's no need to look up the entity's kind here at all.
 export function activateEventTarget(entityId: string, overrides?: TriggerOverrides): void {
   const melodyId = melodyOwnersByEntity.get(entityId);
   if (melodyId && pulseMelody(melodyId, entityId)) {
@@ -254,6 +256,8 @@ export function activateEventTarget(entityId: string, overrides?: TriggerOverrid
     setEntityPaused(entityId, false);
     return;
   }
+
+  if (activateSequencerControl(entityId)) return;
 
   if (triggersByEntity.has(entityId)) {
     triggerEntity(entityId, overrides);

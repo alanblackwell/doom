@@ -48,6 +48,9 @@ import {
 } from './organelle';
 import type { HandleKind } from './organelle';
 import { wireHandlePosition } from './knobs';
+import { padRadius, PAD_FLASH_DURATION } from './pads';
+import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
+import type { InteractionState } from './interaction';
 import { ACCENT } from './palette';
 
 // Amplitude shape, contained entirely within a note's own [onsetSeconds,
@@ -294,6 +297,14 @@ const AUTO_SCROLL_LOOKAHEAD_FRACTION = 0.8; // keep the playhead here, 80% acros
 
 function followPlayhead(state: SequencerState): void {
   if (!state.playing) return;
+  // Once the end marker already sits within the visible window, the
+  // playhead can never go past it — advancePastTrackEnd loops or stops it
+  // exactly there — so there's nothing further ahead worth scrolling
+  // toward. Also what keeps a short, fully-visible loop from endlessly
+  // creeping the view forward on every wrap, one AUTO_SCROLL_LOOKAHEAD_
+  // FRACTION-driven nudge at a time, despite always looping back to the
+  // same content.
+  if (state.trackEndSeconds <= state.scrollSeconds + state.zoomSeconds) return;
   const playhead = currentPlaybackSeconds(state);
   const fraction = (playhead - state.scrollSeconds) / state.zoomSeconds;
 
@@ -763,6 +774,44 @@ export function hitTestEndMarkerBand(grid: GridArea, state: SequencerState, poin
   return point.x >= x && point.x <= x + END_MARKER_WIDTH && point.y >= grid.top && point.y <= grid.bottom;
 }
 
+// Enough screen-px inside the grid's own right edge that the whole band
+// (plus a little breathing room) clears it, rather than mostly spilling
+// into the right-margin strip the axis handle/scrollbar/connector share —
+// same "fixed VISUAL gap, not a fixed time one" reasoning as
+// END_MARKER_LOOKAHEAD_PX above (a time gap would look wildly different
+// depending on zoom).
+const END_MARKER_RELOCATE_MARGIN_PX = END_MARKER_WIDTH + 16;
+
+// Called after zoomSeconds changes (ui/interaction.ts's axis-zoom-icon
+// click and axis-handle drag) — if zooming IN left the end marker beyond
+// the new, narrower visible window, and nothing (no notes on any channel)
+// actually occupies the timeline space being vacated between the new
+// window's right edge and the marker's old position, pulls it in to just
+// inside that new edge instead of leaving the user to scroll a long way to
+// find it again. A no-op whenever the marker's already visible within the
+// new window (also covers zooming OUT, which only ever grows the window),
+// or whenever a note occupies the gap — its position still matters to
+// something real there, so it's left exactly where it is. Works the same
+// whether trackEndTouched is true or false: an untouched end doesn't track
+// live zoomSeconds changes on its own (only rewind/playback-overrun ever
+// move it), so it's just as likely to be left stranded as a deliberately
+// placed one.
+export function relocateAbandonedEndMarker(graph: EntityGraph, entityId: string, drag?: DragContext): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const viewportEnd = state.scrollSeconds + state.zoomSeconds;
+  if (state.trackEndSeconds <= viewportEnd) return;
+
+  const hasNoteInGap = state.channels.some((channel) =>
+    channel.notes.some((note) => note.onsetSeconds < state.trackEndSeconds && note.onsetSeconds + note.durationSeconds > viewportEnd)
+  );
+  if (hasNoteInGap) return;
+
+  const marginSeconds = END_MARKER_RELOCATE_MARGIN_PX / pxPerSecond(grid, state.zoomSeconds);
+  state.trackEndSeconds = Math.max(viewportEnd - marginSeconds, state.scrollSeconds);
+}
+
 // --- Per-channel output connector ---------------------------------------
 // Visual/positional only for now — Phase 3 gives it real event-wire
 // endpoints (ui/eventWiring.ts's EventWire needs a sourcePort added first,
@@ -908,6 +957,15 @@ function resolveSequencerGrid(graph: EntityGraph, entityId: string, drag?: DragC
   const owner = entity && ownerOf(graph, entity);
   if (!entity || !owner) return null;
   return gridAreaFor(sequencerPopupRect(graph, entityId, owner, drag));
+}
+
+// The timeline's own visible screen x-range — ui/interaction.ts's
+// updateSequencerDragAutoscroll uses this to tell whether the pointer
+// currently sits left/right of what's actually shown, without needing to
+// know anything about GridArea's other (private to this file) fields.
+export function sequencerGridScreenBounds(graph: EntityGraph, entityId: string): { left: number; right: number } | null {
+  const grid = resolveSequencerGrid(graph, entityId);
+  return grid && { left: grid.left, right: grid.right };
 }
 
 // Inserts a new minimal-duration note at `onsetSeconds`, clamped against
@@ -2185,39 +2243,87 @@ export function secondsAtPopupX(graph: EntityGraph, entityId: string, x: number,
 
 // --- Drawing -------------------------------------------------------------
 
-const BODY_COLOR = '#3a3450'; // distinct cool violet — reads as neither a knob/clock/tap nor any source kind's own hue
 const PANEL_BG = 'rgba(22, 22, 22, 0.97)'; // matches ui/organelle.ts's own PANEL_BG
+const PLAY_BUTTON_RING = 'rgba(255, 255, 255, 0.3)'; // matches ui/render.ts's drawPad ring
 
-// Collapsed on-canvas presence — a small rounded box (not the circular
-// drawControlBody every other control kind uses; there's no reason to
-// force a multi-lane timeline widget into a circle) with a kind label.
-// The porthole itself (click to open the popup) is drawn separately,
-// generically, by ui/organelle.ts's own drawPorthole — unchanged, since
-// it's already owner-type-agnostic.
-export function drawSequencerBody(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
-  const left = bounds.x - bounds.width / 2;
-  const top = bounds.y - bounds.height / 2;
-  const radius = 6;
-
+// The play/pause button at the body's own center — same small inset "pad"
+// treatment (ring + icon, hover wash, fire-flash ripple) a 'sample'
+// source's own center button gets (ui/render.ts's drawPad/padRadius), not
+// the whole body, so the rest of the circle stays draggable like any other
+// control's. It's a real event-wire TARGET too now (ui/interaction.ts's
+// eventWireHoverTarget detection recognizes this same padRadius circle),
+// so it needs the same hover-wash/flash feedback a TRIGGERED_KINDS/
+// CONTINUOUS_KINDS pad already gets — `interaction` is passed through just
+// for that (drawn here rather than in ui/render.ts's own drawPad since this
+// isn't one of those two kind sets).
+function drawSequencerPlayButton(
+  ctx: CanvasRenderingContext2D,
+  bounds: Rect,
+  playing: boolean,
+  interaction: InteractionState,
+  entityId: string,
+  now: number
+): void {
+  const radius = padRadius(bounds);
   ctx.save();
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-  ctx.shadowBlur = 6;
-  ctx.shadowOffsetY = 2;
   ctx.beginPath();
-  ctx.roundRect(left, top, bounds.width, bounds.height, radius);
-  ctx.fillStyle = BODY_COLOR;
-  ctx.fill();
-  ctx.shadowColor = 'transparent';
-  ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
-  ctx.lineWidth = selected ? 2.5 : 1.5;
+  ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = PLAY_BUTTON_RING;
+  ctx.lineWidth = 2;
   ctx.stroke();
 
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(entity.kind, bounds.x, bounds.y);
+  if (interaction.eventWireHoverTarget === entityId) {
+    ctx.beginPath();
+    ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.fill();
+  }
   ctx.restore();
+
+  drawPlayIcon(ctx, { x: bounds.x, y: bounds.y }, playing);
+
+  const flashStart = interaction.triggerFlashes.get(entityId);
+  if (flashStart !== undefined) {
+    const elapsed = now - flashStart;
+    if (elapsed < PAD_FLASH_DURATION) {
+      const t = elapsed / PAD_FLASH_DURATION;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(bounds.x, bounds.y, radius + t * radius * 1.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 210, 150, ${1 - t})`;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      interaction.triggerFlashes.delete(entityId);
+    }
+  }
+}
+
+// Collapsed on-canvas presence — the same small circular body every other
+// control kind uses (ui/render.ts's drawControlBody), now that its real
+// output ports (one per channel, ui/eventWiring.ts's EventWire.sourcePort)
+// live on connectors inside the authoring popup rather than needing room on
+// the collapsed body itself. Its right-edge bulge (drawBodyBulge, the same
+// spot knob/clock/tap protrude their own wire jack from) instead frames its
+// organelle porthole — drawn separately, generically, by
+// ui/organelle.ts's own drawPorthole once portholePosition's control-type-
+// owner case points it here (see that file's own comment). The center is a
+// play/pause button, same as a 'sample' source's own center pad.
+export function drawSequencerBody(
+  ctx: CanvasRenderingContext2D,
+  graph: EntityGraph,
+  entity: Entity,
+  bounds: Rect,
+  selected: boolean,
+  interaction: InteractionState,
+  now: number
+): void {
+  const radius = drawControlBody(ctx, bounds, selected);
+  drawBodyBulge(ctx, bounds);
+  const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'sequencer');
+  drawSequencerPlayButton(ctx, bounds, feature ? sequencerStateFor(feature.id).playing : false, interaction, entity.id, now);
+  drawControlLabel(ctx, entity, bounds, radius);
 }
 
 function drawPlayIcon(ctx: CanvasRenderingContext2D, center: Point, playing: boolean): void {

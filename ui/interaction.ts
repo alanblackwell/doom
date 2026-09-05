@@ -111,6 +111,7 @@ import {
   rewindSequencer,
   scrubSequencer,
   secondsAtPopupX,
+  sequencerGridScreenBounds,
   selectNote,
   sequencerResizeStart,
   sequencerStateFor,
@@ -129,6 +130,7 @@ import {
   updateSequencerScrollFromTrackX,
   velocityDragTrackAtPointer,
   velocitySliderOpenFor,
+  relocateAbandonedEndMarker,
   zoomFromDrag,
   zoomStep,
 } from './sequencer';
@@ -171,6 +173,15 @@ export interface InteractionState {
   // triggering two different pads close together doesn't clobber either
   // one's animation.
   triggerFlashes: Map<string, number>;
+
+  // The most recent pointer position on the canvas, in content coordinates —
+  // updated unconditionally on every pointermove regardless of what (if
+  // anything) is being dragged. Needed so a per-frame update (e.g.
+  // ui/sequencer.ts's updateSequencerAutoscroll) can react to where the
+  // pointer currently sits even between pointermove events, since the
+  // render loop runs continuously (ui/main.ts's rAF loop) whether or not
+  // the pointer is actually moving right now.
+  lastPointerPoint: Point | null;
 
   // Set while dragging a new wire out from a knob's wire-start handle.
   wiringFrom: { entityId: string; sourcePort?: number } | null;
@@ -333,6 +344,7 @@ export function createInteractionState(): InteractionState {
     hoverControl: null,
     draggingControl: null,
     triggerFlashes: new Map(),
+    lastPointerPoint: null,
     wiringFrom: null,
     wireDragPoint: null,
     wireHoverTarget: null,
@@ -421,6 +433,153 @@ const DRAG_START_THRESHOLD = 4; // px of movement before a press becomes a drag,
 // bounds within which the dragged entity still counts as "inside" once
 // already hovering. See the sticky-hover comment below.
 const HOVER_EXIT_MARGIN = 32;
+
+// --- Sequencer drags ------------------------------------------------------
+// Each pulled out into its own function, rather than left inline in
+// pointermove below, so updateSequencerDragAutoscroll further down can
+// re-apply the same logic against a synthetic (unmoved) pointer position
+// once the view has scrolled — not just from a real pointermove event.
+
+function applySequencerScrub(graph: EntityGraph, entityId: string, point: Point): void {
+  // secondsAtPopupX tracks x only, independent of the ruler's own tight
+  // vertical hit-zone (hitTestSequencerPopup's 'scrub' case) — a scrub drag
+  // should keep tracking even once the pointer strays off the ruler itself,
+  // same "drag doesn't need to stay exactly on the control" leniency every
+  // other drag in this file already gets via pointer capture.
+  const seconds = secondsAtPopupX(graph, entityId, point.x);
+  if (seconds !== null) scrubSequencer(sequencerStateFor(entityId), seconds);
+}
+
+function applySequencerEndMarkerDrag(graph: EntityGraph, entityId: string, point: Point): void {
+  // Same x-only tracking as applySequencerScrub above, so this keeps
+  // working even once the pointer strays off the marker band's own tight
+  // vertical bounds.
+  const seconds = secondsAtPopupX(graph, entityId, point.x);
+  if (seconds !== null) setTrackEnd(sequencerStateFor(entityId), seconds);
+}
+
+function applySequencerNoteDrag(
+  graph: EntityGraph,
+  noteDrag: NonNullable<InteractionState['sequencerNoteDrag']>,
+  point: Point
+): void {
+  const rawSeconds = secondsAtPopupX(graph, noteDrag.entityId, point.x);
+  if (rawSeconds === null) return;
+
+  let noteId = noteDrag.noteId;
+  let mode = noteDrag.mode;
+
+  if (mode === 'create' && noteId === null) {
+    const dx = point.x - noteDrag.startPointer.x;
+    const dy = point.y - noteDrag.startPointer.y;
+    if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+    // Crossing the threshold inserts the note anchored at the original
+    // press location, then behaves exactly like resizeRight on it from
+    // here on — see createSequencerNoteAt's own comment on why "painting"
+    // a note is just resizing its own just-created right edge, not a
+    // separate code path.
+    const onsetSeconds = secondsAtPopupX(graph, noteDrag.entityId, noteDrag.startPointer.x);
+    if (onsetSeconds === null) return;
+    const createdId = createSequencerNoteAt(graph, noteDrag.entityId, noteDrag.channelIndex, onsetSeconds);
+    if (createdId === null) return;
+    noteId = createdId;
+    mode = 'resizeRight';
+    noteDrag.noteId = noteId;
+    noteDrag.mode = mode;
+    selectNote(noteDrag.entityId, noteDrag.channelIndex, noteId);
+    setSelectedNoteEdgeFocus('right');
+  }
+  if (noteId === null) return;
+
+  // Dragging a note's body across a lane boundary moves it to that channel
+  // (if the note's own time range is free there — see the function's own
+  // comment) before applying this frame's horizontal position, so the two
+  // axes of the same drag gesture both land in one motion rather than
+  // needing a separate vertical-only step.
+  if (mode === 'move') {
+    noteDrag.channelIndex = updateSequencerNoteDragChannel(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, point.y);
+  }
+
+  const targetSeconds = mode === 'move' ? rawSeconds - noteDrag.grabOffsetSeconds : rawSeconds;
+  const snappedSeconds = applySequencerNoteSnap(
+    graph,
+    noteDrag.entityId,
+    noteDrag.snap,
+    noteId,
+    targetSeconds,
+    point,
+    performance.now()
+  );
+
+  if (mode === 'resizeLeft') {
+    resizeSequencerNoteLeft(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+  } else if (mode === 'resizeRight') {
+    resizeSequencerNoteRight(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+  } else if (mode === 'move') {
+    moveSequencerNote(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+  }
+}
+
+// Continuously re-applies the active scrub/end-marker/note drag using the
+// pointer's own last known position whenever it currently sits left of the
+// sequencer timeline's visible left edge or right of its right edge — the
+// same "hold near the edge to keep revealing more" behavior most
+// drag-and-drop editors have. None of the three drags above are otherwise
+// clamped to the currently-visible window (secondsAtPopupX extrapolates
+// linearly past either edge with no limit), so without this the user could
+// drag a note/cursor/marker to a spot they can no longer see, and the view
+// would never scroll to follow it. Called every frame from ui/main.ts's
+// render loop, independent of whether the pointer is actually moving right
+// now — the render loop itself runs continuously (its own rAF loop), and
+// holding the pointer still just past the edge must keep scrolling (and
+// keep extending whatever's being dragged, so it doesn't visually drift
+// away from a stationary pointer as the view scrolls underneath it) on its
+// own.
+const AUTOSCROLL_MAX_SPEED_SEC_PER_SEC = 8; // world-seconds revealed per real second, at full overshoot
+const AUTOSCROLL_RAMP_PX = 60; // screen-px past the edge that reaches max speed
+
+// Only one of the three drags above can ever be active at a time (pointer
+// capture), so a single shared timestamp is enough — updated every call,
+// including when nothing is dragging, so a fresh drag's first tick never
+// sees a stale, ancient gap.
+let lastAutoscrollFrameTime: number | null = null;
+
+export function updateSequencerDragAutoscroll(graph: EntityGraph, state: InteractionState, now: number): void {
+  const lastTime = lastAutoscrollFrameTime;
+  lastAutoscrollFrameTime = now;
+
+  const entityId = state.scrubbingSequencerId ?? state.draggingSequencerEnd ?? state.sequencerNoteDrag?.entityId ?? null;
+  const pointer = state.lastPointerPoint;
+  if (!entityId || !pointer || lastTime === null) return;
+
+  const bounds = sequencerGridScreenBounds(graph, entityId);
+  if (!bounds) return;
+
+  const dtSeconds = Math.min(0.1, (now - lastTime) / 1000); // caps a huge/first-ever gap from producing one giant jump
+  const seqState = sequencerStateFor(entityId);
+  if (pointer.x < bounds.left) {
+    const fraction = Math.min(1, (bounds.left - pointer.x) / AUTOSCROLL_RAMP_PX);
+    seqState.scrollSeconds = Math.max(0, seqState.scrollSeconds - fraction * AUTOSCROLL_MAX_SPEED_SEC_PER_SEC * dtSeconds);
+  } else if (pointer.x > bounds.right) {
+    // No upper clamp — dragging a note's edge or the end marker itself past
+    // the current track end needs to be able to scroll into that
+    // not-yet-defined space to extend it, same as setTrackEnd already
+    // allows an arbitrary position.
+    const fraction = Math.min(1, (pointer.x - bounds.right) / AUTOSCROLL_RAMP_PX);
+    seqState.scrollSeconds += fraction * AUTOSCROLL_MAX_SPEED_SEC_PER_SEC * dtSeconds;
+  } else {
+    return; // pointer is inside the visible window — nothing to extend
+  }
+
+  // Re-derive the drag's own value against the just-updated scroll
+  // position, using the SAME pointer x — this is what makes the dragged
+  // note/cursor/marker keep extending in the scrolled direction instead of
+  // visually drifting away from the (unmoved) pointer while the view moves
+  // underneath it.
+  if (state.scrubbingSequencerId) applySequencerScrub(graph, state.scrubbingSequencerId, pointer);
+  else if (state.draggingSequencerEnd) applySequencerEndMarkerDrag(graph, state.draggingSequencerEnd, pointer);
+  else if (state.sequencerNoteDrag) applySequencerNoteDrag(graph, state.sequencerNoteDrag, pointer);
+}
 
 // True if `p` falls within `bounds` (a center-based Rect), grown by
 // `margin` on every side.
@@ -654,6 +813,7 @@ export function attachInteraction(
           // as the transport buttons above.
           const zoomState = sequencerStateFor(sequencerHit.entityId);
           zoomState.zoomSeconds = zoomStep(zoomState.zoomSeconds, sequencerHit.kind === 'axisZoomIn' ? 'in' : 'out');
+          relocateAbandonedEndMarker(graph, sequencerHit.entityId);
           break;
         }
         case 'resize':
@@ -936,6 +1096,13 @@ export function attachInteraction(
       // above — a tap entity's whole body is its button (see
       // withinControlBody), not a smaller inset pad.
       fireTap(hit.id, state);
+    } else if (hit.kind === 'sequencer' && isWithinPad(effectiveBounds(graph, hit), point)) {
+      // The sequencer's own center button — a small inset pad, same as a
+      // 'sample' source's own center button above, not the tap's
+      // whole-body click (the rest of this control's circle stays a normal
+      // drag handle, same as any other control's).
+      const feature = graph.featuresOf(hit.id).find((f) => f.kind === 'sequencer');
+      if (feature) toggleSequencer(sequencerStateFor(feature.id));
     }
 
     canvas.setPointerCapture(e.pointerId);
@@ -951,6 +1118,13 @@ export function attachInteraction(
     if (isTextureEditorActive()) return;
 
     const point = canvasPoint(e);
+    // Kept in sync unconditionally, regardless of what (if anything) is
+    // being dragged — a per-frame update (ui/sequencer.ts's
+    // updateSequencerAutoscroll) needs to react to where the pointer
+    // currently sits even between pointermove events, since the render
+    // loop runs continuously (ui/main.ts's rAF loop) whether or not the
+    // pointer is actually moving right now.
+    state.lastPointerPoint = point;
 
     if (state.draggingHandle) {
       const { entityId, handle } = state.draggingHandle;
@@ -979,6 +1153,7 @@ export function attachInteraction(
         // entity.params — same reasoning as timeScale below, just a
         // different backing store.
         sequencerStateFor(entityId).zoomSeconds = zoomFromDrag(startTimeScale, point.x - startX);
+        relocateAbandonedEndMarker(graph, entityId);
       } else if (feature) {
         // Written directly rather than through applyControlValue — timeScale
         // is UI-only display state (how the popup renders), not one of
@@ -995,14 +1170,7 @@ export function attachInteraction(
     }
 
     if (state.scrubbingSequencerId) {
-      // secondsAtPopupX tracks x only, independent of the ruler's own
-      // tight vertical hit-zone (hitTestSequencerPopup's 'scrub' case) —
-      // a scrub drag should keep tracking even once the pointer strays
-      // off the ruler itself, same "drag doesn't need to stay exactly on
-      // the control" leniency every other drag in this file already gets
-      // via pointer capture.
-      const seconds = secondsAtPopupX(graph, state.scrubbingSequencerId, point.x);
-      if (seconds !== null) scrubSequencer(sequencerStateFor(state.scrubbingSequencerId), seconds);
+      applySequencerScrub(graph, state.scrubbingSequencerId, point);
       return;
     }
 
@@ -1023,71 +1191,12 @@ export function attachInteraction(
     }
 
     if (state.draggingSequencerEnd) {
-      // secondsAtPopupX (same helper the scrub drag above uses) tracks x
-      // only, so this keeps working even once the pointer strays off the
-      // marker band's own tight vertical bounds.
-      const seconds = secondsAtPopupX(graph, state.draggingSequencerEnd, point.x);
-      if (seconds !== null) setTrackEnd(sequencerStateFor(state.draggingSequencerEnd), seconds);
+      applySequencerEndMarkerDrag(graph, state.draggingSequencerEnd, point);
       return;
     }
 
     if (state.sequencerNoteDrag) {
-      const noteDrag = state.sequencerNoteDrag;
-      const rawSeconds = secondsAtPopupX(graph, noteDrag.entityId, point.x);
-      if (rawSeconds === null) return;
-
-      let noteId = noteDrag.noteId;
-      let mode = noteDrag.mode;
-
-      if (mode === 'create' && noteId === null) {
-        const dx = point.x - noteDrag.startPointer.x;
-        const dy = point.y - noteDrag.startPointer.y;
-        if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
-        // Crossing the threshold inserts the note anchored at the original
-        // press location, then behaves exactly like resizeRight on it from
-        // here on — see createSequencerNoteAt's own comment on why
-        // "painting" a note is just resizing its own just-created right
-        // edge, not a separate code path.
-        const onsetSeconds = secondsAtPopupX(graph, noteDrag.entityId, noteDrag.startPointer.x);
-        if (onsetSeconds === null) return;
-        const createdId = createSequencerNoteAt(graph, noteDrag.entityId, noteDrag.channelIndex, onsetSeconds);
-        if (createdId === null) return;
-        noteId = createdId;
-        mode = 'resizeRight';
-        noteDrag.noteId = noteId;
-        noteDrag.mode = mode;
-        selectNote(noteDrag.entityId, noteDrag.channelIndex, noteId);
-        setSelectedNoteEdgeFocus('right');
-      }
-      if (noteId === null) return;
-
-      // Dragging a note's body across a lane boundary moves it to that
-      // channel (if the note's own time range is free there — see the
-      // function's own comment) before applying this frame's horizontal
-      // position, so the two axes of the same drag gesture both land in
-      // one motion rather than needing a separate vertical-only step.
-      if (mode === 'move') {
-        noteDrag.channelIndex = updateSequencerNoteDragChannel(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, point.y);
-      }
-
-      const targetSeconds = mode === 'move' ? rawSeconds - noteDrag.grabOffsetSeconds : rawSeconds;
-      const snappedSeconds = applySequencerNoteSnap(
-        graph,
-        noteDrag.entityId,
-        noteDrag.snap,
-        noteId,
-        targetSeconds,
-        point,
-        performance.now()
-      );
-
-      if (mode === 'resizeLeft') {
-        resizeSequencerNoteLeft(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
-      } else if (mode === 'resizeRight') {
-        resizeSequencerNoteRight(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
-      } else if (mode === 'move') {
-        moveSequencerNote(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
-      }
+      applySequencerNoteDrag(graph, state.sequencerNoteDrag, point);
       return;
     }
 
@@ -1147,8 +1256,10 @@ export function attachInteraction(
       const source = graph.get(state.wiringFrom.entityId);
 
       // A TRIGGERED_KINDS instrument's or CONTINUOUS_KINDS drone's whole pad
-      // circle (see ui/pads.ts) is always a valid drop target from ANY
-      // control-type source's bump — not just an event-only source like
+      // circle (see ui/pads.ts), or a sequencer control's own center
+      // play/pause button (ui/sequencer.ts's drawSequencerPlayButton, same
+      // padRadius geometry) — always a valid drop target from ANY
+      // control-type source's bump, not just an event-only source like
       // tap. Whether anything actually fires through it depends on whether
       // that source ever calls fireEventWireTargets (tap on click/keypress,
       // the clock on every beat) — a knob dropped here would just sit
@@ -1160,7 +1271,7 @@ export function attachInteraction(
         source &&
         padHit &&
         padHit.id !== source.id &&
-        (TRIGGERED_KINDS.has(padHit.kind) || CONTINUOUS_KINDS.has(padHit.kind)) &&
+        (TRIGGERED_KINDS.has(padHit.kind) || CONTINUOUS_KINDS.has(padHit.kind) || padHit.kind === 'sequencer') &&
         isWithinPad(effectiveBounds(graph, padHit), point)
           ? padHit
           : null;

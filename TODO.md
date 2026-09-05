@@ -60,3 +60,14 @@ Placeholders for larger features to elaborate on when we get to each one.
 
 4. Beat matcher organelle for the sequencer.
 5. Animation of the event connection line.
+6. Multiple sequencer instances, chained the way multiple instrument
+   instances would be — dragging a repeated copy out rather than there
+   only ever being one fixed `sequencer-1`. Not yet possible for anything
+   in the app today, sampler included: `ui/dock.ts`'s icons just list
+   whichever entities already exist and happen to be `docked: true`
+   (`graph.dockedEntities()`) — undocking one un-parks that same entity,
+   it doesn't spawn a copy. Building this needs a real duplicate/spawn
+   mechanism (new, not a retrofit of an existing one), plus making the
+   sequencer dockable at all — currently blocked outright for any
+   `control`-type entity (`ui/docking.ts`'s `isDockable`), since a control
+   has no independent sound to park the way a source does.
