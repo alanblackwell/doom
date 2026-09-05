@@ -14,6 +14,7 @@ import { getAudioContext } from './context';
 import { getMasterChain } from './master';
 import { getTempo, setTempo } from './transport';
 import { pulseMelody } from './melodyPlayer';
+import { registerSequencerForPlayback } from './sequencerPlayer';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -105,19 +106,37 @@ export function registerSampleBuffer(entityId: string, buffer: AudioBuffer): voi
   sampleBuffers.set(entityId, buffer);
 }
 
-// Registered by createGenerator() for triggered kinds — one no-argument
-// function per entity that fires a single hit, reading whatever's currently
-// in entity.params at the moment it's called (so param changes take effect
-// on the next trigger, with no need for a separate live-control setter —
-// there's nothing to push updates into between hits).
-const triggersByEntity = new Map<string, () => void>();
+// A single note's worth of one-off overrides for a triggered voice —
+// audio/sequencerPlayer.ts's per-note payload, threaded all the way through
+// activateEventTarget/triggerEntity/releaseEntity. Optional and per-field:
+// a voice that has nothing to say about a given field (e.g. kick has no
+// envelope) simply never reads it, and a field left unset on the note
+// falls through to whatever the voice's own params/knobs already say —
+// "ignored if unused, overridden only where both sides specify it." Units
+// match this file's own existing per-voice params (absolute Hz/seconds),
+// NOT the sequencer note's own MIDI-pitch/duration-fraction shape — that
+// conversion happens in audio/sequencerPlayer.ts, not here.
+export interface TriggerOverrides {
+  pitchHz?: number;
+  velocity?: number; // 0..1, multiplies into whatever level the voice would otherwise use
+  envelope?: { attack: number; decay: number; sustain: number; release: number };
+}
 
-function registerTrigger(entityId: string, trigger: () => void): void {
+// Registered by createGenerator() for triggered kinds — one function per
+// entity that fires a single hit, reading whatever's currently in
+// entity.params at the moment it's called (so param changes take effect on
+// the next trigger, with no need for a separate live-control setter —
+// there's nothing to push updates into between hits) UNLESS overrides
+// supplies its own value for a given field, which wins for just this one
+// hit.
+const triggersByEntity = new Map<string, (overrides?: TriggerOverrides) => void>();
+
+function registerTrigger(entityId: string, trigger: (overrides?: TriggerOverrides) => void): void {
   triggersByEntity.set(entityId, trigger);
 }
 
-export function triggerEntity(entityId: string): void {
-  triggersByEntity.get(entityId)?.();
+export function triggerEntity(entityId: string, overrides?: TriggerOverrides): void {
+  triggersByEntity.get(entityId)?.(overrides);
 }
 
 // Registered by createGenerator() only for an entity that has an ADSR
@@ -127,14 +146,14 @@ export function triggerEntity(entityId: string): void {
 // any TRIGGERED_KINDS entity without one, so ui/interaction.ts can call
 // this unconditionally on every pad release rather than first checking
 // whether an envelope exists.
-const releasesByEntity = new Map<string, () => void>();
+const releasesByEntity = new Map<string, (overrides?: TriggerOverrides) => void>();
 
-function registerRelease(entityId: string, release: () => void): void {
+function registerRelease(entityId: string, release: (overrides?: TriggerOverrides) => void): void {
   releasesByEntity.set(entityId, release);
 }
 
-export function releaseEntity(entityId: string): void {
-  releasesByEntity.get(entityId)?.();
+export function releaseEntity(entityId: string, overrides?: TriggerOverrides): void {
+  releasesByEntity.get(entityId)?.(overrides);
 }
 
 // Registered by createGenerator() only for the 'sample' kind (below) — the
@@ -221,7 +240,7 @@ export function toggleEntityPaused(entityId: string): void {
 // entity re-hits (triggerEntity), a CONTINUOUS_KINDS one toggles play/pause
 // instead — exactly one of the two is ever a no-op for a given id, so
 // there's no need to look up the entity's kind here at all.
-export function activateEventTarget(entityId: string): void {
+export function activateEventTarget(entityId: string, overrides?: TriggerOverrides): void {
   const melodyId = melodyOwnersByEntity.get(entityId);
   if (melodyId && pulseMelody(melodyId, entityId)) {
     // Once a melody is actually advancing, this pad's clicks/wired pulses
@@ -237,7 +256,7 @@ export function activateEventTarget(entityId: string): void {
   }
 
   if (triggersByEntity.has(entityId)) {
-    triggerEntity(entityId);
+    triggerEntity(entityId, overrides);
   } else if (pauseGatesByEntity.has(entityId)) {
     toggleEntityPaused(entityId);
   }
@@ -434,12 +453,12 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       // IR has to be.
       const clickBuffer = makeNoiseBuffer(ctx, 0.02);
 
-      registerTrigger(entity.id, () => {
+      registerTrigger(entity.id, (overrides) => {
         const now = ctx.currentTime;
-        const pitch = entity.params.pitch ?? 50;
+        const pitch = overrides?.pitchHz ?? entity.params.pitch ?? 50;
         const decay = entity.params.decay ?? 0.4;
         const click = entity.params.click ?? 0.3;
-        const level = entity.params.level ?? 0.8;
+        const level = (entity.params.level ?? 0.8) * (overrides?.velocity ?? 1);
 
         // The body: a sine whose pitch sweeps down fast from ~4x the
         // fundamental — this downward sweep is what actually reads as a
@@ -732,9 +751,9 @@ function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoi
     // from Sustain, so releasing mid-Attack/Decay doesn't jump/click. Reads
     // envelope.params fresh each call, same "no baked-in values" reasoning
     // as kick's registerTrigger.
-    registerRelease(entity.id, () => {
+    registerRelease(entity.id, (overrides) => {
       const now = ctx.currentTime;
-      const release = Math.max(0.001, envelope.params.release ?? 0.3);
+      const release = Math.max(0.001, overrides?.envelope?.release ?? envelope.params.release ?? 0.3);
       gain.gain.cancelScheduledValues(now);
       gain.gain.setValueAtTime(gain.gain.value, now);
       gain.gain.linearRampToValueAtTime(0, now + release);
@@ -761,22 +780,35 @@ function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoi
   }
   registerControls(entity.id, controls);
 
-  registerTrigger(entity.id, () => {
+  registerTrigger(entity.id, (overrides) => {
+    // Always re-asserted, whether or not this trigger carries an override —
+    // otherwise a one-off pitch from a wired sequencer note would stick in
+    // the worklet's own state and leak into the very next plain pad click.
+    // Never writes entity.params.pitch itself, so the knob's own displayed
+    // value is untouched by a one-off override. Safe to change immediately
+    // before exciting even while the string is still ringing (dsp/rust/src/
+    // lib.rs's pluck_set_frequency: "glides slightly instead of clicking").
+    pluck.port.postMessage({ type: 'setFrequency', value: overrides?.pitchHz ?? entity.params.pitch ?? defaults.pitch });
     pluck.port.postMessage({ type: 'excite' });
 
     // Gate-on: Attack up to full, then Decay down to Sustain — the Release
     // half lives in the registerRelease closure above, fired separately on
     // pad-release. Only when an envelope is actually attached; otherwise
     // this is a plain momentary trigger, no envelope machinery involved.
+    // Velocity (if given) scales the attack peak and the sustain floor
+    // together, rather than the persistent `level` knob — this is the only
+    // per-hit gain stage this voice has, since overlapping hits otherwise
+    // all share the one knob-driven `level` gain.
     if (envelope && envelopeGain) {
       const now = ctx.currentTime;
-      const attack = Math.max(0.001, envelope.params.attack ?? 0.01);
-      const decay = Math.max(0.001, envelope.params.decay ?? 0.2);
-      const sustain = Math.min(1, Math.max(0, envelope.params.sustain ?? 0.6));
+      const attack = Math.max(0.001, overrides?.envelope?.attack ?? envelope.params.attack ?? 0.01);
+      const decay = Math.max(0.001, overrides?.envelope?.decay ?? envelope.params.decay ?? 0.2);
+      const sustain = Math.min(1, Math.max(0, overrides?.envelope?.sustain ?? envelope.params.sustain ?? 0.6));
+      const velocity = overrides?.velocity ?? 1;
       envelopeGain.gain.cancelScheduledValues(now);
       envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
-      envelopeGain.gain.linearRampToValueAtTime(1, now + attack);
-      envelopeGain.gain.linearRampToValueAtTime(sustain, now + attack + decay);
+      envelopeGain.gain.linearRampToValueAtTime(velocity, now + attack);
+      envelopeGain.gain.linearRampToValueAtTime(sustain * velocity, now + attack + decay);
 
       envelopePlaybackByFeature.set(envelope.id, {
         gateOnAt: performance.now(),
@@ -1150,6 +1182,9 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
       if (entity.kind === 'clock') {
         registerControls(entity.id, { bpm: setTempo });
         setTempo(entity.params.bpm ?? getTempo());
+      } else if (entity.kind === 'sequencer') {
+        const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'sequencer');
+        if (feature) registerSequencerForPlayback(entity.id, feature.id);
       }
       continue;
     }

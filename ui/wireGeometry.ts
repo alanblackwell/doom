@@ -9,6 +9,7 @@ import { effectiveBounds } from './layout';
 import type { DragContext, Point } from './layout';
 import { controlDotAbsolutePosition } from './controls';
 import { wireHandlePosition } from './knobs';
+import { channelConnectorAbsolutePosition } from './sequencer';
 import type { Wire } from './wiring';
 import type { EventWire } from './eventWiring';
 
@@ -49,8 +50,16 @@ export function eventWireEndpoints(graph: EntityGraph, wire: EventWire, drag?: D
   const target = graph.get(wire.targetEntityId);
   if (!source || !target) return null;
   const targetBounds = effectiveBounds(graph, target, drag);
+  // A ported source (the sequencer) anchors from its own channel's
+  // connector rather than the entity's single shared bump — falls back to
+  // the bump if that channel no longer exists (e.g. channels were removed).
+  const from =
+    wire.sourcePort !== undefined
+      ? (channelConnectorAbsolutePosition(graph, wire.sourceEntityId, wire.sourcePort, drag) ??
+        wireHandlePosition(effectiveBounds(graph, source, drag)))
+      : wireHandlePosition(effectiveBounds(graph, source, drag));
   return {
-    from: wireHandlePosition(effectiveBounds(graph, source, drag)),
+    from,
     to: { x: targetBounds.x, y: targetBounds.y },
   };
 }

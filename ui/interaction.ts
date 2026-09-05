@@ -100,6 +100,7 @@ import {
   deselectNote,
   duplicateSelectedNote,
   hasSelectedNote,
+  hitTestChannelConnector,
   hitTestSequencerPopup,
   initialNoteSnapState,
   moveSequencerNote,
@@ -172,7 +173,7 @@ export interface InteractionState {
   triggerFlashes: Map<string, number>;
 
   // Set while dragging a new wire out from a knob's wire-start handle.
-  wiringFrom: { entityId: string } | null;
+  wiringFrom: { entityId: string; sourcePort?: number } | null;
   wireDragPoint: Point | null; // live rubber-band endpoint, following the pointer
   wireHoverTarget: ControlHit | null; // the control dot that would receive the wire if released now
   // The TRIGGERED_KINDS entity whose pad would receive the wire if released
@@ -582,6 +583,20 @@ export function attachInteraction(
         // 'background' is absorbed with no further action, same as the
         // melody/envelope popups' own catch-all.
       }
+      return;
+    }
+
+    // A sequencer channel's own output connector — the multi-port
+    // equivalent of a knob's wire-start handle below, checked ahead of
+    // hitTestSequencerPopup just below since that popup's own catch-all
+    // 'background' hit otherwise absorbs a click anywhere inside its
+    // bounds, connector included, before ever reaching that handle check.
+    const channelConnectorHit = hitTestChannelConnector(graph, point);
+    if (channelConnectorHit) {
+      canvas.setPointerCapture(e.pointerId);
+      state.wiringFrom = { entityId: channelConnectorHit.controlEntityId, sourcePort: channelConnectorHit.channelIndex };
+      state.wireDragPoint = point;
+      state.wireHoverTarget = null;
       return;
     }
 
@@ -1393,7 +1408,7 @@ export function attachInteraction(
     if (state.wiringFrom) {
       canvas.releasePointerCapture(e.pointerId);
       if (state.eventWireHoverTarget) {
-        addEventWire(state.wiringFrom.entityId, state.eventWireHoverTarget);
+        addEventWire(state.wiringFrom.entityId, state.eventWireHoverTarget, state.wiringFrom.sourcePort);
       } else if (state.wireHoverTarget) {
         // Every control-type entity currently exposes exactly one control
         // spec (its own value/bpm/etc — see controlSpecs.ts) — that's the
@@ -1480,7 +1495,7 @@ export function attachInteraction(
       const endpoints = eventWireEndpoints(graph, wire);
       if (endpoints && hitTestWireCurve(ctx2d, endpoints, point)) {
         e.preventDefault();
-        removeEventWire(wire.sourceEntityId, wire.targetEntityId);
+        removeEventWire(wire.sourceEntityId, wire.targetEntityId, wire.sourcePort);
         return;
       }
     }

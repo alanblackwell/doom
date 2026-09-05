@@ -7,6 +7,7 @@
 import { getAudioContext, resumeAudioContext, suspendAudioContext } from '../audio/context';
 import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
 import { getTempo, start as startTransport, stop as stopTransport } from '../audio/transport';
+import { startSequencerScheduler, stopSequencerScheduler } from '../audio/sequencerPlayer';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import { attachInteraction, attachKeyboard, createInteractionState } from './interaction';
@@ -547,8 +548,13 @@ async function ensureEngineBuilt(): Promise<void> {
   const ctx = getAudioContext();
   const syncToContextState = () => {
     running = ctx.state === 'running';
-    if (running) startTransport();
-    else stopTransport();
+    if (running) {
+      startTransport();
+      startSequencerScheduler();
+    } else {
+      stopTransport();
+      stopSequencerScheduler();
+    }
     setButtonState();
   };
   ctx.addEventListener('statechange', syncToContextState);

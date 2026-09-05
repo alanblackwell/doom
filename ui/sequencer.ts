@@ -36,6 +36,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
+import { effectiveBounds } from './layout';
 import { getAudioContext, resumeAudioContext } from '../audio/context';
 import {
   closeButtonPosition,
@@ -46,6 +47,7 @@ import {
   TITLE_HEIGHT,
 } from './organelle';
 import type { HandleKind } from './organelle';
+import { wireHandlePosition } from './knobs';
 import { ACCENT } from './palette';
 
 // Amplitude shape, contained entirely within a note's own [onsetSeconds,
@@ -314,6 +316,30 @@ function followPlayhead(state: SequencerState): void {
 // pushed ahead of it — see updateSequencerPlayback's own comment.
 const END_MARKER_LOOKAHEAD_PX = 6;
 
+// Loop-or-stop-at-track-end, independent of whether the editor popup is
+// even open — audio/sequencerPlayer.ts's own scheduler runs unconditionally
+// (playback and note-dispatch must keep going while the popup is closed),
+// so this can't live only inside the render-gated updateSequencerPlayback
+// below the way it used to before that scheduler existed; both now call
+// this same function so the behavior stays identical either way.
+export function advancePastTrackEnd(state: SequencerState): void {
+  if (!state.playing) return;
+  const playhead = currentPlaybackSeconds(state);
+  if (playhead < state.trackEndSeconds) return;
+  if (state.loopAtEnd) {
+    // Shifts the ctx-time reference forward by exactly one track length
+    // rather than resetting pausedAtSeconds/playStartCtxTime outright —
+    // currentPlaybackSeconds reads back as exactly 0 afterward (see the
+    // arithmetic in this file's own comment on EnvelopePlayback-style
+    // reconciliation), with no discontinuity in the underlying bookkeeping.
+    state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + state.trackEndSeconds;
+  } else {
+    state.pausedAtSeconds = state.trackEndSeconds;
+    state.playing = false;
+    state.playStartCtxTime = null;
+  }
+}
+
 // Per-frame playback housekeeping, called once per frame from
 // drawSequencerGrid — the same "adjust lightweight UI state during the
 // draw pass" pattern ui/render.ts's drawEntity already uses to clear a
@@ -323,22 +349,9 @@ const END_MARKER_LOOKAHEAD_PX = 6;
 // THAT position, not the one it just wrapped from.
 function updateSequencerPlayback(grid: GridArea, state: SequencerState): void {
   if (state.playing) {
+    advancePastTrackEnd(state);
     const playhead = currentPlaybackSeconds(state);
-    if (playhead >= state.trackEndSeconds) {
-      if (state.loopAtEnd) {
-        // Shifts the ctx-time reference forward by exactly one track
-        // length rather than resetting pausedAtSeconds/playStartCtxTime
-        // outright — currentPlaybackSeconds reads back as exactly 0
-        // afterward (see the arithmetic in this file's own comment on
-        // EnvelopePlayback-style reconciliation), with no discontinuity
-        // in the underlying bookkeeping.
-        state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + state.trackEndSeconds;
-      } else {
-        state.pausedAtSeconds = state.trackEndSeconds;
-        state.playing = false;
-        state.playStartCtxTime = null;
-      }
-    } else if (!state.trackEndTouched && state.scrollSeconds > 0) {
+    if (state.playing && !state.trackEndTouched && state.scrollSeconds > 0) {
       // An implicit end never marks a real boundary — it just rides along
       // right after the playhead once auto-scroll has actually started
       // (state.scrollSeconds > 0 is a reliable proxy for that: nothing
@@ -795,6 +808,57 @@ function connectorPosition(popup: Rect, grid: GridArea, channelScrollPx: number,
     x: popup.x + popup.width / 2 - CONNECTOR_RIGHT_INSET,
     y: grid.rulerBottom - channelScrollPx + index * LANE_HEIGHT + LANE_HEIGHT / 2,
   };
+}
+
+// A channel connector's own current position, whether or not the editor
+// popup is open — mirrors ui/organelle.ts's featureDotAbsolutePosition:
+// collapsed, every channel shares one point (the owning control's own wire
+// bump, same as any other Control entity), since there's nowhere to draw N
+// distinct connectors on a collapsed box; expanded, each channel gets its
+// own real spot. Used both to draw an already-committed wire (which must
+// keep resolving to *something* after the popup is closed) and to draw the
+// live rubber band while dragging one out.
+export function channelConnectorAbsolutePosition(
+  graph: EntityGraph,
+  controlEntityId: string,
+  channelIndex: number,
+  drag?: DragContext
+): Point | null {
+  const control = graph.get(controlEntityId);
+  const feature = graph.featuresOf(controlEntityId).find((f) => f.kind === 'sequencer');
+  if (!control || !feature) return null;
+  if (!feature.expanded) return wireHandlePosition(effectiveBounds(graph, control, drag));
+  const popup = sequencerPopupRect(graph, feature.id, control, drag);
+  const grid = gridAreaFor(popup);
+  const state = sequencerStateFor(feature.id);
+  if (channelIndex < 0 || channelIndex >= state.channels.length) return null;
+  return connectorPosition(popup, grid, state.channelScrollPx, channelIndex);
+}
+
+// Where a NEW wire drag can start from — unlike the position lookup above,
+// only hit-testable while the editor is actually open (matching
+// ui/organelle.ts's hitTestFeatureDot: an existing wire keeps resolving via
+// the collapsed fallback, but you can't start a fresh drag from a connector
+// you can't see).
+export function hitTestChannelConnector(
+  graph: EntityGraph,
+  point: Point,
+  drag?: DragContext
+): { controlEntityId: string; channelIndex: number } | null {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'feature' || entity.kind !== 'sequencer' || !entity.expanded) continue;
+    const owner = ownerOf(graph, entity);
+    if (!owner) continue;
+    const popup = sequencerPopupRect(graph, entity.id, owner, drag);
+    const grid = gridAreaFor(popup);
+    const state = sequencerStateFor(entity.id);
+    for (let i = 0; i < state.channels.length; i++) {
+      const pos = connectorPosition(popup, grid, state.channelScrollPx, i);
+      if (pos.y < grid.rulerBottom || pos.y > grid.bottom) continue; // scrolled out of the visible lane area
+      if (dist(point, pos) <= CONNECTOR_RADIUS + 4) return { controlEntityId: owner.id, channelIndex: i };
+    }
+  }
+  return null;
 }
 
 // --- Notes ---------------------------------------------------------------

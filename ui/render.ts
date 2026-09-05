@@ -35,7 +35,7 @@ import { drawPopup, drawPorthole } from './organelle';
 import { drawMelodyPopup, itemScreenX } from './melody';
 import type { MelodyItem } from './melody';
 import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
-import { drawSequencerBody, drawSequencerPopup, noteSnapHoldFraction } from './sequencer';
+import { channelConnectorAbsolutePosition, drawSequencerBody, drawSequencerPopup, noteSnapHoldFraction } from './sequencer';
 import type { NoteSnapIndicator } from './sequencer';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
@@ -642,14 +642,18 @@ function drawWires(
     // ui/eventPulse.ts) — 0 only for a wire whose source has never fired at
     // all yet, which falls back to the flat opacity this always used to
     // draw at, rather than animating from nothing.
-    const glow = sourcePulseGlow(wire.sourceEntityId, now);
+    const glow = sourcePulseGlow(wire.sourceEntityId, now, wire.sourcePort);
     drawWireLine(ctx, from, to, EVENT_WIRE_COLOR, glow > 0 ? glow : MAX_WIRE_OPACITY, glow);
   }
 
   if (interaction.wiringFrom && interaction.wireDragPoint) {
     const source = graph.get(interaction.wiringFrom.entityId);
     if (source) {
-      const anchor = wireHandlePosition(effectiveBounds(graph, source, drag));
+      const anchor =
+        interaction.wiringFrom.sourcePort !== undefined
+          ? (channelConnectorAbsolutePosition(graph, source.id, interaction.wiringFrom.sourcePort, drag) ??
+            wireHandlePosition(effectiveBounds(graph, source, drag)))
+          : wireHandlePosition(effectiveBounds(graph, source, drag));
 
       // A valid pad hover (see ui/interaction.ts's pointermove — checked
       // for ANY control-type source, not just an event-only one like tap)

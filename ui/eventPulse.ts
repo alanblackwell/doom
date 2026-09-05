@@ -20,17 +20,30 @@ const lastPulseInterval = new Map<string, number>();
 // moderate tempo's beat length), not tied to any specific source.
 const DEFAULT_PULSE_INTERVAL_MS = 600;
 
+// A source entity id plus an optional port (audio/sequencerPlayer.ts's
+// channel index) into one map key — undefined for a single-port source
+// (tap/clock), so their existing callers (which never pass a port) keep
+// working unchanged. A multi-port source needs one independent pulse
+// history per port: without this, firing one sequencer channel would make
+// every other channel's own wire glow too, since they'd all share one
+// entry keyed by the same entity id.
+function pulseKey(entityId: string, port: number | undefined): string {
+  return `${entityId}:${port ?? ''}`;
+}
+
 // Call exactly when an event source actually fires — see ui/interaction.ts's
-// fireTap and ui/clockPulse.ts's per-beat handler, the only two places an
-// event source's own pulse originates (both already compute a fresh
-// performance.now() for their own flash bookkeeping; pass that same value
-// here so everything stays exactly in sync).
-export function recordSourcePulse(entityId: string, now: number): void {
-  const previous = lastPulseAt.get(entityId);
+// fireTap, ui/clockPulse.ts's per-beat handler, and audio/sequencerPlayer.ts's
+// per-channel firing, the only places an event source's own pulse
+// originates (all already compute a fresh performance.now() for their own
+// flash bookkeeping; pass that same value here so everything stays exactly
+// in sync).
+export function recordSourcePulse(entityId: string, now: number, port?: number): void {
+  const key = pulseKey(entityId, port);
+  const previous = lastPulseAt.get(key);
   if (previous !== undefined) {
-    lastPulseInterval.set(entityId, now - previous);
+    lastPulseInterval.set(key, now - previous);
   }
-  lastPulseAt.set(entityId, now);
+  lastPulseAt.set(key, now);
 }
 
 // "Very dim" rather than fully invisible right before the next pulse is due
@@ -66,9 +79,10 @@ function pulseEnvelope(elapsedMs: number, periodMs: number): number {
 // wired connection with nothing to sync to yet — ui/render.ts falls back to
 // its usual flat opacity for that case), otherwise cycling between MIN_GLOW
 // and 1 in time with its own actual firing rate.
-export function sourcePulseGlow(entityId: string, now: number): number {
-  const at = lastPulseAt.get(entityId);
+export function sourcePulseGlow(entityId: string, now: number, port?: number): number {
+  const key = pulseKey(entityId, port);
+  const at = lastPulseAt.get(key);
   if (at === undefined) return 0;
-  const period = lastPulseInterval.get(entityId) ?? DEFAULT_PULSE_INTERVAL_MS;
+  const period = lastPulseInterval.get(key) ?? DEFAULT_PULSE_INTERVAL_MS;
   return pulseEnvelope(now - at, period);
 }
