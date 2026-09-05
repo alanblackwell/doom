@@ -986,6 +986,45 @@ export function moveSequencerNote(
   note.onsetSeconds = clamp(newOnsetSeconds, Math.max(0, lowerBound), upperBound);
 }
 
+// Mid-'move'-drag channel switch (ui/interaction.ts's own sequencerNoteDrag
+// pointermove handling): if `pointerY` now falls in a different lane than
+// the note's current channel, moves it there — but only if the note's
+// exact time range is entirely free in the target channel, same
+// "always prevent overlap, never resolve it after the fact" rule every
+// other note edit in this file follows; otherwise a no-op, so a note
+// dragged briefly over an occupied lane just stays put rather than
+// bouncing or displacing what's already there. Returns the channel the
+// note actually ends up in (the target on success, or the same
+// channelIndex unchanged otherwise), so the caller's own drag state knows
+// which channel to keep operating on for the rest of the drag.
+export function updateSequencerNoteDragChannel(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  pointerY: number,
+  drag?: DragContext
+): number {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return channelIndex;
+  const state = sequencerStateFor(entityId);
+  const targetChannelIndex = channelIndexAtY(grid, state, pointerY);
+  if (targetChannelIndex === null || targetChannelIndex === channelIndex) return channelIndex;
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return channelIndex;
+  const note = found.channel.notes[found.index];
+  const targetChannel = state.channels[targetChannelIndex];
+  const noteEnd = note.onsetSeconds + note.durationSeconds;
+  const blocked = targetChannel.notes.some(
+    (n) => note.onsetSeconds < n.onsetSeconds + n.durationSeconds && noteEnd > n.onsetSeconds
+  );
+  if (blocked) return channelIndex;
+  found.channel.notes.splice(found.index, 1);
+  insertNoteSorted(targetChannel, note);
+  selectNote(entityId, targetChannelIndex, noteId);
+  return targetChannelIndex;
+}
+
 // --- Note edge snap --------------------------------------------------------
 // Speed-gated hold-to-snap: a dragged note edge/position only locks onto
 // another note's boundary (anywhere on the timeline, any channel) after

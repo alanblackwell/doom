@@ -127,6 +127,7 @@ import {
   toggleSequencer,
   toggleVelocitySlider,
   updateSequencerChannelScrollFromTrackY,
+  updateSequencerNoteDragChannel,
   updateSequencerScrollFromTrackX,
   velocityDragTrackAtPointer,
   velocitySliderOpenFor,
@@ -1055,6 +1056,15 @@ export function attachInteraction(
         setSelectedNoteEdgeFocus('right');
       }
       if (noteId === null) return;
+
+      // Dragging a note's body across a lane boundary moves it to that
+      // channel (if the note's own time range is free there — see the
+      // function's own comment) before applying this frame's horizontal
+      // position, so the two axes of the same drag gesture both land in
+      // one motion rather than needing a separate vertical-only step.
+      if (mode === 'move') {
+        noteDrag.channelIndex = updateSequencerNoteDragChannel(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, point.y);
+      }
 
       const targetSeconds = mode === 'move' ? rawSeconds - noteDrag.grabOffsetSeconds : rawSeconds;
       const snappedSeconds = applySequencerNoteSnap(
