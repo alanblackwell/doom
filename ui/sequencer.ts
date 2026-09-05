@@ -874,13 +874,29 @@ export function createSequencerNoteAt(
     if (onset >= existing.onsetSeconds && onset < end) onset = end;
   }
 
+  // Inherits pitch/velocity/envelope from whichever existing note in this
+  // channel most recently precedes it (the last one by onset — channel.notes
+  // stays sorted, per insertNoteSorted) rather than the plain "X"/default
+  // every note otherwise starts as: a new note laid down right after an
+  // already-shaped one usually continues the same part, so it should carry
+  // that shape forward instead of forcing a re-entry of all three every
+  // time. The envelope is cloned, not shared, same as duplicateSelectedNote's
+  // own clone — later editing one note's envelope must never reach into the
+  // other's. The first note in an empty channel has nothing to inherit and
+  // keeps the plain defaults.
+  let previous: SequencerNote | null = null;
+  for (const existing of channel.notes) {
+    if (existing.onsetSeconds > onset) break;
+    previous = existing;
+  }
+
   const note: SequencerNote = {
     id: `note-${nextNoteId++}`,
     onsetSeconds: onset,
     durationSeconds: minDuration,
-    pitch: null,
-    velocity: DEFAULT_NOTE_VELOCITY,
-    envelope: null,
+    pitch: previous ? previous.pitch : null,
+    velocity: previous ? previous.velocity : DEFAULT_NOTE_VELOCITY,
+    envelope: previous?.envelope ? { ...previous.envelope } : null,
   };
   insertNoteSorted(channel, note);
   return note.id;
