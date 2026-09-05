@@ -1182,6 +1182,20 @@ export function velocitySliderOpenFor(noteId: string): VelocityTrack | null {
   return velocitySliderOpen && velocitySliderOpen.noteId === noteId ? velocitySliderOpen.track : null;
 }
 
+// Unconditionally dismisses the slider, regardless of which note (if any)
+// it's open for — every action on the selected note OTHER than dragging
+// the slider itself calls this, mouse (ui/interaction.ts's own
+// noteResizeLeft/Right, noteMove, notePitchDrag, noteEnvelopeHandle
+// pointerdown cases) and keyboard alike (nudgeSelectedNotePitch/Time,
+// setSelectedNotePitchClass/Octave, sharpenSelectedNote below), so the
+// slider never lingers open over an action that has nothing to do with
+// velocity. selectNote's own same-note preservation (above) is only ever
+// meant for re-grabbing the slider itself (noteVelocitySliderDrag) —
+// everything else needs this instead.
+export function closeVelocitySlider(): void {
+  velocitySliderOpen = null;
+}
+
 // Self-heals a stale selection (the note, or the channel it was in, no
 // longer exists — e.g. deleted, or its channel was removed by shrinking
 // the track) the same way ui/sampler.ts's hasSelectedMarker verifies its
@@ -1264,6 +1278,7 @@ export function nudgeSelectedNoteTime(graph: EntityGraph, direction: -1 | 1): vo
   if (!selectedNote) return;
   const { entityId, channelIndex, noteId } = selectedNote;
   if (!selectedNoteFor(entityId)) return;
+  closeVelocitySlider();
   const grid = resolveSequencerGrid(graph, entityId);
   if (!grid) return;
   const state = sequencerStateFor(entityId);
@@ -1302,6 +1317,7 @@ function selectedNoteObject(): SequencerNote | null {
 export function nudgeSelectedNotePitch(direction: -1 | 1): void {
   const note = selectedNoteObject();
   if (!note) return;
+  closeVelocitySlider();
   note.pitch = note.pitch === null ? DEFAULT_SEED_PITCH : clamp(note.pitch + direction, 0, 127);
 }
 
@@ -1313,6 +1329,7 @@ export function nudgeSelectedNotePitch(direction: -1 | 1): void {
 export function setSelectedNotePitchClass(pitchClass: number): void {
   const note = selectedNoteObject();
   if (!note) return;
+  closeVelocitySlider();
   const band = Math.floor((note.pitch ?? DEFAULT_SEED_PITCH) / 12);
   note.pitch = clamp(band * 12 + pitchClass, 0, 127);
 }
@@ -1323,6 +1340,7 @@ export function setSelectedNotePitchClass(pitchClass: number): void {
 export function setSelectedNotePitchOctave(octave: number): void {
   const note = selectedNoteObject();
   if (!note) return;
+  closeVelocitySlider();
   const pitchClass = note.pitch === null ? 0 : ((note.pitch % 12) + 12) % 12;
   note.pitch = clamp((octave + 1) * 12 + pitchClass, 0, 127);
 }
@@ -1335,6 +1353,7 @@ export function setSelectedNotePitchOctave(octave: number): void {
 export function sharpenSelectedNote(): void {
   const note = selectedNoteObject();
   if (!note || note.pitch === null) return;
+  closeVelocitySlider();
   note.pitch = clamp(note.pitch + 1, 0, 127);
 }
 

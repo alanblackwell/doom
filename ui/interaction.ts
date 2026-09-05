@@ -94,6 +94,7 @@ import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
+  closeVelocitySlider,
   createSequencerNoteAt,
   DEFAULT_SEED_PITCH,
   deleteSelectedNote,
@@ -689,6 +690,7 @@ export function attachInteraction(
         case 'noteResizeRight':
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          closeVelocitySlider();
           setSelectedNoteEdgeFocus(sequencerHit.kind === 'noteResizeLeft' ? 'left' : 'right');
           state.sequencerNoteDrag = {
             entityId: sequencerHit.entityId,
@@ -703,6 +705,7 @@ export function attachInteraction(
         case 'noteMove':
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          closeVelocitySlider();
           setSelectedNoteEdgeFocus(null);
           state.sequencerNoteDrag = {
             entityId: sequencerHit.entityId,
@@ -717,6 +720,7 @@ export function attachInteraction(
         case 'notePitchDrag':
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          closeVelocitySlider();
           state.sequencerPitchDrag = {
             entityId: sequencerHit.entityId,
             channelIndex: sequencerHit.channelIndex,
@@ -775,6 +779,7 @@ export function attachInteraction(
         case 'noteEnvelopeHandle': {
           canvas.setPointerCapture(e.pointerId);
           selectNote(sequencerHit.entityId, sequencerHit.channelIndex, sequencerHit.noteId);
+          closeVelocitySlider();
           // A press on 'attack' while it's stacked on the still-untouched
           // decaySustain handle stays undecided until the drag actually
           // moves (see pointermove) — applying nothing yet avoids a
