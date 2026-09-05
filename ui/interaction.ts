@@ -102,8 +102,8 @@ import {
   hasSelectedNote,
   hitTestSequencerPopup,
   initialNoteSnapState,
-  moveSelectedNoteChannel,
   moveSequencerNote,
+  nudgeSelectedNotePitch,
   nudgeSelectedNoteTime,
   pitchFromDrag,
   resizeSequencerNoteLeft,
@@ -117,6 +117,9 @@ import {
   setNoteEnvelopeFromHandle,
   setNotePitch,
   setNoteVelocityFromTrack,
+  setSelectedNotePitchClass,
+  setSelectedNotePitchOctave,
+  sharpenSelectedNote,
   setTrackEnd,
   toggleLoopAtEnd,
   toggleSequencer,
@@ -1511,6 +1514,20 @@ const LETTER_KEY_INDEX: Record<string, number> = {
   KeyB: 6,
 };
 
+// Same A-G keys, but as a chromatic pitch-class semitone offset (0=C ...
+// 11=B) rather than a diatonic step index — the sequencer organelle's own
+// pitch-entry shortcut (setSelectedNotePitchClass), which has no notion of
+// "diatonic" the way the melody organelle's key-of-C staff does.
+const PITCH_CLASS_KEY: Record<string, number> = {
+  KeyC: 0,
+  KeyD: 2,
+  KeyE: 4,
+  KeyF: 5,
+  KeyG: 7,
+  KeyA: 9,
+  KeyB: 11,
+};
+
 // Global keydown handling for tap entities — on `window`, not the canvas,
 // since a bound key should fire "from anywhere," not just while the canvas
 // has focus. Two mutually exclusive behaviors depending on hover state:
@@ -1543,12 +1560,10 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
       }
       // Falls through to a selected sequencer note when there's no active
       // melody selection, same priority order as every other key below —
-      // moves the note to the adjacent channel, no-op if that channel
-      // already has something in the same time range (see
-      // moveSelectedNoteChannel's own comment on why this refuses rather
-      // than reflowing).
+      // nudges its pitch by a semitone (see nudgeSelectedNotePitch's own
+      // comment on the null-pitch/"X" first-press special case).
       if (hasSelectedNote()) {
-        moveSelectedNoteChannel(e.code === 'ArrowUp' ? -1 : 1);
+        nudgeSelectedNotePitch(e.code === 'ArrowUp' ? 1 : -1);
         e.preventDefault();
         return;
       }
@@ -1606,6 +1621,28 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
+      // Falls through to a selected sequencer note, same priority order as
+      // every other key above — sets its pitch class, leaving whatever
+      // octave it already has (or DEFAULT_SEED_PITCH's, if it's still "X")
+      // alone. See setSelectedNotePitchClass/PITCH_CLASS_KEY.
+      if (hasSelectedNote()) {
+        setSelectedNotePitchClass(PITCH_CLASS_KEY[e.code]);
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code.startsWith('Digit') && hasSelectedNote()) {
+      // 0-9 set the selected sequencer note's octave (as in "C4"), leaving
+      // its pitch class alone — see setSelectedNotePitchOctave. Gated on
+      // hasSelectedNote() up front, same shape as the KeyR/duplicate branch
+      // above, so digits stay free for tap-entity bindings otherwise.
+      setSelectedNotePitchOctave(Number(e.code.slice('Digit'.length)));
+      e.preventDefault();
+    } else if (e.key === '#' && hasSelectedNote()) {
+      // Checked by e.key, not e.code — '#' is a shifted character (e.g.
+      // Shift+3 on a US layout), same reasoning as the '|' barline shortcut
+      // below. Raises the selected sequencer note by a semitone.
+      sharpenSelectedNote();
+      e.preventDefault();
     } else if (e.code === 'Space') {
       if (activeSelectedItem(graph)) {
         insertRestAfterCurrent();

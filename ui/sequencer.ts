@@ -1170,31 +1170,61 @@ export function nudgeSelectedNoteTime(graph: EntityGraph, direction: -1 | 1): vo
   moveSequencerNote(graph, entityId, channelIndex, noteId, note.onsetSeconds + direction * step);
 }
 
-// Moving a note to a different channel has no existing neighbor-clamp to
-// reuse (moveSequencerNote only ever slides a note within its OWN channel)
-// — rather than inventing a reflow, this only succeeds if the note's exact
-// current time range is entirely free in the target channel; otherwise
-// it's a no-op, same "always prevent overlap, never resolve it after the
-// fact" spirit as every other note edit in this file.
-export function moveSelectedNoteChannel(direction: -1 | 1): void {
-  if (!selectedNote) return;
+// Resolves the selected note's own SequencerNote object, self-healing via
+// selectedNoteFor the same way every other selected-note action here does
+// — shared by the pitch-entry actions below so each one is just its own
+// pitch arithmetic.
+function selectedNoteObject(): SequencerNote | null {
+  if (!selectedNote) return null;
   const { entityId, channelIndex, noteId } = selectedNote;
-  if (!selectedNoteFor(entityId)) return;
-  const state = sequencerStateFor(entityId);
-  const targetIndex = channelIndex + direction;
-  if (targetIndex < 0 || targetIndex >= state.channels.length) return;
-  const found = findNote(state, channelIndex, noteId);
-  if (!found) return;
-  const note = found.channel.notes[found.index];
-  const targetChannel = state.channels[targetIndex];
-  const noteEnd = note.onsetSeconds + note.durationSeconds;
-  const blocked = targetChannel.notes.some(
-    (n) => note.onsetSeconds < n.onsetSeconds + n.durationSeconds && noteEnd > n.onsetSeconds
-  );
-  if (blocked) return;
-  found.channel.notes.splice(found.index, 1);
-  insertNoteSorted(targetChannel, note);
-  selectNote(entityId, targetIndex, noteId);
+  if (!selectedNoteFor(entityId)) return null;
+  const found = findNote(sequencerStateFor(entityId), channelIndex, noteId);
+  return found ? found.channel.notes[found.index] : null;
+}
+
+// Up/Down keyboard shortcut (ui/interaction.ts): moves the selected note
+// exactly one semitone. A null pitch ("X", SequencerNote.pitch) has
+// nothing to offset from, so the first press instead lands it on
+// DEFAULT_SEED_PITCH (middle C) regardless of direction, same "reveal a
+// concrete starting point" idea as ui/interaction.ts's notePitchDrag seed
+// — only the second and later presses actually move by a semitone.
+export function nudgeSelectedNotePitch(direction: -1 | 1): void {
+  const note = selectedNoteObject();
+  if (!note) return;
+  note.pitch = note.pitch === null ? DEFAULT_SEED_PITCH : clamp(note.pitch + direction, 0, 127);
+}
+
+// a-g keyboard shortcut: sets the selected note's pitch CLASS (0=C .. 11=B)
+// while leaving its octave alone, so letter and digit keys can be pressed
+// in either order and each only touches the axis it names — mirrors
+// setSelectedNotePitchOctave below. A null pitch has no octave to keep, so
+// it seeds from DEFAULT_SEED_PITCH's own octave first.
+export function setSelectedNotePitchClass(pitchClass: number): void {
+  const note = selectedNoteObject();
+  if (!note) return;
+  const band = Math.floor((note.pitch ?? DEFAULT_SEED_PITCH) / 12);
+  note.pitch = clamp(band * 12 + pitchClass, 0, 127);
+}
+
+// 0-9 keyboard shortcut: sets the selected note's octave (as in "C4") while
+// leaving its pitch class alone — see setSelectedNotePitchClass above. A
+// null pitch has no pitch class to keep, so it seeds to C.
+export function setSelectedNotePitchOctave(octave: number): void {
+  const note = selectedNoteObject();
+  if (!note) return;
+  const pitchClass = note.pitch === null ? 0 : ((note.pitch % 12) + 12) % 12;
+  note.pitch = clamp((octave + 1) * 12 + pitchClass, 0, 127);
+}
+
+// '#' keyboard shortcut: raises the selected note by a semitone, same as
+// nudgeSelectedNotePitch(1) once a pitch already exists — kept as its own
+// entry point since "add an accidental" reads as a distinct action from
+// nudging (and, unlike the arrow key, has no null-pitch seed of its own:
+// a sharp only makes sense applied to an actual note).
+export function sharpenSelectedNote(): void {
+  const note = selectedNoteObject();
+  if (!note || note.pitch === null) return;
+  note.pitch = clamp(note.pitch + 1, 0, 127);
 }
 
 // Resolves grid/state/candidates from just (graph, entityId), same shape
