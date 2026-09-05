@@ -130,6 +130,7 @@ import {
   velocityDragTrackAtPointer,
   velocitySliderOpenFor,
   zoomFromDrag,
+  zoomStep,
 } from './sequencer';
 import type { NoteSnapState, SequencerResizeStart, VelocityTrack } from './sequencer';
 
@@ -635,6 +636,14 @@ export function attachInteraction(
             startTimeScale: sequencerStateFor(sequencerHit.entityId).zoomSeconds,
           };
           break;
+        case 'axisZoomIn':
+        case 'axisZoomOut': {
+          // A discrete click, not a drag — no pointer capture needed, same
+          // as the transport buttons above.
+          const zoomState = sequencerStateFor(sequencerHit.entityId);
+          zoomState.zoomSeconds = zoomStep(zoomState.zoomSeconds, sequencerHit.kind === 'axisZoomIn' ? 'in' : 'out');
+          break;
+        }
         case 'resize':
           canvas.setPointerCapture(e.pointerId);
           state.resizingSequencer = {

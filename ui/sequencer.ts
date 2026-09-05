@@ -152,10 +152,11 @@ const H_SCROLLBAR_HEIGHT = 10; // reserved bottom strip — always present so th
 const BOTTOM_PADDING = 8;
 const SIDE_PADDING = 10;
 const LANE_LABEL_WIDTH = 20; // room for each channel's own index label, to the grid's left
-// Room on the right for the per-channel output connector, the vertical
-// scrollbar, and the zoom axis-handle, without any of them overlapping —
-// see connectorPosition/vScrollbarTrack/withinAxisHandleZone below, all
-// measured from this same margin.
+// Room on the right for, left to right: the zoom axis-handle (flush
+// against the plot area), the vertical scrollbar, and the per-channel
+// output connector (flush against the popup's own outer edge) — without
+// any of them overlapping. See withinAxisHandleZone/vScrollbarTrack/
+// connectorPosition below, all measured from this same margin.
 const RIGHT_MARGIN = 40;
 const LINE_GRAB_TOLERANCE = 6; // px on either side of the drawn playback line that still counts as grabbing it
 
@@ -508,18 +509,55 @@ function rewindButtonPosition(popup: Rect): Point {
   return { x: play.x - BUTTON_GAP, y: play.y };
 }
 
-// A vertical grip strip along the popup's right edge, same shape/position
-// as ui/organelle.ts's own axis-handle zoom grip — dragging it rescales
-// zoomSeconds via ui/interaction.ts's existing draggingTimeAxis state
-// (branched by feature kind there), rather than introducing a second,
-// inconsistent zoom gesture just for this popup. Stops above the lane
-// area's own bottom (not the full popup) so it doesn't compete with the
+// A vertical grip strip flush against the plot area's own right edge —
+// dragging it rescales zoomSeconds via ui/interaction.ts's existing
+// draggingTimeAxis state (branched by feature kind there), same
+// shape/gesture as ui/organelle.ts's own axis-handle zoom grip, just
+// pinned to the plot itself rather than out at the popup's own right edge
+// (that spot now belongs to the per-channel connectors — see their own
+// comment above on why they swapped places). Stops above the lane area's
+// own bottom (not the full popup) so it doesn't compete with the
 // horizontal scrollbar row beneath it.
 const AXIS_HANDLE_ZONE_WIDTH = 12;
 
-function withinAxisHandleZone(popup: Rect, grid: GridArea, point: Point): boolean {
-  const right = popup.x + popup.width / 2;
-  return point.x >= right - AXIS_HANDLE_ZONE_WIDTH && point.x <= right && point.y >= grid.top && point.y <= grid.bottom;
+function axisHandleX(grid: GridArea): number {
+  return grid.right + AXIS_HANDLE_ZONE_WIDTH / 2;
+}
+
+function withinAxisHandleZone(grid: GridArea, point: Point): boolean {
+  return point.x >= grid.right && point.x <= grid.right + AXIS_HANDLE_ZONE_WIDTH && point.y >= grid.top && point.y <= grid.bottom;
+}
+
+// Tiny magnifying-glass icons above/below the grip's own tick marks,
+// spelling out what an otherwise-unlabeled strip of ticks actually does —
+// click (not drag) either one for a single discrete zoom step, in the
+// same zoomSeconds the grip itself rescales continuously. Checked ahead of
+// withinAxisHandleZone (see hitTestSequencerPopup) so a precise click on
+// one wins over the drag zone it sits inside.
+const AXIS_ZOOM_ICON_RADIUS = 4;
+const AXIS_ZOOM_ICON_MARGIN = 9; // from grid.top/grid.bottom to each icon's own center
+
+function axisZoomInIconPosition(grid: GridArea): Point {
+  return { x: axisHandleX(grid), y: grid.top + AXIS_ZOOM_ICON_MARGIN };
+}
+
+function axisZoomOutIconPosition(grid: GridArea): Point {
+  return { x: axisHandleX(grid), y: grid.bottom - AXIS_ZOOM_ICON_MARGIN };
+}
+
+function hitTestAxisZoomIcon(grid: GridArea, point: Point): 'in' | 'out' | null {
+  if (dist(point, axisZoomInIconPosition(grid)) <= AXIS_ZOOM_ICON_RADIUS + 3) return 'in';
+  if (dist(point, axisZoomOutIconPosition(grid)) <= AXIS_ZOOM_ICON_RADIUS + 3) return 'out';
+  return null;
+}
+
+const AXIS_ZOOM_STEP_FACTOR = 1.4; // discrete per-click zoom step for the icons above — multiplicative, so it feels consistent across the whole zoomSeconds range rather than a fixed number of seconds
+
+// A single click-to-zoom step (as opposed to zoomFromDrag's continuous
+// relative-delta drag) — smaller zoomSeconds is MORE zoomed in (see this
+// file's own header comment), so 'in' divides and 'out' multiplies.
+export function zoomStep(currentZoomSeconds: number, direction: 'in' | 'out'): number {
+  return clampZoom(direction === 'in' ? currentZoomSeconds / AXIS_ZOOM_STEP_FACTOR : currentZoomSeconds * AXIS_ZOOM_STEP_FACTOR);
 }
 
 const RESIZE_HANDLE_RADIUS = 8;
@@ -616,7 +654,7 @@ export function updateSequencerScrollFromTrackX(graph: EntityGraph, entityId: st
   state.autoScrollSuspended = true;
 }
 
-const V_SCROLLBAR_X_INSET = 20; // from the popup's right edge — between the connector column and the axis-handle zone
+const V_SCROLLBAR_X_INSET = 20; // from the popup's right edge — between the axis-handle zone and the connector column
 
 function vScrollbarTrack(popup: Rect, grid: GridArea): Rect {
   return { x: popup.x + popup.width / 2 - V_SCROLLBAR_X_INSET, y: (grid.rulerBottom + grid.bottom) / 2, width: 4, height: grid.bottom - grid.rulerBottom };
@@ -716,9 +754,17 @@ export function hitTestEndMarkerBand(grid: GridArea, state: SequencerState, poin
 // there's no note data to trigger it; exported so Phase 2/3's actual
 // note-triggering can flash a channel's connector the same way
 // ui/interaction.ts's triggerFlashes already does for a pad.
+//
+// Pinned to the popup's own far right edge (not the grid's) — the
+// outermost thing in the margin, since it's the connector a user will
+// actually drag a wire out from to the sound source it's triggering, and
+// that's most convenient reached from outside the dialog entirely. The
+// zoom axis-handle (below) sits the opposite way, flush against the plot
+// area itself, since dragging it is about the plot, not about anything
+// outside the dialog.
 
 const CONNECTOR_RADIUS = 4;
-const CONNECTOR_OFFSET = 10; // from the grid's own right edge
+const CONNECTOR_RIGHT_INSET = 10; // from the popup's own right edge — the far outer edge, closest to whatever the channel gets wired to
 const CONNECTOR_COLOR = '#c8a05a'; // matches ui/render.ts's WIRE_HANDLE_COLOR — reads as "output jack"
 export const CONNECTOR_FLASH_DURATION_MS = 200;
 
@@ -740,8 +786,11 @@ function connectorGlow(entityId: string, channelIndex: number, now: number): num
   return elapsed >= 0 && elapsed <= CONNECTOR_FLASH_DURATION_MS ? 1 - elapsed / CONNECTOR_FLASH_DURATION_MS : 0;
 }
 
-function connectorPosition(grid: GridArea, channelScrollPx: number, index: number): Point {
-  return { x: grid.right + CONNECTOR_OFFSET, y: grid.rulerBottom - channelScrollPx + index * LANE_HEIGHT + LANE_HEIGHT / 2 };
+function connectorPosition(popup: Rect, grid: GridArea, channelScrollPx: number, index: number): Point {
+  return {
+    x: popup.x + popup.width / 2 - CONNECTOR_RIGHT_INSET,
+    y: grid.rulerBottom - channelScrollPx + index * LANE_HEIGHT + LANE_HEIGHT / 2,
+  };
 }
 
 // --- Notes ---------------------------------------------------------------
@@ -1649,6 +1698,8 @@ export type SequencerHit =
   | { entityId: string; kind: 'rewind' }
   | { entityId: string; kind: 'scrub'; seconds: number }
   | { entityId: string; kind: 'axisHandle' }
+  | { entityId: string; kind: 'axisZoomIn' }
+  | { entityId: string; kind: 'axisZoomOut' }
   | { entityId: string; kind: 'resize' }
   | { entityId: string; kind: 'hScroll' }
   | { entityId: string; kind: 'vScroll' }
@@ -1915,7 +1966,16 @@ export function hitTestSequencerPopup(graph: EntityGraph, point: Point, drag?: D
       };
     }
 
-    if (withinAxisHandleZone(popup, grid, point)) {
+    // The zoom icons are checked ahead of the drag zone they sit inside —
+    // see hitTestAxisZoomIcon's own comment.
+    const axisZoomIcon = hitTestAxisZoomIcon(grid, point);
+    if (axisZoomIcon === 'in') {
+      return { entityId: entity.id, kind: 'axisZoomIn' };
+    }
+    if (axisZoomIcon === 'out') {
+      return { entityId: entity.id, kind: 'axisZoomOut' };
+    }
+    if (withinAxisHandleZone(grid, point)) {
       return { entityId: entity.id, kind: 'axisHandle' };
     }
 
@@ -2040,6 +2100,31 @@ function drawResizeHandle(ctx: CanvasRenderingContext2D, pos: Point, active: boo
     ctx.lineTo(pos.x, pos.y - offset);
     ctx.stroke();
   }
+  ctx.restore();
+}
+
+// A tiny magnifying glass — a lens (with a +/- inside, per direction) and
+// a short handle stroke — at the axis handle's own icon positions (see
+// axisZoomInIconPosition/axisZoomOutIconPosition). Purely a static label,
+// same "no separate hover state" treatment as the transport buttons above.
+function drawZoomIcon(ctx: CanvasRenderingContext2D, center: Point, direction: 'in' | 'out'): void {
+  const lensRadius = 3;
+  const lensCenter = { x: center.x - 1, y: center.y - 1 };
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(lensCenter.x, lensCenter.y, lensRadius, 0, Math.PI * 2);
+  ctx.moveTo(lensCenter.x + lensRadius * 0.7, lensCenter.y + lensRadius * 0.7);
+  ctx.lineTo(lensCenter.x + lensRadius * 1.8, lensCenter.y + lensRadius * 1.8);
+  ctx.moveTo(lensCenter.x - lensRadius * 0.5, lensCenter.y);
+  ctx.lineTo(lensCenter.x + lensRadius * 0.5, lensCenter.y);
+  if (direction === 'in') {
+    ctx.moveTo(lensCenter.x, lensCenter.y - lensRadius * 0.5);
+    ctx.lineTo(lensCenter.x, lensCenter.y + lensRadius * 0.5);
+  }
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -2316,6 +2401,7 @@ function drawNoteSnapIndicator(ctx: CanvasRenderingContext2D, grid: GridArea, st
 
 function drawSequencerGrid(
   ctx: CanvasRenderingContext2D,
+  popup: Rect,
   grid: GridArea,
   entityId: string,
   state: SequencerState,
@@ -2360,7 +2446,7 @@ function drawSequencerGrid(
   // there are more channels than fit — see channelScrollPx.
   ctx.save();
   ctx.beginPath();
-  ctx.rect(grid.left - LANE_LABEL_WIDTH, grid.rulerBottom, grid.right - grid.left + LANE_LABEL_WIDTH + CONNECTOR_OFFSET + CONNECTOR_RADIUS + 2, grid.bottom - grid.rulerBottom);
+  ctx.rect(grid.left - LANE_LABEL_WIDTH, grid.rulerBottom, grid.right - grid.left + LANE_LABEL_WIDTH + RIGHT_MARGIN + 2, grid.bottom - grid.rulerBottom);
   ctx.clip();
 
   for (let i = 0; i < state.channels.length; i++) {
@@ -2408,7 +2494,7 @@ function drawSequencerGrid(
   }
 
   for (let i = 0; i < state.channels.length; i++) {
-    drawChannelConnector(ctx, connectorPosition(grid, state.channelScrollPx, i), connectorGlow(entityId, i, now));
+    drawChannelConnector(ctx, connectorPosition(popup, grid, state.channelScrollPx, i), connectorGlow(entityId, i, now));
   }
 
   ctx.restore();
@@ -2514,13 +2600,16 @@ export function drawSequencerPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
-  drawSequencerGrid(ctx, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle);
+  drawSequencerGrid(ctx, popup, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle);
   ctx.restore();
 
   drawVScrollbar(ctx, popup, grid, state);
 
-  // Zoom grip, same visual language as ui/organelle.ts's own drawAxisHandle.
-  const x = popup.x + popup.width / 2 - AXIS_HANDLE_ZONE_WIDTH / 2 - 1;
+  // Zoom grip, same visual language as ui/organelle.ts's own drawAxisHandle
+  // — flush against the plot area's own right edge (axisHandleX), not the
+  // popup's, so it reads as part of the plot rather than the dialog chrome
+  // out past it (see withinAxisHandleZone's own comment).
+  const x = axisHandleX(grid);
   const axisMidY = (grid.top + grid.bottom) / 2;
   ctx.strokeStyle = draggingAxis ? ACCENT : 'rgba(255, 255, 255, 0.25)';
   ctx.lineWidth = 1.5;
@@ -2531,6 +2620,13 @@ export function drawSequencerPopup(
     ctx.lineTo(x, axisMidY + dy + 3);
     ctx.stroke();
   }
+
+  // Magnifying-glass icons above/below the grip — see their own comment
+  // (hitTestAxisZoomIcon) on why they're there: the ticks alone don't say
+  // what dragging them does, so a click-to-zoom icon at each end spells it
+  // out (and doubles as a discrete single-step zoom in its own right).
+  drawZoomIcon(ctx, axisZoomInIconPosition(grid), 'in');
+  drawZoomIcon(ctx, axisZoomOutIconPosition(grid), 'out');
 
   drawResizeHandle(ctx, resizeHandlePosition(popup, grid), resizing);
 
