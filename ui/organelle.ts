@@ -569,10 +569,16 @@ function drawBreakMark(ctx: CanvasRenderingContext2D, center: Point, scale: numb
 // wider zooms rather than the grid turning into an unreadable comb. Picks
 // the smallest of these that still keeps lines at least MIN_PX_PER_LINE
 // apart at the current zoom.
+//
+// Exported so other feature kinds with their own real-time grid (e.g.
+// ui/sequencer.ts) can reuse the exact same adaptive step-picking rather
+// than reimplementing it — 0.1s is already the finest step, and 1s/10s are
+// already among the coarser ones, matching what a real-time timeline needs
+// regardless of what's actually being visualized against it.
 const MIN_PX_PER_LINE = 24;
 const GRID_STEPS_SECONDS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20];
 
-function gridStepSeconds(pxPerSec: number): number {
+export function gridStepSeconds(pxPerSec: number): number {
   const needed = MIN_PX_PER_LINE / pxPerSec;
   return GRID_STEPS_SECONDS.find((step) => step >= needed) ?? GRID_STEPS_SECONDS[GRID_STEPS_SECONDS.length - 1];
 }

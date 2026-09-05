@@ -90,6 +90,22 @@ import {
   toggleRecord,
   updateMarkerDrag,
 } from './sampler';
+import {
+  applySequencerResize,
+  hitTestSequencerPopup,
+  rewindSequencer,
+  scrubSequencer,
+  secondsAtPopupX,
+  sequencerResizeStart,
+  sequencerStateFor,
+  setTrackEnd,
+  toggleLoopAtEnd,
+  toggleSequencer,
+  updateSequencerChannelScrollFromTrackY,
+  updateSequencerScrollFromTrackX,
+  zoomFromDrag,
+} from './sequencer';
+import type { SequencerResizeStart } from './sequencer';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -203,6 +219,32 @@ export interface InteractionState {
   // the buffer only gets re-registered and re-auditioned once on release
   // (see endPress below), so a fast drag doesn't fire overlapping previews.
   draggingSamplerMarker: { entityId: string; ownerId: string; edge: 'start' | 'end' } | null;
+
+  // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
+  // dragged to scrub the playhead, if any — same "jump to the click,
+  // continue tracking from there" shape as melodyScrollDrag above, no
+  // press/threshold distinction needed since there's nothing else a press
+  // on the ruler could mean yet (Phase 1 — see TODO.md).
+  scrubbingSequencerId: string | null;
+
+  // The sequencer feature whose bottom-right handle is currently being
+  // dragged to resize its frame (ui/sequencer.ts's applySequencerResize) —
+  // startPointer/start are snapshotted once at drag-start so every
+  // pointermove computes the new size from the total drag delta, same
+  // "absolute displacement since the drag started" reasoning as e.g.
+  // ui/textureEditor.ts's own resize drag.
+  resizingSequencer: { entityId: string; startPointer: Point; start: SequencerResizeStart } | null;
+
+  // The sequencer's own horizontal (timeline) or vertical (channel stack)
+  // scrollbar currently being dragged, if either — same "jump to the
+  // click, continue tracking from there" shape as melodyScrollDrag above.
+  sequencerHScrollDrag: { entityId: string } | null;
+  sequencerVScrollDrag: { entityId: string } | null;
+
+  // The sequencer feature whose track-end marker band is currently being
+  // dragged, if any — same "jump to the click, continue tracking" shape
+  // as the scrub/scrollbar drags above (see ui/sequencer.ts's setTrackEnd).
+  draggingSequencerEnd: string | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -227,6 +269,11 @@ export function createInteractionState(): InteractionState {
     melodyPress: null,
     melodyScrollDrag: null,
     draggingSamplerMarker: null,
+    scrubbingSequencerId: null,
+    resizingSequencer: null,
+    sequencerHScrollDrag: null,
+    sequencerVScrollDrag: null,
+    draggingSequencerEnd: null,
   };
 }
 
@@ -449,6 +496,68 @@ export function attachInteraction(
       return;
     }
 
+    // An open sequencer popup (ui/sequencer.ts) sits visually on top of
+    // everything else too, same reasoning as the melody/sampler popups
+    // above.
+    const sequencerHit = hitTestSequencerPopup(graph, point);
+    if (sequencerHit) {
+      switch (sequencerHit.kind) {
+        case 'close': {
+          const feature = graph.get(sequencerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'play':
+          toggleSequencer(sequencerStateFor(sequencerHit.entityId));
+          break;
+        case 'rewind':
+          rewindSequencer(sequencerStateFor(sequencerHit.entityId));
+          break;
+        case 'scrub':
+          canvas.setPointerCapture(e.pointerId);
+          scrubSequencer(sequencerStateFor(sequencerHit.entityId), sequencerHit.seconds); // jump to the click, then keep tracking on move
+          state.scrubbingSequencerId = sequencerHit.entityId;
+          break;
+        case 'axisHandle':
+          canvas.setPointerCapture(e.pointerId);
+          state.draggingTimeAxis = {
+            entityId: sequencerHit.entityId,
+            startX: point.x,
+            startTimeScale: sequencerStateFor(sequencerHit.entityId).zoomSeconds,
+          };
+          break;
+        case 'resize':
+          canvas.setPointerCapture(e.pointerId);
+          state.resizingSequencer = {
+            entityId: sequencerHit.entityId,
+            startPointer: point,
+            start: sequencerResizeStart(sequencerStateFor(sequencerHit.entityId)),
+          };
+          break;
+        case 'hScroll':
+          canvas.setPointerCapture(e.pointerId);
+          updateSequencerScrollFromTrackX(graph, sequencerHit.entityId, point.x); // jump to the click, then keep tracking on move
+          state.sequencerHScrollDrag = { entityId: sequencerHit.entityId };
+          break;
+        case 'vScroll':
+          canvas.setPointerCapture(e.pointerId);
+          updateSequencerChannelScrollFromTrackY(graph, sequencerHit.entityId, point.y);
+          state.sequencerVScrollDrag = { entityId: sequencerHit.entityId };
+          break;
+        case 'endMarkerToggle':
+          toggleLoopAtEnd(sequencerStateFor(sequencerHit.entityId));
+          break;
+        case 'endMarkerDrag':
+          canvas.setPointerCapture(e.pointerId);
+          setTrackEnd(sequencerStateFor(sequencerHit.entityId), sequencerHit.seconds); // jump to the click, then keep tracking on move
+          state.draggingSequencerEnd = sequencerHit.entityId;
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler/envelope popups' own catch-all.
+      }
+      return;
+    }
+
     // An open envelope popup (ui/organelle.ts) sits visually on top of
     // everything else on the canvas, so its own hit-test goes first — a
     // click anywhere inside it (its background included) must never fall
@@ -609,16 +718,60 @@ export function attachInteraction(
     if (state.draggingTimeAxis) {
       const { entityId, startX, startTimeScale } = state.draggingTimeAxis;
       const feature = graph.get(entityId);
-      // Written directly rather than through applyControlValue — timeScale
-      // is UI-only display state (how the popup renders), not one of
-      // controlsFor('envelope')'s specs, so it's never wireable and has no
-      // control-setter to dispatch to.
-      if (feature) feature.params.timeScale = timeScaleFromDrag(startTimeScale, point.x - startX);
+      if (feature?.kind === 'sequencer') {
+        // ui/sequencer.ts keeps its own zoomSeconds in module state, not
+        // entity.params — same reasoning as timeScale below, just a
+        // different backing store.
+        sequencerStateFor(entityId).zoomSeconds = zoomFromDrag(startTimeScale, point.x - startX);
+      } else if (feature) {
+        // Written directly rather than through applyControlValue — timeScale
+        // is UI-only display state (how the popup renders), not one of
+        // controlsFor('envelope')'s specs, so it's never wireable and has no
+        // control-setter to dispatch to.
+        feature.params.timeScale = timeScaleFromDrag(startTimeScale, point.x - startX);
+      }
       return;
     }
 
     if (state.melodyScrollDrag) {
       updateScrollFromTrackX(graph, state.melodyScrollDrag.entityId, point.x);
+      return;
+    }
+
+    if (state.scrubbingSequencerId) {
+      // secondsAtPopupX tracks x only, independent of the ruler's own
+      // tight vertical hit-zone (hitTestSequencerPopup's 'scrub' case) —
+      // a scrub drag should keep tracking even once the pointer strays
+      // off the ruler itself, same "drag doesn't need to stay exactly on
+      // the control" leniency every other drag in this file already gets
+      // via pointer capture.
+      const seconds = secondsAtPopupX(graph, state.scrubbingSequencerId, point.x);
+      if (seconds !== null) scrubSequencer(sequencerStateFor(state.scrubbingSequencerId), seconds);
+      return;
+    }
+
+    if (state.resizingSequencer) {
+      const { entityId, startPointer, start } = state.resizingSequencer;
+      applySequencerResize(sequencerStateFor(entityId), start, point.x - startPointer.x, point.y - startPointer.y);
+      return;
+    }
+
+    if (state.sequencerHScrollDrag) {
+      updateSequencerScrollFromTrackX(graph, state.sequencerHScrollDrag.entityId, point.x);
+      return;
+    }
+
+    if (state.sequencerVScrollDrag) {
+      updateSequencerChannelScrollFromTrackY(graph, state.sequencerVScrollDrag.entityId, point.y);
+      return;
+    }
+
+    if (state.draggingSequencerEnd) {
+      // secondsAtPopupX (same helper the scrub drag above uses) tracks x
+      // only, so this keeps working even once the pointer strays off the
+      // marker band's own tight vertical bounds.
+      const seconds = secondsAtPopupX(graph, state.draggingSequencerEnd, point.x);
+      if (seconds !== null) setTrackEnd(sequencerStateFor(state.draggingSequencerEnd), seconds);
       return;
     }
 
@@ -810,6 +963,36 @@ export function attachInteraction(
     if (state.melodyScrollDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.melodyScrollDrag = null;
+      return;
+    }
+
+    if (state.scrubbingSequencerId) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.scrubbingSequencerId = null;
+      return;
+    }
+
+    if (state.resizingSequencer) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.resizingSequencer = null;
+      return;
+    }
+
+    if (state.sequencerHScrollDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerHScrollDrag = null;
+      return;
+    }
+
+    if (state.sequencerVScrollDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.sequencerVScrollDrag = null;
+      return;
+    }
+
+    if (state.draggingSequencerEnd) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.draggingSequencerEnd = null;
       return;
     }
 

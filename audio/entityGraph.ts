@@ -44,18 +44,22 @@ export interface Entity {
   // onto the canvas and given a fresh position there.
   docked: boolean;
 
-  // The owning source's id, for a 'feature'-type entity only (null for
+  // The owning entity's id, for a 'feature'-type entity only (null for
   // everything else) — deliberately a SEPARATE relationship from
   // parentId/children rather than reusing containment: a feature has no
   // audio routing meaning of its own (audio/graph.ts's buildFromEntityGraph
-  // skips it entirely — its owner's own generator reads it directly via
-  // EntityGraph.featuresOf), isn't drawn by the normal recursive box-walk
+  // skips it entirely), isn't drawn by the normal recursive box-walk
   // (ui/render.ts), and shouldn't make its owner's box grow to "contain" it
   // the way a nested Source or reserved control-dot column does (see
   // ui/layout.ts's effectiveBounds). Reusing parentId/children for this
   // would have required auditing every containment-assuming code path for
   // a type it was never meant to see; a separate field keeps features
-  // invisible to all of that by construction.
+  // invisible to all of that by construction. Usually a Source, whose own
+  // generator reads its feature(s) directly via EntityGraph.featuresOf
+  // (e.g. the pluck/metal voices reading their attached envelope) — but
+  // ui/organelle.ts's owner-resolution and popup/porthole positioning
+  // never assume that, and a Control can own one too (ui/sequencer.ts's
+  // authoring organelle, owned by the sequencer control entity itself).
   ownerId: string | null;
 
   // Whether this feature's popup (ui/organelle.ts) is currently open. While

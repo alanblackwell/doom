@@ -54,6 +54,14 @@ export function hitTestWireHandle(
 ): { entityId: string } | null {
   for (const entity of graph.all()) {
     if (entity.type !== 'control') continue;
+    // The sequencer (ui/sequencer.ts) is a control entity too, but has no
+    // single shared output bump the way knob/clock/tap do — Phase 1 draws
+    // no bump for it at all (see ui/sequencer.ts's drawSequencerBody), and
+    // its eventual per-channel ports (TODO.md's Phase 3) will be their own
+    // dedicated multi-port hit-test, not this one-bump-per-entity path.
+    // Without this, wireHandlePosition would still return an invisible,
+    // clickable phantom handle near its edge.
+    if (entity.kind === 'sequencer') continue;
     const bounds = effectiveBounds(graph, entity, drag);
     const handle = wireHandlePosition(bounds);
     if (Math.hypot(point.x - handle.x, point.y - handle.y) <= HANDLE_HIT_RADIUS) {

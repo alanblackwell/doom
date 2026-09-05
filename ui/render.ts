@@ -35,6 +35,7 @@ import { drawPopup, drawPorthole } from './organelle';
 import { drawMelodyPopup, itemScreenX } from './melody';
 import type { MelodyItem } from './melody';
 import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
+import { drawSequencerBody, drawSequencerPopup } from './sequencer';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -150,6 +151,8 @@ function drawEntity(
     } else if (entity.kind === 'tap') {
       const highlighted = entity.id === interaction.selectedId || interaction.hoveredTapId === entity.id;
       drawTap(ctx, entity, bounds, highlighted, now, interaction);
+    } else if (entity.kind === 'sequencer') {
+      drawSequencerBody(ctx, entity, bounds, entity.id === interaction.selectedId);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }
@@ -1029,6 +1032,10 @@ export function renderFrame(
         drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
       } else if (feature.kind === 'sampler') {
         drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
+      } else if (feature.kind === 'sequencer') {
+        const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
+        const resizing = interaction.resizingSequencer?.entityId === feature.id;
+        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

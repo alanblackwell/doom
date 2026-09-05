@@ -356,6 +356,54 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// The sequencer (TODO.md item 3), also a Control entity — a bigger
+// rounded box (ui/render.ts's drawSequencerBody) rather than a small round
+// knob/clock/tap body, since Phase 3 gives it several output ports along
+// its own edge rather than one shared wire-output bump. Its porthole
+// (bottom-right corner, same mechanism as every other feature) opens the
+// piano-roll-style authoring popup (ui/sequencer.ts) — Phase 1 only for
+// now: a zoomable real-time grid and a working local playback line, no
+// notes/wiring/pitch-velocity yet. See TODO.md's sequencer spec.
+graph.add({
+  id: 'sequencer-1',
+  type: 'control',
+  kind: 'sequencer',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 60,
+  y: 320,
+  width: 130,
+  height: 90,
+  seed: 18,
+  docked: false, // controls never dock — see ui/docking.ts's isDockable
+  ownerId: null,
+  expanded: false,
+});
+// sequencer-1's authoring organelle (EntityType 'feature', kind
+// 'sequencer' — ui/sequencer.ts) — same porthole/popup mechanism as the
+// ADSR/melody/sampler organelles above, just owned by a Control entity
+// instead of a Source (ui/organelle.ts's owner-resolution is already
+// generic to either — see audio/entityGraph.ts's Entity.ownerId comment).
+// Purely the editing surface for now, no notes/wiring yet — see TODO.md's
+// sequencer spec. x/y/width/height/seed are unused for a feature entity,
+// same as every other feature above.
+graph.add({
+  id: 'sequencer-1-sequence',
+  type: 'feature',
+  kind: 'sequencer',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 19,
+  docked: false,
+  ownerId: 'sequencer-1',
+  expanded: false,
+});
 // A sampler: kind 'sample' like a dropped-in file (ui/sampleDrop.ts), just
 // starting with no buffer registered yet — its pad/level/speed controls
 // (controlSpecs.ts's existing 'sample' entry) work completely unmodified
