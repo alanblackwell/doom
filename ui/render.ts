@@ -1082,7 +1082,20 @@ export function renderFrame(
         }
         const envelopeDrag = interaction.sequencerEnvelopeDrag;
         const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
-        drawSequencerPopup(ctx, graph, feature, owner, now, draggingAxis, resizing, noteSnap, activeEnvelopeHandle, drag);
+        const cursorDragging = interaction.scrubbingSequencerId === feature.id;
+        drawSequencerPopup(
+          ctx,
+          graph,
+          feature,
+          owner,
+          now,
+          draggingAxis,
+          resizing,
+          noteSnap,
+          activeEnvelopeHandle,
+          cursorDragging,
+          drag
+        );
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

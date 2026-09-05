@@ -51,7 +51,7 @@ import { wireHandlePosition } from './knobs';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import type { InteractionState } from './interaction';
-import { ACCENT } from './palette';
+import { ACCENT, shadeColor } from './palette';
 
 // Amplitude shape, contained entirely within a note's own [onsetSeconds,
 // onsetSeconds + durationSeconds] — see noteEnvelopePoints. attack/decay/
@@ -1767,6 +1767,33 @@ function noteEnvelopePoints(left: number, right: number, top: number, bottom: nu
   };
 }
 
+// The envelope's own gain (0..1) at `fraction` (0..1) across the note's own
+// [onset, onset+duration] — the same four segment boundaries
+// noteEnvelopePoints draws between (attack ramp up, decay ramp down to
+// sustain, a flat sustain hold, release ramp down to 0), just evaluated at
+// an arbitrary point along them instead of only at their corners. Used by
+// drawEnvelopeCrossingDot to trace the live playhead along the curve
+// exactly, not just move in a straight line across the note's own box.
+// Segment boundaries never overlap (their fractions always sum to <= 1 —
+// see NoteEnvelope's own comment), so this is safe to treat as strictly
+// ordered.
+function envelopeValueAtFraction(envelope: NoteEnvelope, fraction: number): number {
+  const decayEnd = envelope.attack + envelope.decay;
+  const releaseStart = 1 - envelope.release;
+  if (fraction <= envelope.attack) {
+    return envelope.attack > 0 ? fraction / envelope.attack : 1;
+  }
+  if (fraction <= decayEnd) {
+    const local = envelope.decay > 0 ? (fraction - envelope.attack) / envelope.decay : 1;
+    return 1 - local * (1 - envelope.sustain);
+  }
+  if (fraction <= releaseStart) {
+    return envelope.sustain;
+  }
+  const local = envelope.release > 0 ? (fraction - releaseStart) / envelope.release : 1;
+  return envelope.sustain * (1 - local);
+}
+
 function drawNoteEnvelopeHandle(ctx: CanvasRenderingContext2D, p: Point, active: boolean): void {
   ctx.save();
   ctx.beginPath();
@@ -1793,7 +1820,11 @@ function drawNoteSeedHandle(ctx: CanvasRenderingContext2D, p: Point, active: boo
 // on top — no curve, since there's no shape to show. Once an envelope
 // exists (first touch of either seed handle — see
 // setNoteEnvelopeFromHandle), the full ADSR polyline becomes the note's
-// own body instead, with all three real handles.
+// own body instead, with all three real handles. `showHandles` is false
+// when this is called for a note that's merely being played across right
+// now (drawSequencerNote), not actually selected — the curve itself is
+// worth showing either way, but a draggable-looking handle on a note
+// that isn't selected would misleadingly suggest it's editable right now.
 function drawNoteEnvelopeShape(
   ctx: CanvasRenderingContext2D,
   left: number,
@@ -1801,16 +1832,19 @@ function drawNoteEnvelopeShape(
   top: number,
   bottom: number,
   note: SequencerNote,
-  activeHandle: HandleKind | null
+  activeHandle: HandleKind | null,
+  showHandles: boolean
 ): void {
   if (!note.envelope) {
     ctx.save();
     ctx.fillStyle = NOTE_FILL;
     ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
     ctx.restore();
-    const pts = noteEnvelopePoints(left, right, top, bottom, IDENTITY_ENVELOPE);
-    drawNoteSeedHandle(ctx, pts.attackPeak, activeHandle === 'attack');
-    drawNoteSeedHandle(ctx, pts.releaseStart, activeHandle === 'release');
+    if (showHandles) {
+      const pts = noteEnvelopePoints(left, right, top, bottom, IDENTITY_ENVELOPE);
+      drawNoteSeedHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+      drawNoteSeedHandle(ctx, pts.releaseStart, activeHandle === 'release');
+    }
     return;
   }
 
@@ -1839,9 +1873,40 @@ function drawNoteEnvelopeShape(
   ctx.stroke();
   ctx.restore();
 
-  drawNoteEnvelopeHandle(ctx, pts.attackPeak, activeHandle === 'attack');
-  drawNoteEnvelopeHandle(ctx, pts.decayCorner, activeHandle === 'decaySustain');
-  drawNoteEnvelopeHandle(ctx, pts.releaseStart, activeHandle === 'release');
+  if (showHandles) {
+    drawNoteEnvelopeHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+    drawNoteEnvelopeHandle(ctx, pts.decayCorner, activeHandle === 'decaySustain');
+    drawNoteEnvelopeHandle(ctx, pts.releaseStart, activeHandle === 'release');
+  }
+}
+
+// The live playhead's own position on the envelope curve, while a note is
+// being crossed (drawSequencerNote) — traces the actual shape (ramping
+// through attack/decay/release, holding flat through sustain), not just a
+// straight line across the note's box, via envelopeValueAtFraction.
+function drawEnvelopeCrossingDot(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  envelope: NoteEnvelope,
+  fraction: number
+): void {
+  const clamped = Math.min(1, Math.max(0, fraction));
+  const x = left + clamped * (right - left);
+  const value = envelopeValueAtFraction(envelope, clamped);
+  const y = top + (1 - value) * (bottom - top);
+  ctx.save();
+  ctx.shadowColor = ACCENT;
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+  // Brighter than the flat ACCENT the boundary highlight uses — this is
+  // the one thing meant to read as "hot," not just "active."
+  ctx.fillStyle = shadeColor(ACCENT, 1.6);
+  ctx.fill();
+  ctx.restore();
 }
 
 // Before an envelope exists, only the two seed handles (attack/release) are
@@ -2549,18 +2614,25 @@ function drawSequencerNote(
   selected: boolean,
   dimmed: boolean,
   activeEnvelopeHandle: HandleKind | null,
-  edgeFocus: 'left' | 'right' | null
+  edgeFocus: 'left' | 'right' | null,
+  // 0..1 while the playhead is currently somewhere inside this note (null
+  // otherwise) — how far across its own [onset, onset+duration] that is.
+  // Drives the highlight/curve/dot below; independent of `selected`, so a
+  // note can be both, either, or neither at once.
+  playingFraction: number | null
 ): void {
   const baseAlpha = dimmed ? NOTE_DIMMED_ALPHA : 1;
   const velocityAlpha = MIN_VELOCITY_ALPHA_FACTOR + (1 - MIN_VELOCITY_ALPHA_FACTOR) * note.velocity;
 
   ctx.save();
   ctx.globalAlpha = baseAlpha * velocityAlpha;
-  // The selected note trades its plain flat fill for its own ADSR shape —
-  // every other note (never dimmed AND selected at once) keeps the flat
-  // rect.
-  if (selected) {
-    drawNoteEnvelopeShape(ctx, left, right, top, bottom, note, activeEnvelopeHandle);
+  // The selected note (always) or a note currently being played across
+  // that actually has an envelope (see this function's own param comment)
+  // trades its plain flat fill for its own ADSR shape — every other note
+  // keeps the flat rect. Handles are only ever shown for the selected
+  // note — see drawNoteEnvelopeShape's own comment.
+  if (selected || (playingFraction !== null && note.envelope)) {
+    drawNoteEnvelopeShape(ctx, left, right, top, bottom, note, activeEnvelopeHandle, selected);
   } else {
     ctx.fillStyle = NOTE_FILL;
     ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
@@ -2630,6 +2702,26 @@ function drawSequencerNote(
     }
     ctx.restore();
   }
+
+  // The "cursor is crossing this bar right now" highlight — a glowing
+  // outline (vs. the selected note's own flat, glow-less one just above)
+  // so the two read as distinct states even when both apply at once. Its
+  // own alpha (not `dimmed`/velocity fade, which stays out of this block
+  // entirely) is what keeps this at half brightness rather than the full
+  // opacity every other ACCENT stroke in this file uses.
+  if (playingFraction !== null) {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.shadowColor = ACCENT;
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(left, top, Math.max(1, right - left), bottom - top);
+    ctx.restore();
+    if (note.envelope) {
+      drawEnvelopeCrossingDot(ctx, left, right, top, bottom, note.envelope, playingFraction);
+    }
+  }
 }
 
 // Shown for a note-edge/move drag while a snap candidate is in range —
@@ -2690,11 +2782,15 @@ function drawSequencerGrid(
   now: number,
   noteSnap: NoteSnapIndicator | null,
   selectedNote: { channelIndex: number; noteId: string } | null,
-  activeEnvelopeHandle: HandleKind | null
+  activeEnvelopeHandle: HandleKind | null,
+  cursorDragging: boolean
 ): void {
   updateSequencerPlayback(grid, state);
   const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
   const step = gridStepSeconds(pxPerSec);
+  // Computed once and reused below for both the per-note crossing highlight
+  // and the playback line itself, rather than re-deriving it twice.
+  const playhead = currentPlaybackSeconds(state);
 
   // Faint vertical gridlines + their labels in the ruler strip, same
   // adaptive-density logic as ui/organelle.ts's own drawTimeGrid, just
@@ -2760,6 +2856,14 @@ function drawSequencerGrid(
       if (noteRight < grid.left || noteLeft > grid.right) continue;
       const selected = note.id === selectedNote?.noteId;
       const dimmed = selectedNote !== null && !selected;
+      // Same highlight whether the cursor is actually playing or the user
+      // is just scrubbing it by hand — either way it's "where the cursor
+      // currently is," and stops the moment neither is true (see this
+      // function's own cursorDragging param).
+      const playingFraction =
+        (state.playing || cursorDragging) && playhead >= note.onsetSeconds && playhead < note.onsetSeconds + note.durationSeconds
+          ? (playhead - note.onsetSeconds) / note.durationSeconds
+          : null;
       drawSequencerNote(
         ctx,
         noteLeft,
@@ -2770,7 +2874,8 @@ function drawSequencerGrid(
         selected,
         dimmed,
         selected ? activeEnvelopeHandle : null,
-        selected ? selectedNoteEdgeFocus(note.id) : null
+        selected ? selectedNoteEdgeFocus(note.id) : null,
+        playingFraction
       );
     }
   }
@@ -2801,7 +2906,7 @@ function drawSequencerGrid(
   // move"), spanning the ruler and every lane. Skipped entirely once
   // scrolled out of the visible window rather than clamping it to an edge,
   // which would misleadingly suggest the playhead is still nearby.
-  const playX = secondsToX(grid, pxPerSec, state.scrollSeconds, currentPlaybackSeconds(state));
+  const playX = secondsToX(grid, pxPerSec, state.scrollSeconds, playhead);
   if (playX >= grid.left && playX <= grid.right) {
     ctx.save();
     if (state.playing) {
@@ -2830,6 +2935,7 @@ export function drawSequencerPopup(
   resizing: boolean,
   noteSnap: NoteSnapIndicator | null,
   activeEnvelopeHandle: HandleKind | null,
+  cursorDragging: boolean,
   drag?: DragContext
 ): void {
   const popup = sequencerPopupRect(graph, entity.id, owner, drag);
@@ -2886,7 +2992,7 @@ export function drawSequencerPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
-  drawSequencerGrid(ctx, popup, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle);
+  drawSequencerGrid(ctx, popup, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle, cursorDragging);
   ctx.restore();
 
   drawVScrollbar(ctx, popup, grid, state);
