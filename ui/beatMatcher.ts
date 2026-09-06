@@ -615,6 +615,30 @@ export function currentBeatMatcherPlaybackSeconds(state: BeatMatcherState): numb
   return state.pausedAtSeconds + (getAudioContext().currentTime - state.playStartCtxTime) * state.playbackSpeed;
 }
 
+// A brief flash on the playback cursor each time playback crosses a note's
+// own onset — audio/beatMatcherPlayer.ts's tick dispatch calls this at the
+// exact ctx-time the tick itself sounds (deferred to match, since ticks are
+// actually scheduled a little ahead of when they're heard), so the flash
+// and the tick land together. Same "external map of last-fired timestamps,
+// faded by elapsed time" idiom as ui/sequencer.ts's own
+// flashChannelConnector/connectorGlow — kept outside BeatMatcherState since
+// it's pure animation state, not anything worth persisting or reasoning
+// about alongside the transport.
+const CURSOR_FLASH_DURATION_MS = 150;
+const lastCursorFlashAt = new Map<string, number>();
+
+export function flashBeatMatcherCursor(featureEntityId: string): void {
+  lastCursorFlashAt.set(featureEntityId, performance.now());
+}
+
+function beatMatcherCursorFlashGlow(featureEntityId: string, now: number): number {
+  const at = lastCursorFlashAt.get(featureEntityId);
+  if (at === undefined) return 0;
+  const elapsed = now - at;
+  if (elapsed < 0 || elapsed > CURSOR_FLASH_DURATION_MS) return 0;
+  return 1 - elapsed / CURSOR_FLASH_DURATION_MS;
+}
+
 export function startBeatMatcherPlayback(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (state.playing || !state.capturedBuffer) return;
@@ -1496,9 +1520,34 @@ function drawTimeRuler(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: numb
 // an aligned cursor over both). Skipped entirely once scrolled out of the
 // visible window rather than clamping it to an edge, which would
 // misleadingly suggest the playhead is still nearby.
-function drawBeatMatcherPlaybackLine(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+function drawBeatMatcherPlaybackLine(
+  ctx: CanvasRenderingContext2D,
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  flashGlow: number
+): void {
   const playX = secondsToX(grid, pxPerSec, state.scrollSeconds, currentBeatMatcherPlaybackSeconds(state));
   if (playX < grid.left || playX > grid.right) return;
+
+  // A bright, wide halo flashed under the normal line each time playback
+  // crosses a note's own onset (audio/beatMatcherPlayer.ts's tick dispatch
+  // calls flashBeatMatcherCursor at the exact same ctx-time the tick itself
+  // sounds) — drawn first so the crisp accent line on top still reads
+  // clearly through it.
+  if (flashGlow > 0) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(255, 255, 255, 0.95)';
+    ctx.shadowBlur = 24 * flashGlow;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.9 * flashGlow})`;
+    ctx.lineWidth = 2 + 7 * flashGlow;
+    ctx.beginPath();
+    ctx.moveTo(playX, grid.trackTop);
+    ctx.lineTo(playX, grid.spectrogramBottom);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   ctx.save();
   if (state.playing) {
     ctx.shadowColor = ACCENT;
@@ -1801,7 +1850,7 @@ export function drawBeatMatcherPopup(
   if (hasCapture) {
     drawBeatMatcherTimeGrid(ctx, grid, pxPerSec, state);
     drawEndMarker(ctx, grid, pxPerSec, state);
-    drawBeatMatcherPlaybackLine(ctx, grid, pxPerSec, state);
+    drawBeatMatcherPlaybackLine(ctx, grid, pxPerSec, state, beatMatcherCursorFlashGlow(entity.id, now));
     drawAxisHandle(ctx, grid, isAxisDragging);
     drawZoomIcon(ctx, axisZoomInIconPosition(grid), 'in');
     drawZoomIcon(ctx, axisZoomOutIconPosition(grid), 'out');

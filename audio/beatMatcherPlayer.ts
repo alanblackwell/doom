@@ -18,7 +18,7 @@
 
 import { getAudioContext } from './context';
 import { getMasterChain } from './master';
-import { beatMatcherStateFor, currentBeatMatcherPlaybackSeconds } from '../ui/beatMatcher';
+import { beatMatcherStateFor, currentBeatMatcherPlaybackSeconds, flashBeatMatcherCursor } from '../ui/beatMatcher';
 import type { BeatMatcherState } from '../ui/beatMatcher';
 
 const LOOKAHEAD_INTERVAL_MS = 25;
@@ -128,6 +128,19 @@ function ctxTimeForClipSeconds(state: BeatMatcherState, seconds: number): number
   return playStart + (seconds - state.pausedAtSeconds) / state.playbackSpeed;
 }
 
+// Defers a callback to fire once ctx.currentTime reaches targetCtxTime
+// (immediately if that's already passed) — same technique
+// audio/transport.ts's scheduleSoon and ui/organelle.ts's own
+// deferToCtxTime both use, reimplemented locally here rather than shared
+// since neither of those is exported and each is a trivial couple of
+// lines. Used to flash the visual cursor (ui/beatMatcher.ts's
+// flashBeatMatcherCursor) at the exact moment a tick scheduled ahead of
+// time actually sounds, not the moment it was scheduled.
+function deferToCtxTime(targetCtxTime: number, callback: () => void): void {
+  const delayMs = Math.max(0, (targetCtxTime - getAudioContext().currentTime) * 1000);
+  setTimeout(callback, delayMs);
+}
+
 function dispatchTicks(entry: Registered, state: BeatMatcherState): void {
   if (!state.playing || !state.capturedBuffer) {
     entry.dispatchedUpTo = state.pausedAtSeconds;
@@ -148,7 +161,9 @@ function dispatchTicks(entry: Registered, state: BeatMatcherState): void {
   const horizon = playhead + TICK_SCHEDULE_AHEAD_SEC * state.playbackSpeed;
   for (const note of state.notes) {
     if (note.onsetSeconds >= entry.dispatchedUpTo && note.onsetSeconds < horizon) {
-      playBeatMatcherTick(ctxTimeForClipSeconds(state, note.onsetSeconds));
+      const when = ctxTimeForClipSeconds(state, note.onsetSeconds);
+      playBeatMatcherTick(when);
+      deferToCtxTime(when, () => flashBeatMatcherCursor(entry.featureEntityId));
     }
   }
   entry.dispatchedUpTo = horizon;
