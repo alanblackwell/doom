@@ -212,6 +212,14 @@ export interface BeatMatcherState {
   // auto-follow snapping straight back to the cursor. See
   // followBeatMatcherPlayhead.
   autoScrollSuspended: boolean;
+
+  // Playback rate for the (not yet wired up — view/transport only for now)
+  // captured-audio playback: one of PLAYBACK_SPEEDS. Slows the cursor's own
+  // advance through the clip's timeline to match, so notes can be placed
+  // accurately against a slowed-down (and, accepting the pitch shift for
+  // now — no resynthesis — lower-pitched) sample without resorting to
+  // per-note pitch-correction machinery. See cycleBeatMatcherSpeed.
+  playbackSpeed: number;
 }
 
 const statesByEntity = new Map<string, BeatMatcherState>();
@@ -236,6 +244,7 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       endSeconds: 0,
       loopAtEnd: false,
       autoScrollSuspended: false,
+      playbackSpeed: 1,
     };
     statesByEntity.set(entityId, state);
   }
@@ -314,6 +323,7 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.endSeconds = buffer.duration;
     state.loopAtEnd = false;
     state.autoScrollSuspended = false;
+    state.playbackSpeed = 1;
   });
   stopWatcher(state);
   state.status = 'paused';
@@ -598,7 +608,11 @@ export function beatMatcherSecondsAtPoint(graph: EntityGraph, featureEntityId: s
 
 export function currentBeatMatcherPlaybackSeconds(state: BeatMatcherState): number {
   if (!state.playing || state.playStartCtxTime === null) return state.pausedAtSeconds;
-  return state.pausedAtSeconds + (getAudioContext().currentTime - state.playStartCtxTime);
+  // Real elapsed time scaled by playbackSpeed — at half speed, a real
+  // second of wall-clock time only advances the clip's own timeline by
+  // half a second, giving a slowed-down clip proportionally more real time
+  // to work with (see BeatMatcherState.playbackSpeed's own comment).
+  return state.pausedAtSeconds + (getAudioContext().currentTime - state.playStartCtxTime) * state.playbackSpeed;
 }
 
 export function startBeatMatcherPlayback(featureEntityId: string): void {
@@ -666,12 +680,15 @@ function advanceBeatMatcherPastEnd(state: BeatMatcherState): void {
   if (playhead < state.endSeconds) return;
   if (state.loopAtEnd) {
     // Shifts the ctx-time reference forward by exactly one loop length
-    // rather than resetting pausedAtSeconds/playStartCtxTime outright —
+    // (divided by playbackSpeed — currentBeatMatcherPlaybackSeconds scales
+    // real elapsed ctx-time BY playbackSpeed, so undoing endSeconds'-worth
+    // of clip-time takes endSeconds/playbackSpeed of real ctx-time) rather
+    // than resetting pausedAtSeconds/playStartCtxTime outright —
     // currentBeatMatcherPlaybackSeconds reads back as exactly (playhead -
     // endSeconds) afterward, preserving whatever fraction of a frame it
     // overshot by instead of snapping to a slightly-early 0, same
     // reasoning as ui/sequencer.ts's own advancePastTrackEnd.
-    state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + state.endSeconds;
+    state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + state.endSeconds / state.playbackSpeed;
   } else {
     state.pausedAtSeconds = state.endSeconds;
     state.playing = false;
@@ -743,6 +760,33 @@ export function setBeatMatcherEnd(featureEntityId: string, seconds: number): voi
 export function toggleBeatMatcherLoopAtEnd(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
   state.loopAtEnd = !state.loopAtEnd;
+}
+
+// 1/1 (normal), 1/2, 1/4 — accepting the pitch shift from plain sample-rate
+// playback rather than resynthesizing to preserve pitch (BeatMatcherState.
+// playbackSpeed's own comment).
+const PLAYBACK_SPEEDS = [1, 0.5, 0.25];
+
+function beatMatcherSpeedLabel(speed: number): string {
+  if (speed === 0.5) return '1/2';
+  if (speed === 0.25) return '1/4';
+  return '1/1';
+}
+
+// Cycles 1/1 -> 1/2 -> 1/4 -> 1/1 ... Re-anchors the playhead first (using
+// the speed still in effect) if currently playing, so a live speed change
+// doesn't jump the cursor — currentBeatMatcherPlaybackSeconds scales
+// elapsed real time by playbackSpeed, so changing it out from under a
+// still-ticking playStartCtxTime would otherwise read back a wrong
+// position the very next frame.
+export function cycleBeatMatcherSpeed(featureEntityId: string): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (state.playing) {
+    state.pausedAtSeconds = currentBeatMatcherPlaybackSeconds(state);
+    state.playStartCtxTime = getAudioContext().currentTime;
+  }
+  const index = PLAYBACK_SPEEDS.indexOf(state.playbackSpeed);
+  state.playbackSpeed = PLAYBACK_SPEEDS[(index + 1) % PLAYBACK_SPEEDS.length];
 }
 
 export function updateBeatMatcherScrollFromTrackX(graph: EntityGraph, featureEntityId: string, pointerX: number, drag?: DragContext): void {
@@ -847,16 +891,38 @@ export function beatMatcherDropTargetAt(graph: EntityGraph, point: Point, drag?:
 // withinAxisHandleZone/hScrollbarTrack/...), independent code — see this
 // file's own header for why.
 
-// Rewind, then play/pause — title bar, left of the close button, reading
-// left-to-right same as a real transport's button order. The beat-matcher's
-// own record button lives at the FAR left of the title bar instead of here
-// (captureButtonPosition) — these two never compete for the same spot.
+// Rewind, then play/pause, then the speed control — title bar, left of the
+// close button, reading left-to-right same as a real transport's button
+// order. The beat-matcher's own record button lives at the FAR left of the
+// title bar instead of here (captureButtonPosition) — these two never
+// compete for the same spot.
 const TRANSPORT_BUTTON_RADIUS = 8;
 const TRANSPORT_BUTTON_GAP = 20;
 
-function playButtonPosition(popup: Rect): Point {
+function speedControlPosition(popup: Rect): Point {
   const close = closeButtonPosition(popup);
   return { x: close.x - TRANSPORT_BUTTON_GAP, y: close.y };
+}
+
+// A small rounded-rect label ("1/1"/"1/2"/"1/4"), not a circular icon like
+// its neighbors — text is the whole point of it — so its own hit region is
+// a rect around speedControlPosition rather than a dist() radius check.
+const SPEED_CONTROL_WIDTH = 22;
+const SPEED_CONTROL_HEIGHT = 14;
+
+function hitTestSpeedControl(popup: Rect, point: Point): boolean {
+  const p = speedControlPosition(popup);
+  return (
+    point.x >= p.x - SPEED_CONTROL_WIDTH / 2 - 3 &&
+    point.x <= p.x + SPEED_CONTROL_WIDTH / 2 + 3 &&
+    point.y >= p.y - SPEED_CONTROL_HEIGHT / 2 - 3 &&
+    point.y <= p.y + SPEED_CONTROL_HEIGHT / 2 + 3
+  );
+}
+
+function playButtonPosition(popup: Rect): Point {
+  const speed = speedControlPosition(popup);
+  return { x: speed.x - TRANSPORT_BUTTON_GAP, y: speed.y };
 }
 
 function rewindButtonPosition(popup: Rect): Point {
@@ -969,6 +1035,7 @@ export type BeatMatcherHit =
   | { entityId: string; kind: 'infoOverlayClose' }
   | { entityId: string; kind: 'rewind' }
   | { entityId: string; kind: 'play' }
+  | { entityId: string; kind: 'speed' }
   | { entityId: string; kind: 'scrub'; seconds: number }
   | { entityId: string; kind: 'noteResizeLeft'; noteId: string }
   | { entityId: string; kind: 'noteResizeRight'; noteId: string }
@@ -1006,6 +1073,9 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
     }
     if (dist(point, playButtonPosition(popup)) <= TRANSPORT_BUTTON_RADIUS + 4) {
       return { entityId: entity.id, kind: 'play' };
+    }
+    if (hitTestSpeedControl(popup, point)) {
+      return { entityId: entity.id, kind: 'speed' };
     }
     if (state.infoOverlayOpen && dist(point, infoOverlayClosePosition(popup)) <= INFO_OVERLAY_CLOSE_RADIUS + 4) {
       return { entityId: entity.id, kind: 'infoOverlayClose' };
@@ -1488,6 +1558,31 @@ function drawTransportButtonRing(ctx: CanvasRenderingContext2D, center: Point): 
   ctx.restore();
 }
 
+// A small rounded-rect label button, distinct from the circular transport
+// buttons either side of it since it shows text rather than an icon —
+// brighter than "1/1" (normal speed, nothing special in effect) once
+// actually slowed down, so a glance at the title bar shows whether it's
+// active.
+function drawSpeedControl(ctx: CanvasRenderingContext2D, popup: Rect, speed: number): void {
+  const p = speedControlPosition(popup);
+  const slowed = speed !== 1;
+  ctx.save();
+  ctx.beginPath();
+  const left = p.x - SPEED_CONTROL_WIDTH / 2;
+  const top = p.y - SPEED_CONTROL_HEIGHT / 2;
+  const radius = 3;
+  ctx.roundRect(left, top, SPEED_CONTROL_WIDTH, SPEED_CONTROL_HEIGHT, radius);
+  ctx.strokeStyle = slowed ? ACCENT : 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = slowed ? 1.5 : 1;
+  ctx.stroke();
+  ctx.fillStyle = slowed ? ACCENT : 'rgba(255, 255, 255, 0.8)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(beatMatcherSpeedLabel(speed), p.x, p.y + 0.5);
+  ctx.restore();
+}
+
 function drawBeatMatcherTransportButtons(ctx: CanvasRenderingContext2D, popup: Rect, state: BeatMatcherState): void {
   const rewind = rewindButtonPosition(popup);
   const play = playButtonPosition(popup);
@@ -1495,6 +1590,7 @@ function drawBeatMatcherTransportButtons(ctx: CanvasRenderingContext2D, popup: R
   drawRewindIcon(ctx, rewind);
   drawTransportButtonRing(ctx, play);
   drawTransportPlayIcon(ctx, play, state.playing);
+  drawSpeedControl(ctx, popup, state.playbackSpeed);
 }
 
 // A loop (circular arrow) or stop (square) glyph, same shape as

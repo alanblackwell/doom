@@ -144,6 +144,7 @@ import {
   beatMatcherZoomStep,
   closeBeatMatcherInfoOverlay,
   createBeatMatcherNoteAt,
+  cycleBeatMatcherSpeed,
   deleteBeatMatcherNote,
   hitTestBeatMatcherPopup,
   moveBeatMatcherNote,
@@ -1078,6 +1079,10 @@ export function attachInteraction(
         rewindBeatMatcherPlayback(beatMatcherHit.entityId);
       } else if (beatMatcherHit.kind === 'play') {
         toggleBeatMatcherPlayback(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'speed') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the record/transport buttons above. Cycles 1/1 -> 1/2 -> 1/4 -> ...
+        cycleBeatMatcherSpeed(beatMatcherHit.entityId);
       } else if (beatMatcherHit.kind === 'scrub') {
         canvas.setPointerCapture(e.pointerId);
         scrubBeatMatcherPlayback(beatMatcherHit.entityId, beatMatcherHit.seconds); // jump to the click, then keep tracking on move
