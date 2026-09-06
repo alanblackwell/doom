@@ -65,6 +65,7 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
 import { gridStepSeconds, ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import type { HandleKind } from './organelle';
 import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import { getEntityNodes } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';
@@ -136,14 +137,36 @@ function popupBounds(popup: Rect): { left: number; top: number; right: number; b
 // capture is actively in progress, watching for silence to end it.
 export type BeatMatcherStatus = 'idle' | 'armed' | 'paused' | 'capturing';
 
-// A single onset marker on the track, authored against the spectrogram.
-// Deliberately minimal for now (no pitch/velocity/envelope yet, unlike
-// ui/sequencer.ts's own SequencerNote) — this track has no dispatch wiring
-// to drive with those yet; added if/when that lands.
+// Amplitude shape, contained entirely within a note's own [onsetSeconds,
+// onsetSeconds + durationSeconds] — same shape as ui/sequencer.ts's own
+// NoteEnvelope (attack/decay/release stored as fractions of durationSeconds,
+// not absolute seconds, so resizing the note rescales its shape with no
+// reclamping), redefined here rather than imported per this file's own
+// header on staying independent of ui/sequencer.ts.
+export interface BeatMatcherNoteEnvelope {
+  attack: number;
+  decay: number;
+  sustain: number; // level, 0..1
+  release: number;
+}
+
+// A single onset marker on the track, authored against the spectrogram —
+// same pitch/velocity/envelope shape as ui/sequencer.ts's own SequencerNote,
+// independent code (see this file's own header).
 export interface BeatMatcherNote {
   id: string;
   onsetSeconds: number;
   durationSeconds: number; // always > 0
+  // MIDI note number, or null for a drum-like note with no pitch at all
+  // (the default — see createBeatMatcherNoteAt) — rendered/reported as "X"
+  // until the user actually gives it one.
+  pitch: number | null;
+  velocity: number; // 0..1
+  // null until the user first touches one of the two seed handles (see
+  // drawNoteEnvelopeShape/setBeatMatcherNoteEnvelopeFromHandle) — a note
+  // with no envelope at all reads as "unshaped," not as some particular
+  // default shape.
+  envelope: BeatMatcherNoteEnvelope | null;
 }
 
 export interface BeatMatcherState {
@@ -395,6 +418,11 @@ export function closeBeatMatcherInfoOverlay(featureEntityId: string): void {
 // the sequencer's own longer floor) keeps a plain click-not-drag useful on
 // its own.
 const MIN_NOTE_DURATION_SECONDS = 0.03;
+const DEFAULT_NOTE_VELOCITY = 1;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
 
 let nextBeatMatcherNoteId = 1;
 
@@ -427,10 +455,25 @@ export function createBeatMatcherNoteAt(featureEntityId: string, onsetSeconds: n
   }
   if (onset + MIN_NOTE_DURATION_SECONDS > duration) return null;
 
+  // Inherits pitch/velocity/envelope from whichever existing note most
+  // recently precedes it (the last one by onset — state.notes stays sorted,
+  // per insertNoteSorted) rather than the plain "X"/full-velocity/no-shape
+  // defaults every note otherwise starts as — same reasoning as
+  // ui/sequencer.ts's own createSequencerNoteAt. The envelope is cloned, not
+  // shared, same as duplicateSelectedBeatMatcherNote's own clone.
+  let previous: BeatMatcherNote | null = null;
+  for (const existing of state.notes) {
+    if (existing.onsetSeconds > onset) break;
+    previous = existing;
+  }
+
   const note: BeatMatcherNote = {
     id: `beat-note-${nextBeatMatcherNoteId++}`,
     onsetSeconds: onset,
     durationSeconds: MIN_NOTE_DURATION_SECONDS,
+    pitch: previous ? previous.pitch : null,
+    velocity: previous ? previous.velocity : DEFAULT_NOTE_VELOCITY,
+    envelope: previous?.envelope ? { ...previous.envelope } : null,
   };
   insertNoteSorted(state.notes, note);
   return note.id;
@@ -483,6 +526,646 @@ export function deleteBeatMatcherNote(featureEntityId: string, noteId: string): 
   const state = beatMatcherStateFor(featureEntityId);
   const found = findBeatMatcherNote(state, noteId);
   if (found) state.notes.splice(found.index, 1);
+}
+
+// Resolves the plot's own Grid from just (graph, entityId) — same "geometry
+// stays private to this file" shape as ui/sequencer.ts's own
+// resolveSequencerGrid, used below by the pitch-nudge/envelope-drag actions
+// that need real pixel geometry (Grid is declared further down this file,
+// in the "Grid / zoom / scroll" section — fine to reference here since
+// function declarations and interfaces are both hoisted). Returns null if
+// the feature/owner is gone (e.g. popup closed mid-drag).
+function resolveBeatMatcherGrid(graph: EntityGraph, entityId: string, drag?: DragContext): Grid | null {
+  const entity = graph.get(entityId);
+  const owner = entity && ownerOf(graph, entity);
+  if (!entity || !owner) return null;
+  return gridFor(beatMatcherPopupRect(graph, owner, drag));
+}
+
+// --- Note selection --------------------------------------------------------
+// A single selected note, app-wide — same "one selection, module-private"
+// shape as ui/sequencer.ts's own selectedNote, independent state. This
+// track has no channel dimension, so just entityId+noteId identifies it.
+let selectedNote: { entityId: string; noteId: string } | null = null;
+
+// Which note (if any) currently has its velocity slider open, and where —
+// see toggleBeatMatcherVelocitySlider/beatMatcherVelocitySliderOpenFor.
+// Same "frozen at wherever it was opened, until the selection moves to a
+// DIFFERENT note" shape as ui/sequencer.ts's own velocitySliderOpen.
+let velocitySliderOpen: { noteId: string; track: BeatMatcherVelocityTrack } | null = null;
+
+// Which edge (if any) Left/Right's keyboard nudge (nudgeSelectedBeatMatcherNoteTime)
+// currently acts on — same shape as ui/sequencer.ts's own noteEdgeFocus.
+let noteEdgeFocus: { noteId: string; edge: 'left' | 'right' } | null = null;
+
+export function selectBeatMatcherNote(entityId: string, noteId: string): void {
+  if (velocitySliderOpen && velocitySliderOpen.noteId !== noteId) velocitySliderOpen = null;
+  if (noteEdgeFocus && noteEdgeFocus.noteId !== noteId) noteEdgeFocus = null;
+  selectedNote = { entityId, noteId };
+}
+
+export function deselectBeatMatcherNote(): void {
+  selectedNote = null;
+  velocitySliderOpen = null;
+  noteEdgeFocus = null;
+}
+
+// Records which edge (or null, for the whole note) the LAST move/resize
+// grab touched — ui/interaction.ts calls this right after selectBeatMatcherNote
+// from every note-drag pointerdown case, same as ui/sequencer.ts's own
+// setSelectedNoteEdgeFocus.
+export function setSelectedBeatMatcherNoteEdgeFocus(edge: 'left' | 'right' | null): void {
+  if (!selectedNote) return;
+  noteEdgeFocus = edge === null ? null : { noteId: selectedNote.noteId, edge };
+}
+
+// The orange edge highlight (drawBeatMatcherNote) and
+// nudgeSelectedBeatMatcherNoteTime both key off this rather than the
+// module-private `noteEdgeFocus` directly, so a stale focus for some other
+// note can never leak through.
+export function selectedBeatMatcherNoteEdgeFocus(noteId: string): 'left' | 'right' | null {
+  return noteEdgeFocus && noteEdgeFocus.noteId === noteId ? noteEdgeFocus.edge : null;
+}
+
+// Self-heals a stale selection (the note no longer exists — e.g. deleted,
+// or a fresh capture cleared the whole track) the same way
+// ui/sequencer.ts's own selectedNoteFor verifies its own module state
+// before trusting it.
+export function selectedBeatMatcherNoteFor(entityId: string): { noteId: string } | null {
+  if (!selectedNote || selectedNote.entityId !== entityId) return null;
+  const state = beatMatcherStateFor(entityId);
+  if (!state.notes.some((n) => n.id === selectedNote!.noteId)) {
+    selectedNote = null;
+    return null;
+  }
+  return { noteId: selectedNote.noteId };
+}
+
+export function hasSelectedBeatMatcherNote(): boolean {
+  return !!selectedNote && selectedBeatMatcherNoteFor(selectedNote.entityId) !== null;
+}
+
+// --- Selected-note actions ---------------------------------------------
+// Delete/duplicate/nudge, all driven by ui/interaction.ts's keyboard
+// handling and all resolving the current `selectedNote` internally rather
+// than taking it as a parameter — same shape as ui/sequencer.ts's own
+// deleteSelectedNote/duplicateSelectedNote/nudgeSelectedNoteTime.
+
+export function deleteSelectedBeatMatcherNote(): void {
+  if (!selectedNote) return;
+  const { entityId, noteId } = selectedNote;
+  if (!selectedBeatMatcherNoteFor(entityId)) return;
+  deleteBeatMatcherNote(entityId, noteId);
+  deselectBeatMatcherNote();
+}
+
+// Clones the selected note immediately after itself (touching its own end),
+// clamped against whatever note follows it — same clamp shape
+// createBeatMatcherNoteAt uses for a fresh note. No-ops (returns null) if
+// there's no room at all, e.g. the next note already touches this one's end.
+export function duplicateSelectedBeatMatcherNote(): string | null {
+  if (!selectedNote) return null;
+  const { entityId, noteId } = selectedNote;
+  if (!selectedBeatMatcherNoteFor(entityId)) return null;
+  const state = beatMatcherStateFor(entityId);
+  if (!state.capturedBuffer) return null;
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found) return null;
+  const { note, index } = found;
+  const onset = note.onsetSeconds + note.durationSeconds;
+  const upperBound = index < state.notes.length - 1 ? state.notes[index + 1].onsetSeconds : state.capturedBuffer.duration;
+  const duration = Math.min(note.durationSeconds, upperBound - onset);
+  if (duration < MIN_NOTE_DURATION_SECONDS) return null;
+
+  const clone: BeatMatcherNote = {
+    id: `beat-note-${nextBeatMatcherNoteId++}`,
+    onsetSeconds: onset,
+    durationSeconds: duration,
+    pitch: note.pitch,
+    velocity: note.velocity,
+    envelope: note.envelope ? { ...note.envelope } : null,
+  };
+  insertNoteSorted(state.notes, clone);
+  selectBeatMatcherNote(entityId, clone.id);
+  return clone.id;
+}
+
+const NOTE_NUDGE_PX = 4; // arrow-key time nudge, converted through the current zoom, same as ui/sequencer.ts's own
+
+// Left/Right keyboard shortcut: by default nudges the whole note, but if the
+// last move/resize grab was against one of its edges, nudges just that edge
+// instead — same shape as ui/sequencer.ts's own nudgeSelectedNoteTime.
+export function nudgeSelectedBeatMatcherNoteTime(graph: EntityGraph, direction: -1 | 1): void {
+  if (!selectedNote) return;
+  const { entityId, noteId } = selectedNote;
+  if (!selectedBeatMatcherNoteFor(entityId)) return;
+  closeBeatMatcherVelocitySlider();
+  const grid = resolveBeatMatcherGrid(graph, entityId);
+  if (!grid) return;
+  const state = beatMatcherStateFor(entityId);
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found) return;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  if (pxPerSec <= 0) return;
+  const step = direction * (NOTE_NUDGE_PX / pxPerSec);
+  const note = found.note;
+  const edge = selectedBeatMatcherNoteEdgeFocus(noteId);
+  if (edge === 'left') {
+    resizeBeatMatcherNoteLeft(entityId, noteId, note.onsetSeconds + step);
+  } else if (edge === 'right') {
+    resizeBeatMatcherNoteRight(entityId, noteId, note.onsetSeconds + note.durationSeconds + step);
+  } else {
+    moveBeatMatcherNote(entityId, noteId, note.onsetSeconds + step);
+  }
+}
+
+// --- Note pitch entry -----------------------------------------------------
+// Keyboard-only, same as ui/sequencer.ts's own pitch entry — there's no
+// meaningful pitch axis in this single-track view (its vertical axis is
+// nothing at all, unlike the sequencer's per-channel lanes), so pitch gets
+// its own tiny keyboard shortcuts instead of a drag gesture.
+
+// The pitch a null note seeds to the moment the keyboard first gives it one
+// — not the note's own default (null/"X"), just the starting point for that
+// first keypress. Same value as ui/sequencer.ts's own DEFAULT_SEED_PITCH.
+const DEFAULT_SEED_PITCH = 60; // "C4" / middle C
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function midiNoteName(midi: number): string {
+  const octave = Math.floor(midi / 12) - 1;
+  return `${NOTE_NAMES[((midi % 12) + 12) % 12]}${octave}`;
+}
+
+// Resolves the selected note's own BeatMatcherNote object, self-healing via
+// selectedBeatMatcherNoteFor the same way every other selected-note action
+// here does.
+function selectedBeatMatcherNoteObject(): BeatMatcherNote | null {
+  if (!selectedNote) return null;
+  const { entityId, noteId } = selectedNote;
+  if (!selectedBeatMatcherNoteFor(entityId)) return null;
+  const found = findBeatMatcherNote(beatMatcherStateFor(entityId), noteId);
+  return found ? found.note : null;
+}
+
+// Up/Down keyboard shortcut: moves the selected note exactly one semitone. A
+// null pitch ("X") has nothing to offset from, so the first press instead
+// reveals a concrete starting point at DEFAULT_SEED_PITCH regardless of
+// direction — only the second and later presses actually move by a
+// semitone.
+export function nudgeSelectedBeatMatcherNotePitch(direction: -1 | 1): void {
+  const note = selectedBeatMatcherNoteObject();
+  if (!note) return;
+  closeBeatMatcherVelocitySlider();
+  note.pitch = note.pitch === null ? DEFAULT_SEED_PITCH : clamp(note.pitch + direction, 0, 127);
+}
+
+// a-g keyboard shortcut: sets the selected note's pitch CLASS (0=C .. 11=B)
+// while leaving its octave alone — mirrors setSelectedBeatMatcherNotePitchOctave
+// below. A null pitch has no octave to keep, so it seeds from
+// DEFAULT_SEED_PITCH's own octave first.
+export function setSelectedBeatMatcherNotePitchClass(pitchClass: number): void {
+  const note = selectedBeatMatcherNoteObject();
+  if (!note) return;
+  closeBeatMatcherVelocitySlider();
+  const band = Math.floor((note.pitch ?? DEFAULT_SEED_PITCH) / 12);
+  note.pitch = clamp(band * 12 + pitchClass, 0, 127);
+}
+
+// 0-9 keyboard shortcut: sets the selected note's octave (as in "C4") while
+// leaving its pitch class alone. A null pitch has no pitch class to keep,
+// so it seeds to C.
+export function setSelectedBeatMatcherNotePitchOctave(octave: number): void {
+  const note = selectedBeatMatcherNoteObject();
+  if (!note) return;
+  closeBeatMatcherVelocitySlider();
+  const pitchClass = note.pitch === null ? 0 : ((note.pitch % 12) + 12) % 12;
+  note.pitch = clamp((octave + 1) * 12 + pitchClass, 0, 127);
+}
+
+// '#' keyboard shortcut: raises the selected note by a semitone, same as
+// nudgeSelectedBeatMatcherNotePitch(1) once a pitch already exists — a sharp
+// only makes sense applied to an actual note, so (unlike the arrow key) this
+// has no null-pitch seed of its own.
+export function sharpenSelectedBeatMatcherNote(): void {
+  const note = selectedBeatMatcherNoteObject();
+  if (!note || note.pitch === null) return;
+  closeBeatMatcherVelocitySlider();
+  note.pitch = clamp(note.pitch + 1, 0, 127);
+}
+
+// --- Velocity slider ---------------------------------------------------
+// Velocity itself is represented on the note's own body (opacity + a
+// centered percentage — see drawBeatMatcherNote). Clicking that percentage,
+// only reachable while the note is selected, reveals a small vertical
+// slider floating above the note — same shape as ui/sequencer.ts's own
+// toggleVelocitySlider/velocitySliderOpenFor.
+
+const VELOCITY_SLIDER_HIT_WIDTH = 14;
+const VELOCITY_SLIDER_HEIGHT = 50;
+const VELOCITY_SLIDER_HIT_MARGIN = 5;
+
+// A vertical fader track — same shape as ui/sequencer.ts's own
+// VelocityTrack, kept separate (and separately named) rather than shared
+// since this one is never resolved from a control spec.
+export interface BeatMatcherVelocityTrack {
+  x: number;
+  top: number;
+  bottom: number;
+}
+
+// Positions the track so the point representing `velocity` lands exactly at
+// `pointer` — same "the handle appears right where the cursor already is"
+// reasoning as ui/sequencer.ts's own velocityDragTrackAtPointer.
+export function beatMatcherVelocityDragTrackAtPointer(pointer: Point, velocity: number): BeatMatcherVelocityTrack {
+  const bottom = pointer.y + velocity * VELOCITY_SLIDER_HEIGHT;
+  return { x: pointer.x, top: bottom - VELOCITY_SLIDER_HEIGHT, bottom };
+}
+
+// Absolute-position "fader" set against an already-resolved, FIXED track —
+// same reasoning as ui/sequencer.ts's own setNoteVelocityFromTrack.
+export function setBeatMatcherNoteVelocityFromTrack(entityId: string, noteId: string, track: BeatMatcherVelocityTrack, y: number): void {
+  const found = findBeatMatcherNote(beatMatcherStateFor(entityId), noteId);
+  if (!found) return;
+  const fraction = 1 - (y - track.top) / (track.bottom - track.top);
+  found.note.velocity = clamp(fraction, 0, 1);
+}
+
+// Returns the track to start dragging against if the slider ended up open
+// (vs. null, having just been dismissed) — same shape as
+// ui/sequencer.ts's own toggleVelocitySlider.
+export function toggleBeatMatcherVelocitySlider(noteId: string, openAtTrack: BeatMatcherVelocityTrack): BeatMatcherVelocityTrack | null {
+  if (velocitySliderOpen && velocitySliderOpen.noteId === noteId) {
+    velocitySliderOpen = null;
+    return null;
+  }
+  velocitySliderOpen = { noteId, track: openAtTrack };
+  return openAtTrack;
+}
+
+// The slider's current track, if it's open for this note — the single
+// source of truth for both drawing and hit-testing.
+export function beatMatcherVelocitySliderOpenFor(noteId: string): BeatMatcherVelocityTrack | null {
+  return velocitySliderOpen && velocitySliderOpen.noteId === noteId ? velocitySliderOpen.track : null;
+}
+
+// Unconditionally dismisses the slider, regardless of which note (if any)
+// it's open for — every action on the selected note other than dragging the
+// slider itself calls this, same as ui/sequencer.ts's own closeVelocitySlider.
+export function closeBeatMatcherVelocitySlider(): void {
+  velocitySliderOpen = null;
+}
+
+function drawBeatMatcherVelocitySlider(
+  ctx: CanvasRenderingContext2D,
+  state: BeatMatcherState,
+  noteId: string,
+  track: BeatMatcherVelocityTrack
+): void {
+  const note = state.notes.find((n) => n.id === noteId);
+  if (!note) return;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(track.x, track.top);
+  ctx.lineTo(track.x, track.bottom);
+  ctx.stroke();
+
+  const thumbY = track.bottom - note.velocity * (track.bottom - track.top);
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(track.x - 7, thumbY);
+  ctx.lineTo(track.x + 7, thumbY);
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`velocity ${Math.round(note.velocity * 100)}%`, track.x, track.top - 6);
+  ctx.restore();
+}
+
+function hitTestBeatMatcherVelocitySlider(track: BeatMatcherVelocityTrack, point: Point): boolean {
+  return (
+    point.x >= track.x - VELOCITY_SLIDER_HIT_WIDTH / 2 - VELOCITY_SLIDER_HIT_MARGIN &&
+    point.x <= track.x + VELOCITY_SLIDER_HIT_WIDTH / 2 + VELOCITY_SLIDER_HIT_MARGIN &&
+    point.y >= track.top - VELOCITY_SLIDER_HIT_MARGIN &&
+    point.y <= track.bottom + VELOCITY_SLIDER_HIT_MARGIN
+  );
+}
+
+// --- Duplicate button ----------------------------------------------------
+// A small "+" just past the selected note's own right edge, for
+// duplicateSelectedBeatMatcherNote — same shape as ui/sequencer.ts's own
+// duplicate button.
+
+const DUPLICATE_BUTTON_RADIUS = 5;
+const DUPLICATE_BUTTON_GAP = 12;
+
+function duplicateButtonPosition(grid: Grid, pxPerSec: number, state: BeatMatcherState, noteId: string): Point | null {
+  const note = state.notes.find((n) => n.id === noteId);
+  if (!note) return null;
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  if (right < grid.left || right > grid.right) return null;
+  const x = right + DUPLICATE_BUTTON_GAP;
+  if (x + DUPLICATE_BUTTON_RADIUS > grid.right) return null;
+  return { x, y: (grid.trackTop + grid.trackBottom) / 2 };
+}
+
+function hitTestDuplicateButton(
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  selected: { noteId: string } | null,
+  point: Point
+): boolean {
+  if (!selected) return false;
+  const center = duplicateButtonPosition(grid, pxPerSec, state, selected.noteId);
+  return !!center && dist(point, center) <= DUPLICATE_BUTTON_RADIUS + 3;
+}
+
+function drawDuplicateButton(ctx: CanvasRenderingContext2D, center: Point): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, DUPLICATE_BUTTON_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fill();
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.lineCap = 'round';
+  const s = DUPLICATE_BUTTON_RADIUS * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(center.x - s, center.y);
+  ctx.lineTo(center.x + s, center.y);
+  ctx.moveTo(center.x, center.y - s);
+  ctx.lineTo(center.x, center.y + s);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// --- Note envelope shape ----------------------------------------------
+// Draggable ADSR-style handles on the currently-selected note, same
+// HandleKind names as ui/organelle.ts's own envelope organelle (imported
+// directly rather than redefining an identical type) — but a separate,
+// much smaller geometry: this shape always fits entirely inside the note's
+// own [onset, onset+duration] box, the way a DAW clip's fade handles never
+// extend past the clip itself. Same shape as ui/sequencer.ts's own note
+// envelope, independent code (see this file's own header).
+
+const NOTE_CURVE_COLOR = 'rgba(255, 235, 205, 0.9)'; // warm, matching NOTE_COLOR's own family
+const NOTE_HANDLE_RADIUS = 3.5;
+const NOTE_HANDLE_HIT_RADIUS = 7;
+const NOTE_SEED_HANDLE_RADIUS = 2;
+const NOTE_SEED_HANDLE_COLOR = 'rgba(255, 255, 255, 0.35)';
+const NOTE_VERTICAL_INSET = 6; // keeps a note visually clear of the track row's own top/bottom edge
+
+// The envelope every note starts as before its first edit — attack=0,
+// decay=0, release=0 and sustain=1 is a no-op shape, which conveniently
+// also means its attackPeak/decayCorner sit exactly at the note's own
+// top-left corner and its releaseStart sits exactly at the top-right —
+// precisely where the two subtle "seed" handles are drawn/hit-tested for a
+// note with no envelope yet. Same as ui/sequencer.ts's own IDENTITY_ENVELOPE.
+const IDENTITY_ENVELOPE: BeatMatcherNoteEnvelope = { attack: 0, decay: 0, sustain: 1, release: 0 };
+
+interface NoteEnvelopePoints {
+  start: Point;
+  attackPeak: Point;
+  decayCorner: Point;
+  releaseStart: Point;
+  end: Point;
+}
+
+function noteEnvelopePoints(left: number, right: number, top: number, bottom: number, envelope: BeatMatcherNoteEnvelope): NoteEnvelopePoints {
+  const width = right - left;
+  const height = bottom - top;
+  const sustainY = top + (1 - envelope.sustain) * height;
+  return {
+    start: { x: left, y: bottom },
+    attackPeak: { x: left + envelope.attack * width, y: top },
+    decayCorner: { x: left + (envelope.attack + envelope.decay) * width, y: sustainY },
+    releaseStart: { x: right - envelope.release * width, y: sustainY },
+    end: { x: right, y: bottom },
+  };
+}
+
+// The envelope's own gain (0..1) at `fraction` (0..1) across the note's own
+// [onset, onset+duration] — used by drawEnvelopeCrossingDot to trace the
+// live playhead along the curve exactly. Same as ui/sequencer.ts's own
+// envelopeValueAtFraction.
+function envelopeValueAtFraction(envelope: BeatMatcherNoteEnvelope, fraction: number): number {
+  const decayEnd = envelope.attack + envelope.decay;
+  const releaseStart = 1 - envelope.release;
+  if (fraction <= envelope.attack) {
+    return envelope.attack > 0 ? fraction / envelope.attack : 1;
+  }
+  if (fraction <= decayEnd) {
+    const local = envelope.decay > 0 ? (fraction - envelope.attack) / envelope.decay : 1;
+    return 1 - local * (1 - envelope.sustain);
+  }
+  if (fraction <= releaseStart) {
+    return envelope.sustain;
+  }
+  const local = envelope.release > 0 ? (fraction - releaseStart) / envelope.release : 1;
+  return envelope.sustain * (1 - local);
+}
+
+function drawNoteEnvelopeHandle(ctx: CanvasRenderingContext2D, p: Point, active: boolean): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, active ? NOTE_HANDLE_RADIUS + 1 : NOTE_HANDLE_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = active ? ACCENT : NOTE_CURVE_COLOR;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawNoteSeedHandle(ctx: CanvasRenderingContext2D, p: Point, active: boolean): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, active ? NOTE_SEED_HANDLE_RADIUS + 1 : NOTE_SEED_HANDLE_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = active ? ACCENT : NOTE_SEED_HANDLE_COLOR;
+  ctx.fill();
+  ctx.restore();
+}
+
+// Selected-note body: a note with no envelope yet keeps its plain flat
+// fill, with only the two subtle seed handles drawn on top. Once an
+// envelope exists (first touch of either seed handle — see
+// setBeatMatcherNoteEnvelopeFromHandle), the full ADSR polyline becomes the
+// note's own body instead, with all three real handles. Same as
+// ui/sequencer.ts's own drawNoteEnvelopeShape.
+function drawNoteEnvelopeShape(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  note: BeatMatcherNote,
+  activeHandle: HandleKind | null,
+  showHandles: boolean
+): void {
+  if (!note.envelope) {
+    ctx.save();
+    ctx.fillStyle = NOTE_COLOR;
+    ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
+    ctx.restore();
+    if (showHandles) {
+      const pts = noteEnvelopePoints(left, right, top, bottom, IDENTITY_ENVELOPE);
+      drawNoteSeedHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+      drawNoteSeedHandle(ctx, pts.releaseStart, activeHandle === 'release');
+    }
+    return;
+  }
+
+  const pts = noteEnvelopePoints(left, right, top, bottom, note.envelope);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(pts.start.x, pts.start.y);
+  ctx.lineTo(pts.attackPeak.x, pts.attackPeak.y);
+  ctx.lineTo(pts.decayCorner.x, pts.decayCorner.y);
+  ctx.lineTo(pts.releaseStart.x, pts.releaseStart.y);
+  ctx.lineTo(pts.end.x, pts.end.y);
+  ctx.lineTo(pts.end.x, bottom);
+  ctx.closePath();
+  ctx.fillStyle = NOTE_COLOR;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(pts.start.x, pts.start.y);
+  ctx.lineTo(pts.attackPeak.x, pts.attackPeak.y);
+  ctx.lineTo(pts.decayCorner.x, pts.decayCorner.y);
+  ctx.lineTo(pts.releaseStart.x, pts.releaseStart.y);
+  ctx.lineTo(pts.end.x, pts.end.y);
+  ctx.strokeStyle = NOTE_CURVE_COLOR;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  if (showHandles) {
+    drawNoteEnvelopeHandle(ctx, pts.attackPeak, activeHandle === 'attack');
+    drawNoteEnvelopeHandle(ctx, pts.decayCorner, activeHandle === 'decaySustain');
+    drawNoteEnvelopeHandle(ctx, pts.releaseStart, activeHandle === 'release');
+  }
+}
+
+// The live playhead's own position on the envelope curve, while a note is
+// being crossed — traces the actual shape via envelopeValueAtFraction,
+// same as ui/sequencer.ts's own drawEnvelopeCrossingDot.
+function drawEnvelopeCrossingDot(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  envelope: BeatMatcherNoteEnvelope,
+  fraction: number
+): void {
+  const clamped = Math.min(1, Math.max(0, fraction));
+  const x = left + clamped * (right - left);
+  const value = envelopeValueAtFraction(envelope, clamped);
+  const y = top + (1 - value) * (bottom - top);
+  ctx.save();
+  ctx.shadowColor = ACCENT;
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = shadeColor(ACCENT, 1.6);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Before an envelope exists, only the two seed handles (attack/release) are
+// reachable — same as ui/sequencer.ts's own hitTestNoteEnvelopeHandle.
+function hitTestNoteEnvelopeHandle(
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  selected: { noteId: string } | null,
+  point: Point
+): HandleKind | null {
+  if (!selected) return null;
+  const note = state.notes.find((n) => n.id === selected.noteId);
+  if (!note) return null;
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  const top = grid.trackTop + NOTE_VERTICAL_INSET;
+  const bottom = grid.trackBottom - NOTE_VERTICAL_INSET;
+  const pts = noteEnvelopePoints(left, right, top, bottom, note.envelope ?? IDENTITY_ENVELOPE);
+
+  if (dist(point, pts.attackPeak) <= NOTE_HANDLE_HIT_RADIUS) return 'attack';
+  if (note.envelope && dist(point, pts.decayCorner) <= NOTE_HANDLE_HIT_RADIUS) return 'decaySustain';
+  if (dist(point, pts.releaseStart) <= NOTE_HANDLE_HIT_RADIUS) return 'release';
+  return null;
+}
+
+// True while the decay/sustain handle sits exactly on top of the attack
+// handle — same as ui/sequencer.ts's own attackDecayHandlesCoincide, used
+// by ui/interaction.ts to decide whether a press on 'attack' needs to stay
+// ambiguous (resolved by drag direction) rather than committing immediately.
+export function beatMatcherAttackDecayHandlesCoincide(entityId: string, noteId: string): boolean {
+  const found = findBeatMatcherNote(beatMatcherStateFor(entityId), noteId);
+  const envelope = found?.note.envelope;
+  return !envelope || (envelope.decay === 0 && envelope.sustain === 1);
+}
+
+// Absolute-position drag, same shape as setBeatMatcherNoteVelocityFromTrack
+// — the handle's new value IS wherever the pointer currently is, converted
+// back through the note's own box geometry. Same as ui/sequencer.ts's own
+// setNoteEnvelopeFromHandle.
+export function setBeatMatcherNoteEnvelopeFromHandle(
+  graph: EntityGraph,
+  entityId: string,
+  noteId: string,
+  handle: HandleKind,
+  point: Point,
+  drag?: DragContext
+): void {
+  const grid = resolveBeatMatcherGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = beatMatcherStateFor(entityId);
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found) return;
+  const note = found.note;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  const width = right - left;
+  if (width <= 0) return;
+
+  // First touch of either seed handle materializes the envelope (as the
+  // identity shape) before applying this specific handle's own drag on top
+  // of it, so touching just one handle doesn't also jump the other,
+  // still-untouched dimensions to some arbitrary default.
+  if (!note.envelope) note.envelope = { ...IDENTITY_ENVELOPE };
+  const envelope = note.envelope;
+
+  if (handle === 'attack') {
+    envelope.attack = clamp((point.x - left) / width, 0, 1 - envelope.decay - envelope.release);
+    return;
+  }
+
+  // Both release and decaySustain sit on the flat sustain line, so a
+  // vertical drag on either one raises/lowers that same line — moving the
+  // OTHER handle right along with it, since they share this one y value.
+  const top = grid.trackTop + NOTE_VERTICAL_INSET;
+  const bottom = grid.trackBottom - NOTE_VERTICAL_INSET;
+  envelope.sustain = clamp(1 - (point.y - top) / (bottom - top), 0, 1);
+
+  if (handle === 'release') {
+    envelope.release = clamp((right - point.x) / width, 0, 1 - envelope.attack - envelope.decay);
+  } else {
+    const attackPeakX = left + envelope.attack * width;
+    envelope.decay = clamp((point.x - attackPeakX) / width, 0, 1 - envelope.attack - envelope.release);
+  }
 }
 
 // --- Grid / zoom / scroll ------------------------------------------------
@@ -871,6 +1554,34 @@ function hitTestNoteTrack(grid: Grid, pxPerSec: number, state: BeatMatcherState,
   return null;
 }
 
+const NOTE_LABEL_HALF_GAP = 3; // px from the note's own horizontal center to where the pitch/velocity text starts, on either side of the colon
+
+// Shared by hitTestVelocityText below: the note's own visible left/right/
+// center-y, or null if it's not currently on screen or too narrow for the
+// "pitch:velocity" label to be drawn at all (matching drawBeatMatcherNote's
+// own >= 14px cutoff) — same as ui/sequencer.ts's own noteLabelGeometry.
+function noteLabelGeometry(grid: Grid, pxPerSec: number, state: BeatMatcherState, noteId: string): { cx: number; cy: number } | null {
+  const note = state.notes.find((n) => n.id === noteId);
+  if (!note) return null;
+  const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
+  const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
+  if (right < grid.left || left > grid.right || right - left < 14) return null;
+  return { cx: (left + right) / 2, cy: (grid.trackTop + grid.trackBottom) / 2 };
+}
+
+// The percentage half of the centered label, just right of the colon — same
+// as ui/sequencer.ts's own hitTestVelocityText.
+function hitTestVelocityText(grid: Grid, pxPerSec: number, state: BeatMatcherState, selected: { noteId: string } | null, point: Point): boolean {
+  if (!selected) return false;
+  const geometry = noteLabelGeometry(grid, pxPerSec, state, selected.noteId);
+  if (!geometry) return false;
+  return (
+    point.x >= geometry.cx + NOTE_LABEL_HALF_GAP &&
+    point.x <= geometry.cx + NOTE_LABEL_HALF_GAP + 20 &&
+    Math.abs(point.y - geometry.cy) <= 7
+  );
+}
+
 // Where a just-dropped entity should actually come to rest, clear of the
 // popup's own bounds — landing it exactly at the release point (necessarily
 // somewhere inside the popup's interior, since that's the only place the
@@ -1067,6 +1778,10 @@ export type BeatMatcherHit =
   | { entityId: string; kind: 'noteResizeRight'; noteId: string }
   | { entityId: string; kind: 'noteMove'; noteId: string; grabOffsetSeconds: number }
   | { entityId: string; kind: 'noteCreate' }
+  | { entityId: string; kind: 'noteDuplicateButton'; noteId: string }
+  | { entityId: string; kind: 'noteVelocityTextClick'; noteId: string }
+  | { entityId: string; kind: 'noteVelocitySliderDrag'; noteId: string }
+  | { entityId: string; kind: 'noteEnvelopeHandle'; noteId: string; handle: HandleKind }
   | { entityId: string; kind: 'axisZoomIn' }
   | { entityId: string; kind: 'axisZoomOut' }
   | { entityId: string; kind: 'axisHandle' }
@@ -1124,6 +1839,33 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
       }
       if (hitTestEndMarkerBand(grid, pxPerSec, state, point)) {
         return { entityId: entity.id, kind: 'endMarkerDrag', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
+      }
+
+      // Every check below is only ever reachable for the CURRENT selection
+      // (nothing of this shape is drawn for any other note) — same priority
+      // order as ui/sequencer.ts's own hitTestSequencerPopup: duplicate
+      // button, then envelope handles, then the velocity slider (if open),
+      // then the velocity-text click, all ahead of a plain note grab.
+      const currentSelection = selectedBeatMatcherNoteFor(entity.id);
+
+      if (hitTestDuplicateButton(grid, pxPerSec, state, currentSelection, point)) {
+        return { entityId: entity.id, kind: 'noteDuplicateButton', noteId: currentSelection!.noteId };
+      }
+
+      const envelopeHandle = hitTestNoteEnvelopeHandle(grid, pxPerSec, state, currentSelection, point);
+      if (envelopeHandle && currentSelection) {
+        return { entityId: entity.id, kind: 'noteEnvelopeHandle', noteId: currentSelection.noteId, handle: envelopeHandle };
+      }
+
+      if (currentSelection) {
+        const openTrack = beatMatcherVelocitySliderOpenFor(currentSelection.noteId);
+        if (openTrack && hitTestBeatMatcherVelocitySlider(openTrack, point)) {
+          return { entityId: entity.id, kind: 'noteVelocitySliderDrag', noteId: currentSelection.noteId };
+        }
+      }
+
+      if (hitTestVelocityText(grid, pxPerSec, state, currentSelection, point)) {
+        return { entityId: entity.id, kind: 'noteVelocityTextClick', noteId: currentSelection!.noteId };
       }
 
       const noteHit = hitTestNoteTrack(grid, pxPerSec, state, point);
@@ -1444,13 +2186,121 @@ function drawInfoOverlay(ctx: CanvasRenderingContext2D, popup: Rect, state: Beat
 
 const NOTE_COLOR = '#c98a3c'; // matches ACCENT (ui/palette.ts) — this track's only kind of mark, no per-channel color needed
 const NOTE_EDGE_COLOR = 'rgba(0, 0, 0, 0.5)';
+const NOTE_DIMMED_ALPHA = 0.25; // how far a non-selected note fades once something else is selected — same as ui/sequencer.ts's own
+// Velocity 0 fades a note almost (not quite) out of view; velocity 1 leaves
+// it exactly as dimmed/selected would otherwise render it — same as
+// ui/sequencer.ts's own MIN_VELOCITY_ALPHA_FACTOR.
+const MIN_VELOCITY_ALPHA_FACTOR = 0.4;
+
+// A single note's body — the plain flat fill (or, once selected/shaped, its
+// own ADSR shape via drawNoteEnvelopeShape), a "pitch:velocity" readout, the
+// selected-note outline (narrowed to just one edge when a keyboard nudge is
+// focused there), and a glowing crossing highlight while the playhead is
+// actually inside it. Same shape as ui/sequencer.ts's own drawSequencerNote.
+function drawBeatMatcherNote(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+  note: BeatMatcherNote,
+  selected: boolean,
+  dimmed: boolean,
+  activeEnvelopeHandle: HandleKind | null,
+  edgeFocus: 'left' | 'right' | null,
+  // 0..1 while the playhead is currently somewhere inside this note (null
+  // otherwise) — how far across its own [onset, onset+duration] that is.
+  playingFraction: number | null
+): void {
+  const baseAlpha = dimmed ? NOTE_DIMMED_ALPHA : 1;
+  const velocityAlpha = MIN_VELOCITY_ALPHA_FACTOR + (1 - MIN_VELOCITY_ALPHA_FACTOR) * note.velocity;
+
+  ctx.save();
+  ctx.globalAlpha = baseAlpha * velocityAlpha;
+  if (selected || (playingFraction !== null && note.envelope)) {
+    drawNoteEnvelopeShape(ctx, left, right, top, bottom, note, activeEnvelopeHandle, selected);
+  } else {
+    ctx.fillStyle = NOTE_COLOR;
+    ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
+  }
+  ctx.strokeStyle = NOTE_EDGE_COLOR;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(left, top, Math.max(1, right - left), bottom - top);
+  ctx.restore();
+
+  // A "pitch:velocity" readout, colon fixed at the note's own horizontal
+  // center — same as ui/sequencer.ts's own drawSequencerNote.
+  const showPitchText = selected || note.pitch !== null;
+  const showVelocityText = selected || note.velocity !== DEFAULT_NOTE_VELOCITY;
+  if ((showPitchText || showVelocityText) && right - left >= 14) {
+    const cx = (left + right) / 2;
+    const cy = (top + bottom) / 2;
+    ctx.save();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.font = '7px monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillText(':', cx, cy);
+    if (showPitchText) {
+      ctx.textAlign = 'right';
+      ctx.fillText(note.pitch === null ? 'X' : midiNoteName(note.pitch), cx - NOTE_LABEL_HALF_GAP, cy);
+    }
+    if (showVelocityText) {
+      ctx.textAlign = 'left';
+      ctx.fillText(`${Math.round(note.velocity * 100)}%`, cx + NOTE_LABEL_HALF_GAP, cy);
+    }
+    ctx.restore();
+  }
+
+  if (selected) {
+    ctx.save();
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 2;
+    if (edgeFocus === 'left') {
+      ctx.beginPath();
+      ctx.moveTo(left + 1, top + 1);
+      ctx.lineTo(left + 1, bottom - 1);
+      ctx.stroke();
+    } else if (edgeFocus === 'right') {
+      ctx.beginPath();
+      ctx.moveTo(right - 1, top + 1);
+      ctx.lineTo(right - 1, bottom - 1);
+      ctx.stroke();
+    } else {
+      ctx.strokeRect(left + 1, top + 1, Math.max(1, right - left) - 2, bottom - top - 2);
+    }
+    ctx.restore();
+  }
+
+  if (playingFraction !== null) {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.shadowColor = ACCENT;
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(left, top, Math.max(1, right - left), bottom - top);
+    ctx.restore();
+    if (note.envelope) {
+      drawEnvelopeCrossingDot(ctx, left, right, top, bottom, note.envelope, playingFraction);
+    }
+  }
+}
 
 // The track row once there's a capture to author against — paint-a-note
 // blocks aligned to the same fit-to-width timeline the spectrogram/ruler
 // use, drawn in its own dedicated row (see drawBeatMatcherPopup) rather
 // than overlaid on the spectrogram image itself, so notes stay legible
 // regardless of what's under them.
-function drawBeatMatcherNoteTrack(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+function drawBeatMatcherNoteTrack(
+  ctx: CanvasRenderingContext2D,
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  selected: { noteId: string } | null,
+  activeEnvelopeHandle: HandleKind | null
+): void {
   const rowTop = grid.trackTop;
   ctx.save();
   ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
@@ -1464,26 +2314,31 @@ function drawBeatMatcherNoteTrack(ctx: CanvasRenderingContext2D, grid: Grid, pxP
   ctx.rect(grid.left, rowTop, grid.right - grid.left, TRACK_ROW_HEIGHT);
   ctx.clip();
 
-  const noteTop = rowTop + 6;
-  const noteHeight = TRACK_ROW_HEIGHT - 12;
+  const noteTop = rowTop + NOTE_VERTICAL_INSET;
+  const noteBottom = rowTop + TRACK_ROW_HEIGHT - NOTE_VERTICAL_INSET;
   const playhead = currentBeatMatcherPlaybackSeconds(state);
 
   for (const note of state.notes) {
     const left = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds);
     const right = secondsToX(grid, pxPerSec, state.scrollSeconds, note.onsetSeconds + note.durationSeconds);
     if (right < grid.left || left > grid.right) continue;
-    const width = Math.max(2, right - left);
-    // A brief brightening while the playhead is actually crossing it — same
-    // "highlight whatever the cursor is currently over" idea as
-    // ui/sequencer.ts's own playingFraction, just a flat highlight rather
-    // than a wipe (this track has no per-note envelope to visualize a
-    // progress fraction against).
+    const isSelected = note.id === selected?.noteId;
+    const dimmed = selected !== null && !isSelected;
     const crossing = state.playing && playhead >= note.onsetSeconds && playhead < note.onsetSeconds + note.durationSeconds;
-    ctx.fillStyle = crossing ? shadeColor(NOTE_COLOR, 1.5) : NOTE_COLOR;
-    ctx.fillRect(left, noteTop, width, noteHeight);
-    ctx.strokeStyle = NOTE_EDGE_COLOR;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(left, noteTop, width, noteHeight);
+    const playingFraction = crossing ? (playhead - note.onsetSeconds) / note.durationSeconds : null;
+    drawBeatMatcherNote(
+      ctx,
+      left,
+      right,
+      noteTop,
+      noteBottom,
+      note,
+      isSelected,
+      dimmed,
+      isSelected ? activeEnvelopeHandle : null,
+      isSelected ? selectedBeatMatcherNoteEdgeFocus(note.id) : null,
+      playingFraction
+    );
   }
   ctx.restore();
 
@@ -1839,6 +2694,7 @@ export function drawBeatMatcherPopup(
   owner: Entity,
   isDropHover: boolean,
   isAxisDragging: boolean,
+  activeEnvelopeHandle: HandleKind | null,
   now: number,
   drag?: DragContext
 ): void {
@@ -1904,8 +2760,10 @@ export function drawBeatMatcherPopup(
   // header). The info text only reappears on demand from there, via the
   // record button, drawn on top of the track (never both at once — see
   // pressBeatMatcherRecordButton).
+  const selectedNote = hasCapture ? selectedBeatMatcherNoteFor(entity.id) : null;
+
   if (hasCapture) {
-    drawBeatMatcherNoteTrack(ctx, grid, pxPerSec, state);
+    drawBeatMatcherNoteTrack(ctx, grid, pxPerSec, state, selectedNote, activeEnvelopeHandle);
   } else {
     drawInlineCaptureInfo(ctx, popup, bodyTop, source, state);
   }
@@ -1921,6 +2779,21 @@ export function drawBeatMatcherPopup(
     drawZoomIcon(ctx, axisZoomInIconPosition(grid), 'in');
     drawZoomIcon(ctx, axisZoomOutIconPosition(grid), 'out');
     drawBeatMatcherHScrollbar(ctx, grid, state);
+
+    // The selected note's own velocity slider (if open) and duplicate
+    // button — floating above/beside the note itself, so drawn here rather
+    // than inside drawBeatMatcherNoteTrack's own clip region, same as
+    // ui/sequencer.ts's own drawSequencerGrid.
+    if (selectedNote) {
+      const openTrack = beatMatcherVelocitySliderOpenFor(selectedNote.noteId);
+      if (openTrack) {
+        drawBeatMatcherVelocitySlider(ctx, state, selectedNote.noteId, openTrack);
+      }
+      const duplicateButton = duplicateButtonPosition(grid, pxPerSec, state, selectedNote.noteId);
+      if (duplicateButton) {
+        drawDuplicateButton(ctx, duplicateButton);
+      }
+    }
   }
 
   // Drawn last, on top of everything else in the plot, rather than

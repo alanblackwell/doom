@@ -27,6 +27,7 @@
 import { getAudioContext } from './context';
 import { getMasterChain } from './master';
 import { activateEventTarget, releaseEntity } from './graph';
+import type { TriggerOverrides } from './graph';
 import { getEventWiresFrom } from '../ui/eventWiring';
 import { recordSourcePulse } from '../ui/eventPulse';
 import type { InteractionState } from '../ui/interaction';
@@ -36,7 +37,7 @@ import {
   flashBeatMatcherCursor,
   toggleBeatMatcherPlayback,
 } from '../ui/beatMatcher';
-import type { BeatMatcherState } from '../ui/beatMatcher';
+import type { BeatMatcherNote, BeatMatcherState } from '../ui/beatMatcher';
 
 const LOOKAHEAD_INTERVAL_MS = 25;
 
@@ -140,7 +141,7 @@ function getTickNoiseBuffer(ctx: AudioContext): AudioBuffer {
 // falls) — AudioBufferSourceNode.start()/AudioParam automation both treat
 // a past `when` as "now" per spec, so no explicit clamp is needed the way
 // startVoice's buffer offset below needs one.
-function playBeatMatcherTick(when: number): void {
+function playBeatMatcherTick(when: number, velocity: number): void {
   const ctx = getAudioContext();
   const noise = ctx.createBufferSource();
   noise.buffer = getTickNoiseBuffer(ctx);
@@ -151,7 +152,10 @@ function playBeatMatcherTick(when: number): void {
   bandpass.Q.value = TICK_Q;
 
   const gain = ctx.createGain();
-  gain.gain.setValueAtTime(0.9, when);
+  // Scaled by the note's own velocity (ui/beatMatcher.ts's BeatMatcherNote)
+  // — floored well above 0 so exponentialRampToValueAtTime below always has
+  // a nonzero value to ramp from, even at velocity 0.
+  gain.gain.setValueAtTime(Math.max(0.0001, 0.9 * velocity), when);
   gain.gain.exponentialRampToValueAtTime(0.001, when + TICK_DECAY_SECONDS);
 
   noise.connect(bandpass);
@@ -193,6 +197,30 @@ function deferToCtxTime(targetCtxTime: number, callback: () => void): void {
   setTimeout(callback, delayMs);
 }
 
+// A4 (440Hz) is MIDI 69 — standard equal-temperament conversion, same
+// formula as audio/sequencerPlayer.ts's own midiToHz, duplicated locally
+// rather than shared per this file's own header on staying independent.
+function midiToHz(midi: number): number {
+  return 440 * 2 ** ((midi - 69) / 12);
+}
+
+// A note's pitch/velocity/envelope, converted into audio/graph.ts's own
+// units — same conversion as audio/sequencerPlayer.ts's own overridesForNote,
+// duplicated locally per this file's own header.
+function overridesForNote(note: BeatMatcherNote): TriggerOverrides {
+  const overrides: TriggerOverrides = { velocity: note.velocity };
+  if (note.pitch !== null) overrides.pitchHz = midiToHz(note.pitch);
+  if (note.envelope) {
+    overrides.envelope = {
+      attack: note.envelope.attack * note.durationSeconds,
+      decay: note.envelope.decay * note.durationSeconds,
+      sustain: note.envelope.sustain,
+      release: note.envelope.release * note.durationSeconds,
+    };
+  }
+  return overrides;
+}
+
 function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
   if (!state.playing || !state.capturedBuffer) {
     entry.dispatchedUpTo = state.pausedAtSeconds;
@@ -220,27 +248,30 @@ function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
   for (const note of state.notes) {
     if (note.onsetSeconds >= entry.dispatchedUpTo && note.onsetSeconds < horizon) {
       const onsetCtxTime = ctxTimeForClipSeconds(state, note.onsetSeconds);
-      const releaseCtxTime = ctxTimeForClipSeconds(state, note.onsetSeconds + note.durationSeconds);
+      const overrides = overridesForNote(note);
+      // With a custom envelope, this lands the release ramp's completion
+      // exactly on the note's own drawn right edge — same reasoning as
+      // audio/sequencerPlayer.ts's own dispatchNote. With no custom
+      // envelope, it's just a plain gate-off at the note's own end.
+      const releaseSeconds = note.envelope
+        ? note.onsetSeconds + note.durationSeconds * (1 - note.envelope.release)
+        : note.onsetSeconds + note.durationSeconds;
+      const releaseCtxTime = ctxTimeForClipSeconds(state, releaseSeconds);
 
-      playBeatMatcherTick(onsetCtxTime);
+      playBeatMatcherTick(onsetCtxTime, note.velocity);
       deferToCtxTime(onsetCtxTime, () => {
         flashBeatMatcherCursor(entry.featureEntityId);
         const firedAt = performance.now();
         for (const wire of wires) {
-          activateEventTarget(wire.targetEntityId);
+          activateEventTarget(wire.targetEntityId, overrides);
           // The wired target's own pad ring — see attachBeatMatcherInteraction's
           // own comment on why this needs a separately-attached reference.
           interactionState?.triggerFlashes.set(wire.targetEntityId, firedAt);
         }
         recordSourcePulse(entry.controlEntityId, firedAt); // ui/eventPulse.ts — animates any wire out of this control's own bump
       });
-      // A plain gate-off at the note's own end — this track's notes carry
-      // no envelope/pitch/velocity yet (ui/beatMatcher.ts's BeatMatcherNote
-      // is deliberately minimal), so there's nothing to pass through; a
-      // wired target with its own attached envelope still uses its own
-      // default release off this.
       deferToCtxTime(releaseCtxTime, () => {
-        for (const wire of wires) releaseEntity(wire.targetEntityId);
+        for (const wire of wires) releaseEntity(wire.targetEntityId, note.envelope ? overrides : undefined);
       });
     }
   }

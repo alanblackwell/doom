@@ -1120,6 +1120,9 @@ export function renderFrame(
           drag
         );
       } else if (feature.kind === 'beatMatcher') {
+        const beatMatcherEnvelopeDrag = interaction.beatMatcherEnvelopeDrag;
+        const activeBeatMatcherEnvelopeHandle =
+          beatMatcherEnvelopeDrag && beatMatcherEnvelopeDrag.entityId === feature.id ? beatMatcherEnvelopeDrag.handle : null;
         drawBeatMatcherPopup(
           ctx,
           graph,
@@ -1127,6 +1130,7 @@ export function renderFrame(
           owner,
           interaction.hoverBeatMatcherId === feature.id,
           interaction.draggingTimeAxis?.entityId === feature.id,
+          activeBeatMatcherEnvelopeHandle,
           now,
           drag
         );

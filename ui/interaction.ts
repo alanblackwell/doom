@@ -138,28 +138,47 @@ import {
 import type { NoteSnapState, SequencerResizeStart, VelocityTrack } from './sequencer';
 import {
   applyBeatMatcherZoomDrag,
+  beatMatcherAttackDecayHandlesCoincide,
   beatMatcherClearDropPosition,
   beatMatcherDropTargetAt,
   beatMatcherSecondsAtPoint,
   beatMatcherStateFor,
+  beatMatcherVelocityDragTrackAtPointer,
+  beatMatcherVelocitySliderOpenFor,
   beatMatcherZoomStep,
   closeBeatMatcherInfoOverlay,
+  closeBeatMatcherVelocitySlider,
   createBeatMatcherNoteAt,
   cycleBeatMatcherSpeed,
   deleteBeatMatcherNote,
+  deleteSelectedBeatMatcherNote,
+  deselectBeatMatcherNote,
+  duplicateSelectedBeatMatcherNote,
+  hasSelectedBeatMatcherNote,
   hitTestBeatMatcherPopup,
   moveBeatMatcherNote,
+  nudgeSelectedBeatMatcherNotePitch,
+  nudgeSelectedBeatMatcherNoteTime,
   pressBeatMatcherRecordButton,
   resizeBeatMatcherNoteLeft,
   resizeBeatMatcherNoteRight,
   rewindBeatMatcherPlayback,
   scrubBeatMatcherPlayback,
+  selectBeatMatcherNote,
   setBeatMatcherEnd,
+  setBeatMatcherNoteEnvelopeFromHandle,
+  setBeatMatcherNoteVelocityFromTrack,
   setBeatMatcherSource,
+  setSelectedBeatMatcherNoteEdgeFocus,
+  setSelectedBeatMatcherNotePitchClass,
+  setSelectedBeatMatcherNotePitchOctave,
+  sharpenSelectedBeatMatcherNote,
   toggleBeatMatcherLoopAtEnd,
   toggleBeatMatcherPlayback,
+  toggleBeatMatcherVelocitySlider,
   updateBeatMatcherScrollFromTrackX,
 } from './beatMatcher';
+import type { BeatMatcherVelocityTrack } from './beatMatcher';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -393,6 +412,17 @@ export interface InteractionState {
   // The beat-matcher end marker currently being dragged (ui/beatMatcher.ts's
   // setBeatMatcherEnd) — same shape as beatMatcherHScrollDrag above.
   beatMatcherEndDrag: { entityId: string } | null;
+
+  // The selected beat-matcher note's own velocity slider being dragged —
+  // same shape as sequencerVelocityDrag above (see
+  // ui/beatMatcher.ts's setBeatMatcherNoteVelocityFromTrack).
+  beatMatcherVelocityDrag: { entityId: string; noteId: string; track: BeatMatcherVelocityTrack } | null;
+
+  // The selected beat-matcher note's own envelope handle being dragged —
+  // same shape (including the attack/decaySustain ambiguity resolved by
+  // drag direction) as sequencerEnvelopeDrag above (see
+  // ui/beatMatcher.ts's setBeatMatcherNoteEnvelopeFromHandle).
+  beatMatcherEnvelopeDrag: { entityId: string; noteId: string; handle: HandleKind; pendingAxisFrom: Point | null } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -432,6 +462,8 @@ export function createInteractionState(): InteractionState {
     scrubbingBeatMatcherId: null,
     beatMatcherHScrollDrag: null,
     beatMatcherEndDrag: null,
+    beatMatcherVelocityDrag: null,
+    beatMatcherEnvelopeDrag: null,
   };
 }
 
@@ -724,6 +756,7 @@ export function attachInteraction(
     const melodyHit = hitTestMelodyPopup(graph, point);
     if (melodyHit) {
       deselectNote(); // a press elsewhere always clears the sequencer's own note selection
+      deselectBeatMatcherNote(); // ...and the beat-matcher's own, same reasoning
       const melody = melodyStateFor(melodyHit.entityId);
       switch (melodyHit.kind) {
         case 'close': {
@@ -776,6 +809,7 @@ export function attachInteraction(
     const samplerHit = hitTestSamplerPopup(graph, point);
     if (samplerHit) {
       deselectNote(); // a press elsewhere always clears the sequencer's own note selection
+      deselectBeatMatcherNote(); // ...and the beat-matcher's own, same reasoning
       switch (samplerHit.kind) {
         case 'close': {
           const feature = graph.get(samplerHit.entityId);
@@ -850,6 +884,7 @@ export function attachInteraction(
         sequencerHit.kind !== 'noteEnvelopeHandle'
       ) {
         deselectNote();
+        deselectBeatMatcherNote();
       }
       switch (sequencerHit.kind) {
         case 'close': {
@@ -1044,6 +1079,29 @@ export function attachInteraction(
     // treatment as every other feature popup here.
     const beatMatcherHit = hitTestBeatMatcherPopup(graph, point);
     if (beatMatcherHit) {
+      // Every case below re-selects its own note (noteCreate included — a
+      // beat-matcher note exists the instant it's created, unlike the
+      // sequencer's own deferred-until-drag creation, so it can be selected
+      // right away) except these four — for anything else, a press
+      // deselects whatever note was current. noteDuplicateButton doesn't
+      // itself call selectBeatMatcherNote (it hands off to
+      // duplicateSelectedBeatMatcherNote, which selects the CLONE instead)
+      // but still needs the ORIGINAL to still be selected when that runs,
+      // so it's excluded here too. Same shape as ui/sequencer.ts's own
+      // exclusion-list reasoning.
+      if (
+        beatMatcherHit.kind !== 'noteResizeLeft' &&
+        beatMatcherHit.kind !== 'noteResizeRight' &&
+        beatMatcherHit.kind !== 'noteMove' &&
+        beatMatcherHit.kind !== 'noteCreate' &&
+        beatMatcherHit.kind !== 'noteDuplicateButton' &&
+        beatMatcherHit.kind !== 'noteVelocityTextClick' &&
+        beatMatcherHit.kind !== 'noteVelocitySliderDrag' &&
+        beatMatcherHit.kind !== 'noteEnvelopeHandle'
+      ) {
+        deselectNote();
+        deselectBeatMatcherNote();
+      }
       if (beatMatcherHit.kind === 'close') {
         const feature = graph.get(beatMatcherHit.entityId);
         if (feature) feature.expanded = false;
@@ -1062,6 +1120,8 @@ export function attachInteraction(
         const noteId = seconds !== null ? createBeatMatcherNoteAt(beatMatcherHit.entityId, seconds) : null;
         if (noteId) {
           canvas.setPointerCapture(e.pointerId);
+          selectBeatMatcherNote(beatMatcherHit.entityId, noteId);
+          setSelectedBeatMatcherNoteEdgeFocus('right');
           state.beatMatcherNoteDrag = {
             entityId: beatMatcherHit.entityId,
             noteId,
@@ -1071,6 +1131,9 @@ export function attachInteraction(
         }
       } else if (beatMatcherHit.kind === 'noteMove') {
         canvas.setPointerCapture(e.pointerId);
+        selectBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+        closeBeatMatcherVelocitySlider();
+        setSelectedBeatMatcherNoteEdgeFocus(null);
         state.beatMatcherNoteDrag = {
           entityId: beatMatcherHit.entityId,
           noteId: beatMatcherHit.noteId,
@@ -1079,11 +1142,60 @@ export function attachInteraction(
         };
       } else if (beatMatcherHit.kind === 'noteResizeLeft' || beatMatcherHit.kind === 'noteResizeRight') {
         canvas.setPointerCapture(e.pointerId);
+        selectBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+        closeBeatMatcherVelocitySlider();
+        setSelectedBeatMatcherNoteEdgeFocus(beatMatcherHit.kind === 'noteResizeLeft' ? 'left' : 'right');
         state.beatMatcherNoteDrag = {
           entityId: beatMatcherHit.entityId,
           noteId: beatMatcherHit.noteId,
           mode: beatMatcherHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
           grabOffsetSeconds: 0,
+        };
+      } else if (beatMatcherHit.kind === 'noteDuplicateButton') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the transport buttons above. duplicateSelectedBeatMatcherNote
+        // resolves the note to clone from its own current selection (still
+        // the ORIGINAL here — see this branch's own exclusion-list comment)
+        // and moves the selection to the clone itself.
+        duplicateSelectedBeatMatcherNote();
+      } else if (beatMatcherHit.kind === 'noteVelocityTextClick') {
+        // Closing (already open) is a discrete toggle. Opening immediately
+        // starts a drag too, anchored at the click itself — same pattern as
+        // ui/sequencer.ts's own noteVelocityTextClick handling.
+        const currentVelocity =
+          beatMatcherStateFor(beatMatcherHit.entityId).notes.find((n) => n.id === beatMatcherHit.noteId)?.velocity ?? 1;
+        const track = toggleBeatMatcherVelocitySlider(beatMatcherHit.noteId, beatMatcherVelocityDragTrackAtPointer(point, currentVelocity));
+        if (track) {
+          canvas.setPointerCapture(e.pointerId);
+          state.beatMatcherVelocityDrag = { entityId: beatMatcherHit.entityId, noteId: beatMatcherHit.noteId, track };
+        }
+      } else if (beatMatcherHit.kind === 'noteVelocitySliderDrag') {
+        canvas.setPointerCapture(e.pointerId);
+        selectBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+        // The slider's own stored track (wherever it was opened) — reused
+        // as-is, never recomputed, so grabbing it again can't make it jump.
+        const track = beatMatcherVelocitySliderOpenFor(beatMatcherHit.noteId);
+        if (track) {
+          setBeatMatcherNoteVelocityFromTrack(beatMatcherHit.entityId, beatMatcherHit.noteId, track, point.y); // jump to the click, then keep tracking on move
+          state.beatMatcherVelocityDrag = { entityId: beatMatcherHit.entityId, noteId: beatMatcherHit.noteId, track };
+        }
+      } else if (beatMatcherHit.kind === 'noteEnvelopeHandle') {
+        canvas.setPointerCapture(e.pointerId);
+        selectBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+        closeBeatMatcherVelocitySlider();
+        // A press on 'attack' while it's stacked on the still-untouched
+        // decaySustain handle stays undecided until the drag actually moves
+        // (see pointermove) — same as ui/sequencer.ts's own handling.
+        const ambiguous =
+          beatMatcherHit.handle === 'attack' && beatMatcherAttackDecayHandlesCoincide(beatMatcherHit.entityId, beatMatcherHit.noteId);
+        if (!ambiguous) {
+          setBeatMatcherNoteEnvelopeFromHandle(graph, beatMatcherHit.entityId, beatMatcherHit.noteId, beatMatcherHit.handle, point); // jump to the click, then keep tracking on move
+        }
+        state.beatMatcherEnvelopeDrag = {
+          entityId: beatMatcherHit.entityId,
+          noteId: beatMatcherHit.noteId,
+          handle: beatMatcherHit.handle,
+          pendingAxisFrom: ambiguous ? point : null,
         };
       } else if (beatMatcherHit.kind === 'rewind') {
         rewindBeatMatcherPlayback(beatMatcherHit.entityId);
@@ -1124,10 +1236,12 @@ export function attachInteraction(
       return;
     }
 
-    // Nothing past this point is the sequencer popup or one of its notes
-    // (that branch always returned above) — a press anywhere else on the
-    // canvas always clears the sequencer's own note selection.
+    // Nothing past this point is the sequencer or beat-matcher popup, or one
+    // of their notes (those branches always returned above) — a press
+    // anywhere else on the canvas always clears both features' own note
+    // selection.
     deselectNote();
+    deselectBeatMatcherNote();
 
     // An open envelope popup (ui/organelle.ts) sits visually on top of
     // everything else on the canvas, so its own hit-test goes first — a
@@ -1416,6 +1530,27 @@ export function attachInteraction(
       const { entityId } = state.beatMatcherEndDrag;
       const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
       if (seconds !== null) setBeatMatcherEnd(entityId, seconds);
+      return;
+    }
+
+    if (state.beatMatcherVelocityDrag) {
+      const { entityId, noteId, track } = state.beatMatcherVelocityDrag;
+      setBeatMatcherNoteVelocityFromTrack(entityId, noteId, track, point.y);
+      return;
+    }
+
+    if (state.beatMatcherEnvelopeDrag) {
+      const envelopeDrag = state.beatMatcherEnvelopeDrag;
+      if (envelopeDrag.pendingAxisFrom) {
+        const dx = point.x - envelopeDrag.pendingAxisFrom.x;
+        const dy = point.y - envelopeDrag.pendingAxisFrom.y;
+        if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+        // Same axis-decision shape as sequencerEnvelopeDrag's own handling
+        // above.
+        envelopeDrag.handle = Math.abs(dy) > Math.abs(dx) && dy > 0 ? 'decaySustain' : 'attack';
+        envelopeDrag.pendingAxisFrom = null;
+      }
+      setBeatMatcherNoteEnvelopeFromHandle(graph, envelopeDrag.entityId, envelopeDrag.noteId, envelopeDrag.handle, point);
       return;
     }
 
@@ -1734,6 +1869,18 @@ export function attachInteraction(
       return;
     }
 
+    if (state.beatMatcherVelocityDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherVelocityDrag = null;
+      return;
+    }
+
+    if (state.beatMatcherEnvelopeDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherEnvelopeDrag = null;
+      return;
+    }
+
     if (state.sequencerVelocityDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.sequencerVelocityDrag = null;
@@ -1992,6 +2139,14 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
+      // Then a selected beat-matcher note, same fall-through order and
+      // null-pitch/"X" first-press special case as the sequencer's own
+      // nudgeSelectedBeatMatcherNotePitch.
+      if (hasSelectedBeatMatcherNote()) {
+        nudgeSelectedBeatMatcherNotePitch(e.code === 'ArrowUp' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       if (activeSelectedItem(graph)) {
         selectAdjacentItem(e.code === 'ArrowRight' ? 'next' : 'previous');
@@ -2013,6 +2168,12 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
+      // Then a selected beat-matcher note, same fall-through order.
+      if (hasSelectedBeatMatcherNote()) {
+        nudgeSelectedBeatMatcherNoteTime(graph, e.code === 'ArrowRight' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       if (activeSelectedItem(graph)) {
         deleteSelectedItem();
@@ -2024,10 +2185,24 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
-    } else if (e.code === 'KeyR' && hasSelectedNote()) {
+      if (hasSelectedBeatMatcherNote()) {
+        deleteSelectedBeatMatcherNote();
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code === 'KeyR' && (hasSelectedNote() || hasSelectedBeatMatcherNote())) {
       // Not in LETTER_KEY_INDEX below (C/D/E/F/G/A/B only), so this never
       // competes with the melody organelle's own letter-key note entry.
-      duplicateSelectedNote(graph);
+      // Sequencer selection takes priority, same order as every other key
+      // here — the two features' selections are mutually exclusive in
+      // practice (selecting one always deselects the other, see
+      // ui/interaction.ts's own pointerdown), so this is really just
+      // "whichever one is currently selected."
+      if (hasSelectedNote()) {
+        duplicateSelectedNote(graph);
+      } else {
+        duplicateSelectedBeatMatcherNote();
+      }
       e.preventDefault();
     } else if (e.code in LETTER_KEY_INDEX) {
       // A-G add a new natural note right after the current selection, at
@@ -2055,18 +2230,33 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         e.preventDefault();
         return;
       }
-    } else if (e.code.startsWith('Digit') && hasSelectedNote()) {
-      // 0-9 set the selected sequencer note's octave (as in "C4"), leaving
-      // its pitch class alone — see setSelectedNotePitchOctave. Gated on
-      // hasSelectedNote() up front, same shape as the KeyR/duplicate branch
-      // above, so digits stay free for tap-entity bindings otherwise.
-      setSelectedNotePitchOctave(Number(e.code.slice('Digit'.length)));
+      // Then a selected beat-matcher note, same fall-through order.
+      if (hasSelectedBeatMatcherNote()) {
+        setSelectedBeatMatcherNotePitchClass(PITCH_CLASS_KEY[e.code]);
+        e.preventDefault();
+        return;
+      }
+    } else if (e.code.startsWith('Digit') && (hasSelectedNote() || hasSelectedBeatMatcherNote())) {
+      // 0-9 set the selected note's octave (as in "C4"), leaving its pitch
+      // class alone — see setSelectedNotePitchOctave/
+      // setSelectedBeatMatcherNotePitchOctave. Gated on a selection existing
+      // up front, same shape as the KeyR/duplicate branch above, so digits
+      // stay free for tap-entity bindings otherwise.
+      if (hasSelectedNote()) {
+        setSelectedNotePitchOctave(Number(e.code.slice('Digit'.length)));
+      } else {
+        setSelectedBeatMatcherNotePitchOctave(Number(e.code.slice('Digit'.length)));
+      }
       e.preventDefault();
-    } else if (e.key === '#' && hasSelectedNote()) {
+    } else if (e.key === '#' && (hasSelectedNote() || hasSelectedBeatMatcherNote())) {
       // Checked by e.key, not e.code — '#' is a shifted character (e.g.
       // Shift+3 on a US layout), same reasoning as the '|' barline shortcut
-      // below. Raises the selected sequencer note by a semitone.
-      sharpenSelectedNote();
+      // below. Raises the selected note by a semitone.
+      if (hasSelectedNote()) {
+        sharpenSelectedNote();
+      } else {
+        sharpenSelectedBeatMatcherNote();
+      }
       e.preventDefault();
     } else if (e.code === 'Space') {
       if (activeSelectedItem(graph)) {
