@@ -72,6 +72,8 @@ import type { LevelWatcher, Recording } from '../audio/nodeCapture';
 import { computeSpectrogram, renderSpectrogramImage } from './spectrogram';
 import { getAudioContext, resumeAudioContext } from '../audio/context';
 import { ACCENT, shadeColor } from './palette';
+import { padRadius, PAD_FLASH_DURATION } from './pads';
+import type { InteractionState } from './interaction';
 
 export const BEAT_MATCHER_POPUP_WIDTH = 420;
 // Title bar (which also houses the record button — see captureButtonPosition)
@@ -1178,6 +1180,59 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
   return null;
 }
 
+const PLAY_BUTTON_RING = 'rgba(255, 255, 255, 0.3)'; // matches ui/render.ts's drawPad ring
+
+// The collapsed body's own center play/pause button — a small inset pad,
+// same geometry/behavior as ui/sequencer.ts's own drawSequencerPlayButton:
+// a ring (highlighted while a dragged event wire is hovering it as a valid
+// drop target), the same play/pause glyph the title-bar transport button
+// uses, and the shared trigger-flash ring for a wired activation (a direct
+// click doesn't flash this one, matching the sequencer's own — the icon
+// swap already shows the state change).
+function drawBeatMatcherPlayButton(
+  ctx: CanvasRenderingContext2D,
+  bounds: Rect,
+  playing: boolean,
+  interaction: InteractionState,
+  entityId: string,
+  now: number
+): void {
+  const radius = padRadius(bounds);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = PLAY_BUTTON_RING;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  if (interaction.eventWireHoverTarget === entityId) {
+    ctx.beginPath();
+    ctx.arc(bounds.x, bounds.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.fill();
+  }
+  ctx.restore();
+
+  drawTransportPlayIcon(ctx, { x: bounds.x, y: bounds.y }, playing);
+
+  const flashStart = interaction.triggerFlashes.get(entityId);
+  if (flashStart !== undefined) {
+    const elapsed = now - flashStart;
+    if (elapsed < PAD_FLASH_DURATION) {
+      const t = elapsed / PAD_FLASH_DURATION;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(bounds.x, bounds.y, radius + t * radius * 1.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 210, 150, ${1 - t})`;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      interaction.triggerFlashes.delete(entityId);
+    }
+  }
+}
+
 // Collapsed on-canvas presence — same small circular body every other
 // control kind uses (ui/render.ts's drawControlBody). Its right-edge bulge
 // (drawBodyBulge, the same spot knob/clock/tap protrude their own wire jack
@@ -1185,10 +1240,21 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
 // generically by ui/organelle.ts's own drawPorthole once portholePosition's
 // control-type-owner case points it here — same treatment as the
 // sequencer's own drawSequencerBody (ui/sequencer.ts), just independent
-// code.
-export function drawBeatMatcherBody(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+// code. The center is a play/pause trigger button, also matching the
+// sequencer's own.
+export function drawBeatMatcherBody(
+  ctx: CanvasRenderingContext2D,
+  graph: EntityGraph,
+  entity: Entity,
+  bounds: Rect,
+  selected: boolean,
+  interaction: InteractionState,
+  now: number
+): void {
   const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   drawBodyBulge(ctx, bounds);
+  const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'beatMatcher');
+  drawBeatMatcherPlayButton(ctx, bounds, feature ? beatMatcherStateFor(feature.id).playing : false, interaction, entity.id, now);
   drawControlLabel(ctx, entity, bounds, radius);
 }
 

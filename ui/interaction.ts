@@ -1263,6 +1263,11 @@ export function attachInteraction(
       // drag handle, same as any other control's).
       const feature = graph.featuresOf(hit.id).find((f) => f.kind === 'sequencer');
       if (feature) toggleSequencer(sequencerStateFor(feature.id));
+    } else if (hit.kind === 'beatMatcher' && isWithinPad(effectiveBounds(graph, hit), point)) {
+      // Same center-button treatment as the sequencer's own, immediately
+      // above.
+      const feature = graph.featuresOf(hit.id).find((f) => f.kind === 'beatMatcher');
+      if (feature) toggleBeatMatcherPlayback(feature.id);
     }
 
     canvas.setPointerCapture(e.pointerId);
@@ -1470,22 +1475,26 @@ export function attachInteraction(
       const source = graph.get(state.wiringFrom.entityId);
 
       // A TRIGGERED_KINDS instrument's or CONTINUOUS_KINDS drone's whole pad
-      // circle (see ui/pads.ts), or a sequencer control's own center
-      // play/pause button (ui/sequencer.ts's drawSequencerPlayButton, same
-      // padRadius geometry) — always a valid drop target from ANY
-      // control-type source's bump, not just an event-only source like
-      // tap. Whether anything actually fires through it depends on whether
-      // that source ever calls fireEventWireTargets (tap on click/keypress,
-      // the clock on every beat) — a knob dropped here would just sit
-      // inert, same as a tap dropped on a value dot already silently does
-      // nothing. Checked before dot-targeting since the pad is the bigger,
-      // more likely target when both are near the pointer.
+      // circle (see ui/pads.ts), or a sequencer/beat-matcher control's own
+      // center play/pause button (ui/sequencer.ts's drawSequencerPlayButton/
+      // ui/beatMatcher.ts's drawBeatMatcherPlayButton, same padRadius
+      // geometry) — always a valid drop target from ANY control-type
+      // source's bump, not just an event-only source like tap. Whether
+      // anything actually fires through it depends on whether that source
+      // ever calls fireEventWireTargets (tap on click/keypress, the clock on
+      // every beat) — a knob dropped here would just sit inert, same as a
+      // tap dropped on a value dot already silently does nothing. Checked
+      // before dot-targeting since the pad is the bigger, more likely
+      // target when both are near the pointer.
       const padHit = hitTest(graph, point, new Set());
       const validPadHit =
         source &&
         padHit &&
         padHit.id !== source.id &&
-        (TRIGGERED_KINDS.has(padHit.kind) || CONTINUOUS_KINDS.has(padHit.kind) || padHit.kind === 'sequencer') &&
+        (TRIGGERED_KINDS.has(padHit.kind) ||
+          CONTINUOUS_KINDS.has(padHit.kind) ||
+          padHit.kind === 'sequencer' ||
+          padHit.kind === 'beatMatcher') &&
         isWithinPad(effectiveBounds(graph, padHit), point)
           ? padHit
           : null;

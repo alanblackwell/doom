@@ -15,7 +15,7 @@ import { getMasterChain } from './master';
 import { getTempo, setTempo } from './transport';
 import { pulseMelody } from './melodyPlayer';
 import { activateSequencerControl, registerSequencerForPlayback } from './sequencerPlayer';
-import { registerBeatMatcherForPlayback } from './beatMatcherPlayer';
+import { activateBeatMatcherControl, registerBeatMatcherForPlayback } from './beatMatcherPlayer';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -259,6 +259,7 @@ export function activateEventTarget(entityId: string, overrides?: TriggerOverrid
   }
 
   if (activateSequencerControl(entityId)) return;
+  if (activateBeatMatcherControl(entityId)) return;
 
   if (triggersByEntity.has(entityId)) {
     triggerEntity(entityId, overrides);
@@ -1192,7 +1193,7 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
         if (feature) registerSequencerForPlayback(entity.id, feature.id);
       } else if (entity.kind === 'beatMatcher') {
         const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'beatMatcher');
-        if (feature) registerBeatMatcherForPlayback(feature.id);
+        if (feature) registerBeatMatcherForPlayback(entity.id, feature.id);
       }
       continue;
     }

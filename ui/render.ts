@@ -156,7 +156,7 @@ function drawEntity(
     } else if (entity.kind === 'sequencer') {
       drawSequencerBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
     } else if (entity.kind === 'beatMatcher') {
-      drawBeatMatcherBody(ctx, entity, bounds, entity.id === interaction.selectedId);
+      drawBeatMatcherBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }

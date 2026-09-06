@@ -1,27 +1,61 @@
 // Audible playback for the beat-matcher's own captured buffer (ui/
 // beatMatcher.ts): renders the captured sample itself at the transport's
-// own play/pause/scrub/rewind/loop state and playbackSpeed, and fires a
-// synthesized metronome-style tick precisely at each note's own onset
-// (left edge) as playback crosses it — audio feedback for where the
-// note track's events actually fall, same lookahead-scheduling idiom as
-// audio/sequencerPlayer.ts's own note dispatch, just a built-in click
-// rather than dispatching to a wired target (this track has nothing to
-// wire to yet).
+// own play/pause/scrub/rewind/loop state and playbackSpeed, and — at each
+// note's own onset (left edge) as playback crosses it — fires a
+// synthesized metronome-style tick (audio feedback for where the note
+// track's events actually fall) AND activates whatever's wired from the
+// beat-matcher control's own porthole (its single, port-less event output —
+// see ui/interaction.ts's wire-drag-from-porthole handling), releasing it
+// again at the note's own end. Same lookahead-scheduling idiom as
+// ui/organelle.ts's own sequencer note dispatch (dispatchedUpTo, a
+// schedule-ahead horizon, deferToCtxTime), just against this control's one
+// port-less wire set instead of a per-channel one.
 //
 // Independent of ui/beatMatcher.ts's own state-mutation functions by
-// design — this only ever *reads* BeatMatcherState and reconciles a local
-// Web Audio voice against it, via the same small polling-loop idiom this
-// app's other schedulers use (audio/transport.ts, audio/sequencerPlayer.ts,
-// ui/organelle.ts), rather than hooking into every transport action
-// directly. That keeps ui/beatMatcher.ts free of raw AudioNode lifecycle,
-// same layering as audio/sequencerPlayer.ts vs. ui/sequencer.ts.
+// design for its actual scheduling work — the polling loop below only ever
+// *reads* BeatMatcherState and reconciles a local Web Audio voice against
+// it, via the same small polling-loop idiom this app's other schedulers use
+// (audio/transport.ts, audio/sequencerPlayer.ts, ui/organelle.ts), rather
+// than hooking into every transport action directly. That keeps
+// ui/beatMatcher.ts free of raw AudioNode lifecycle, same layering as
+// audio/sequencerPlayer.ts vs. ui/sequencer.ts. The one exception is
+// activateBeatMatcherControl below (an external event-wire *driving* this
+// control's own play/pause, same as audio/sequencerPlayer.ts's own
+// activateSequencerControl) — that's a control input, not a scheduling
+// concern, so it calls straight into ui/beatMatcher.ts's toggle.
 
 import { getAudioContext } from './context';
 import { getMasterChain } from './master';
-import { beatMatcherStateFor, currentBeatMatcherPlaybackSeconds, flashBeatMatcherCursor } from '../ui/beatMatcher';
+import { activateEventTarget, releaseEntity } from './graph';
+import { getEventWiresFrom } from '../ui/eventWiring';
+import { recordSourcePulse } from '../ui/eventPulse';
+import type { InteractionState } from '../ui/interaction';
+import {
+  beatMatcherStateFor,
+  currentBeatMatcherPlaybackSeconds,
+  flashBeatMatcherCursor,
+  toggleBeatMatcherPlayback,
+} from '../ui/beatMatcher';
 import type { BeatMatcherState } from '../ui/beatMatcher';
 
 const LOOKAHEAD_INTERVAL_MS = 25;
+
+// Set once at startup (ui/main.ts, alongside ui/clockPulse.ts's own
+// attachClockPulse) so a wired target's own pad can flash on a dispatched
+// note, the same visible feedback ui/interaction.ts's fireEventWireTargets
+// already gives a tap/clock-driven activation
+// (state.triggerFlashes.set(...)) — this scheduler has no other way to
+// reach the live InteractionState, since it isn't itself part of a pointer
+// event handler the way that one is. Not threaded through
+// registerBeatMatcherForPlayback/audio/graph.ts's buildFromEntityGraph
+// instead, since that call site has no InteractionState to give it either,
+// and a module-level attach (rather than per-registration) still covers
+// every beat-matcher regardless of how many exist.
+let interactionState: InteractionState | null = null;
+
+export function attachBeatMatcherInteraction(state: InteractionState): void {
+  interactionState = state;
+}
 
 interface Voice {
   source: AudioBufferSourceNode;
@@ -37,23 +71,41 @@ interface Voice {
 }
 
 interface Registered {
+  controlEntityId: string;
   featureEntityId: string;
   voice: Voice | null;
   // Everything at or before this point on the clip's own timeline has
   // already had its tick scheduled (or intentionally skipped over by a
-  // backward jump — rewind/scrub/loop — detected in dispatchTicks below).
+  // backward jump — rewind/scrub/loop — detected in dispatchNoteEvents below).
   // Same "dispatchedUpTo" shape as ui/organelle.ts's own sequencer
   // scheduler.
   dispatchedUpTo: number;
 }
 
-const registered = new Map<string, Registered>();
+const registered = new Map<string, Registered>(); // keyed by featureEntityId
 
 // Called once per beat-matcher at graph-build time (audio/graph.ts's
 // buildFromEntityGraph), same as audio/sequencerPlayer.ts's own
 // registerSequencerForPlayback.
-export function registerBeatMatcherForPlayback(featureEntityId: string): void {
-  registered.set(featureEntityId, { featureEntityId, voice: null, dispatchedUpTo: 0 });
+export function registerBeatMatcherForPlayback(controlEntityId: string, featureEntityId: string): void {
+  registered.set(featureEntityId, { controlEntityId, featureEntityId, voice: null, dispatchedUpTo: 0 });
+}
+
+// The beat-matcher control's own event-wire target: wiring a tap/clock's
+// (or anything else's) output onto its center play/pause button
+// (ui/interaction.ts's eventWireHoverTarget detection, extended to
+// recognize a 'beatMatcher' pad) toggles playback exactly like clicking
+// that button would — same shape as audio/sequencerPlayer.ts's own
+// activateSequencerControl, called from the same audio/graph.ts
+// activateEventTarget dispatch point.
+export function activateBeatMatcherControl(controlEntityId: string): boolean {
+  for (const entry of registered.values()) {
+    if (entry.controlEntityId === controlEntityId) {
+      toggleBeatMatcherPlayback(entry.featureEntityId);
+      return true;
+    }
+  }
+  return false;
 }
 
 // --- Metronome-style tick ------------------------------------------------
@@ -141,7 +193,7 @@ function deferToCtxTime(targetCtxTime: number, callback: () => void): void {
   setTimeout(callback, delayMs);
 }
 
-function dispatchTicks(entry: Registered, state: BeatMatcherState): void {
+function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
   if (!state.playing || !state.capturedBuffer) {
     entry.dispatchedUpTo = state.pausedAtSeconds;
     return;
@@ -159,11 +211,37 @@ function dispatchTicks(entry: Registered, state: BeatMatcherState): void {
   // TICK_SCHEDULE_AHEAD_SEC * playbackSpeed of the clip's own timeline —
   // slowed-down playback covers proportionally less clip-time per poll.
   const horizon = playhead + TICK_SCHEDULE_AHEAD_SEC * state.playbackSpeed;
+  // This control's own port-less event wires (ui/interaction.ts's
+  // wire-drag-from-porthole) — captured once per batch, same as
+  // ui/organelle.ts's own dispatchNote captures its channel's wires once
+  // per note.
+  const wires = getEventWiresFrom(entry.controlEntityId);
+
   for (const note of state.notes) {
     if (note.onsetSeconds >= entry.dispatchedUpTo && note.onsetSeconds < horizon) {
-      const when = ctxTimeForClipSeconds(state, note.onsetSeconds);
-      playBeatMatcherTick(when);
-      deferToCtxTime(when, () => flashBeatMatcherCursor(entry.featureEntityId));
+      const onsetCtxTime = ctxTimeForClipSeconds(state, note.onsetSeconds);
+      const releaseCtxTime = ctxTimeForClipSeconds(state, note.onsetSeconds + note.durationSeconds);
+
+      playBeatMatcherTick(onsetCtxTime);
+      deferToCtxTime(onsetCtxTime, () => {
+        flashBeatMatcherCursor(entry.featureEntityId);
+        const firedAt = performance.now();
+        for (const wire of wires) {
+          activateEventTarget(wire.targetEntityId);
+          // The wired target's own pad ring — see attachBeatMatcherInteraction's
+          // own comment on why this needs a separately-attached reference.
+          interactionState?.triggerFlashes.set(wire.targetEntityId, firedAt);
+        }
+        recordSourcePulse(entry.controlEntityId, firedAt); // ui/eventPulse.ts — animates any wire out of this control's own bump
+      });
+      // A plain gate-off at the note's own end — this track's notes carry
+      // no envelope/pitch/velocity yet (ui/beatMatcher.ts's BeatMatcherNote
+      // is deliberately minimal), so there's nothing to pass through; a
+      // wired target with its own attached envelope still uses its own
+      // default release off this.
+      deferToCtxTime(releaseCtxTime, () => {
+        for (const wire of wires) releaseEntity(wire.targetEntityId);
+      });
     }
   }
   entry.dispatchedUpTo = horizon;
@@ -221,7 +299,7 @@ function startVoice(entry: Registered, state: BeatMatcherState): void {
 function tick(): void {
   for (const entry of registered.values()) {
     const state = beatMatcherStateFor(entry.featureEntityId);
-    dispatchTicks(entry, state);
+    dispatchNoteEvents(entry, state);
 
     if (!state.playing || !state.capturedBuffer) {
       stopVoice(entry);

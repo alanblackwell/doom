@@ -8,7 +8,11 @@ import { getAudioContext, resumeAudioContext, suspendAudioContext } from '../aud
 import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
 import { getTempo, start as startTransport, stop as stopTransport } from '../audio/transport';
 import { startSequencerScheduler, stopSequencerScheduler } from '../audio/sequencerPlayer';
-import { startBeatMatcherPlaybackScheduler, stopBeatMatcherPlaybackScheduler } from '../audio/beatMatcherPlayer';
+import {
+  attachBeatMatcherInteraction,
+  startBeatMatcherPlaybackScheduler,
+  stopBeatMatcherPlaybackScheduler,
+} from '../audio/beatMatcherPlayer';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import { attachInteraction, attachKeyboard, createInteractionState, updateSequencerDragAutoscroll } from './interaction';
@@ -536,6 +540,7 @@ attachTextureEditor(canvas, graph);
 attachInteraction(canvas, graph, interaction);
 attachKeyboard(graph, interaction);
 attachClockPulse('clock-1', interaction);
+attachBeatMatcherInteraction(interaction);
 attachSampleDrop(canvas, graph);
 attachAppearancePackDrop(canvas);
 
