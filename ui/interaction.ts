@@ -144,6 +144,7 @@ import {
   beatMatcherNoteSnapHoldFraction,
   beatMatcherSecondsAtPoint,
   beatMatcherStateFor,
+  beatMatcherTimelineIdAt,
   beatMatcherVelocityDragTrackAtPointer,
   beatMatcherVelocitySliderOpenFor,
   beatMatcherZoomStep,
@@ -184,6 +185,7 @@ import {
   setSelectedBeatMatcherNotePitchClass,
   setSelectedBeatMatcherNotePitchOctave,
   sharpenSelectedBeatMatcherNote,
+  stepBeatMatcherCandidate,
   toggleBeatMatcherLoopAtEnd,
   toggleBeatMatcherPlayback,
   toggleBeatMatcherSelectionLoop,
@@ -221,6 +223,13 @@ export interface InteractionState {
   // pressed) — while set, a keydown binds that key to this entity instead
   // of firing whichever entity that key already fires. See attachKeyboard.
   hoveredTapId: string | null;
+
+  // The open beat-matcher popup (if any) the pointer is currently over the
+  // note track/selection ruler/spectrogram of — pure hover, same shape as
+  // hoveredTapId above. attachKeyboard reads this to capture Tab/Shift-Tab
+  // for ui/beatMatcher.ts's stepBeatMatcherCandidate, per that feature's own
+  // "anywhere in the spectrogram, ruler or sequencer track" spec.
+  hoveredBeatMatcherTimelineId: string | null;
 
   // Which control dot the pointer is currently over (pure hover, nothing
   // pressed) — drives the slider reveal in render.ts.
@@ -470,6 +479,7 @@ export function createInteractionState(): InteractionState {
     hoverBeatMatcherId: null,
     settleAnim: null,
     hoveredTapId: null,
+    hoveredBeatMatcherTimelineId: null,
     hoverControl: null,
     draggingControl: null,
     triggerFlashes: new Map(),
@@ -1135,6 +1145,7 @@ export function attachInteraction(
         beatMatcherHit.kind !== 'noteResizeRight' &&
         beatMatcherHit.kind !== 'noteMove' &&
         beatMatcherHit.kind !== 'noteCreate' &&
+        beatMatcherHit.kind !== 'suggestionAccept' &&
         beatMatcherHit.kind !== 'noteDuplicateButton' &&
         beatMatcherHit.kind !== 'noteVelocityTextClick' &&
         beatMatcherHit.kind !== 'noteVelocitySliderDrag' &&
@@ -1159,6 +1170,25 @@ export function attachInteraction(
         // click still needs to leave something behind here.
         const seconds = beatMatcherSecondsAtPoint(graph, beatMatcherHit.entityId, point);
         const noteId = seconds !== null ? createBeatMatcherNoteAt(beatMatcherHit.entityId, seconds) : null;
+        if (noteId) {
+          canvas.setPointerCapture(e.pointerId);
+          selectBeatMatcherNote(beatMatcherHit.entityId, noteId);
+          setSelectedBeatMatcherNoteEdgeFocus('right');
+          state.beatMatcherNoteDrag = {
+            entityId: beatMatcherHit.entityId,
+            noteId,
+            mode: 'resizeRight',
+            grabOffsetSeconds: 0,
+            snap: initialBeatMatcherNoteSnapState(point, performance.now()),
+          };
+        }
+      } else if (beatMatcherHit.kind === 'suggestionAccept') {
+        // Same immediate-creation shape as 'noteCreate' just above, but the
+        // onset is already resolved by the hit-test itself (the suggestion
+        // line's own candidate seconds — ui/beatMatcher.ts's
+        // hitTestSuggestionLine/suggestedBeatMatcherOnsets) rather than the
+        // raw click pixel.
+        const noteId = createBeatMatcherNoteAt(beatMatcherHit.entityId, beatMatcherHit.seconds);
         if (noteId) {
           canvas.setPointerCapture(e.pointerId);
           selectBeatMatcherNote(beatMatcherHit.entityId, noteId);
@@ -1198,6 +1228,16 @@ export function attachInteraction(
       } else if (beatMatcherHit.kind === 'currentPointMarkerDrag') {
         canvas.setPointerCapture(e.pointerId);
         setBeatMatcherCurrentPoint(beatMatcherHit.entityId, beatMatcherSecondsAtPoint(graph, beatMatcherHit.entityId, point) ?? 0); // jump to the click, then keep tracking on move
+        focusBeatMatcherSelection(beatMatcherHit.entityId, 'point');
+        state.beatMatcherCurrentPointDrag = { entityId: beatMatcherHit.entityId };
+      } else if (beatMatcherHit.kind === 'spectrogramPress') {
+        // Same "jump to the click, then keep tracking on move" shape as
+        // currentPointMarkerDrag just above — a press directly on the
+        // spectrogram picks a reference point exactly the same way, just
+        // from a different starting gesture (ui/beatMatcher.ts's own
+        // hitTestSpectrogramBand).
+        canvas.setPointerCapture(e.pointerId);
+        setBeatMatcherCurrentPoint(beatMatcherHit.entityId, beatMatcherHit.seconds);
         focusBeatMatcherSelection(beatMatcherHit.entityId, 'point');
         state.beatMatcherCurrentPointDrag = { entityId: beatMatcherHit.entityId };
       } else if (beatMatcherHit.kind === 'selectionStartCaretDrag') {
@@ -1799,6 +1839,12 @@ export function attachInteraction(
       // this to decide whether the next keydown binds or fires.
       const bodyHit = hitTest(graph, point, new Set());
       state.hoveredTapId = bodyHit?.kind === 'tap' ? bodyHit.id : null;
+
+      // Separately, whether the pointer is over an open beat-matcher's
+      // note track/selection ruler/spectrogram — attachKeyboard reads this
+      // to capture Tab/Shift-Tab (ui/beatMatcher.ts's own
+      // beatMatcherTimelineIdAt/stepBeatMatcherCandidate).
+      state.hoveredBeatMatcherTimelineId = beatMatcherTimelineIdAt(graph, point);
       return;
     }
 
@@ -2251,6 +2297,20 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
   window.addEventListener('keydown', (e) => {
     if (isTextureEditorActive()) return; // modal — see the pointerdown/pointermove guards above
     if (e.metaKey || e.ctrlKey || e.altKey) return; // don't steal OS/browser shortcuts
+
+    // Tab/Shift-Tab step the beat-matcher's current point to the
+    // next/previous onset candidate (ui/beatMatcher.ts's own
+    // stepBeatMatcherCandidate) — captured, ahead of everything else below
+    // (including the browser's own default focus-cycling), whenever the
+    // pointer is hovering that popup's note track/selection ruler/
+    // spectrogram (state.hoveredBeatMatcherTimelineId, tracked on pure
+    // hover in this file's own pointermove handling), per this feature's
+    // own "anywhere in the spectrogram, ruler or sequencer track" spec.
+    if (e.code === 'Tab' && state.hoveredBeatMatcherTimelineId) {
+      stepBeatMatcherCandidate(state.hoveredBeatMatcherTimelineId, e.shiftKey ? -1 : 1);
+      e.preventDefault();
+      return;
+    }
 
     // Up/Down/Left/Right/Delete/A-G all operate on the melody organelle's
     // current selection (ui/melody.ts's activeSelectedItem — the most

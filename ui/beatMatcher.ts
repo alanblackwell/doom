@@ -71,7 +71,9 @@ import { getEntityNodes } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';
 import type { LevelWatcher, Recording } from '../audio/nodeCapture';
 import { computeSpectrogram, createLiveSpectrogram, renderSpectrogramImage } from './spectrogram';
-import type { LiveSpectrogram } from './spectrogram';
+import type { LiveSpectrogram, SpectrogramData } from './spectrogram';
+import { computeOnsetFeatures, pickOnsetCandidates, rankSuggestedOnsets } from './beatMatcherSuggestions';
+import type { OnsetFeature } from './beatMatcherSuggestions';
 import { getAudioContext, resumeAudioContext } from '../audio/context';
 import { ACCENT, shadeColor } from './palette';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
@@ -206,6 +208,21 @@ export interface BeatMatcherState {
   // the real spectrogramImage (and nulled) the instant the capture actually
   // finishes — see beginBeatMatcherCapture/finishBeatMatcherCapture.
   liveSpectrogram: LiveSpectrogram | null;
+  // Raw analysis data behind spectrogramImage — computeSpectrogram's result
+  // was previously discarded right after rendering the image, but onset-
+  // suggestion (below) needs the actual frames, not just the picture of
+  // them. Set alongside spectrogramImage, cleared everywhere it is.
+  spectrogramData: SpectrogramData | null;
+  // Per-frame feature vectors (ui/beatMatcherSuggestions.ts) computed once
+  // right after a capture finishes — expensive-ish to build (one pass over
+  // every STFT frame) but cheap to search, so this is kept around rather
+  // than recomputed on demand. onsetCandidateSeconds is the reduced set of
+  // plausible onset locations (spectral-flux peaks) actually searched for
+  // suggestions — see suggestedBeatMatcherOnsets below, which combines both
+  // with the current notes/currentPointSeconds every time it's called
+  // (a cheap distance scan, unlike the two fields here).
+  onsetFeatures: OnsetFeature[] | null;
+  onsetCandidateSeconds: number[] | null;
   // Whether the source/status text is currently shown as an overlay panel
   // over the track row. Once a capture exists, that row shows the note
   // track instead of this text by default — see pressBeatMatcherRecordButton:
@@ -303,6 +320,9 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       capturedBuffer: null,
       spectrogramImage: null,
       liveSpectrogram: null,
+      spectrogramData: null,
+      onsetFeatures: null,
+      onsetCandidateSeconds: null,
       infoOverlayOpen: false,
       notes: [],
       zoomSeconds: DEFAULT_ZOOM_SECONDS,
@@ -388,8 +408,15 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.capturedBuffer = buffer;
     // One-shot analysis right away — see SpectrogramData/renderSpectrogramImage's
     // own comments for why this is plain TS run once here rather than
-    // anything realtime.
-    state.spectrogramImage = renderSpectrogramImage(computeSpectrogram(buffer));
+    // anything realtime. The onset features/candidates (ui/
+    // beatMatcherSuggestions.ts) piggyback on the same SpectrogramData rather
+    // than triggering a second analysis pass.
+    const spectrogramData = computeSpectrogram(buffer);
+    state.spectrogramData = spectrogramData;
+    state.spectrogramImage = renderSpectrogramImage(spectrogramData);
+    const features = computeOnsetFeatures(spectrogramData);
+    state.onsetFeatures = features;
+    state.onsetCandidateSeconds = pickOnsetCandidates(features);
     state.liveSpectrogram = null; // the real, offline-computed image now takes over
     // Fresh view/transport for the new clip — see BeatMatcherState's own
     // comment on why a previous capture's zoom/scroll/playhead can't carry
@@ -429,6 +456,9 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.capturedBuffer = null;
   state.spectrogramImage = null;
   state.liveSpectrogram = null;
+  state.spectrogramData = null;
+  state.onsetFeatures = null;
+  state.onsetCandidateSeconds = null;
   state.notes = [];
   state.selectionStartSeconds = null;
   state.selectionEndSeconds = null;
@@ -1264,6 +1294,78 @@ export function setBeatMatcherSelectionRange(featureEntityId: string, aSeconds: 
   state.selectionEndSeconds = Math.max(a, b);
 }
 
+// Clamps a desired window start so [start, start+width] fits inside
+// [0, duration] AS A WHOLE — shifting the window back into bounds rather
+// than clamping each endpoint independently (which would shrink it instead
+// of just moving it). Shared by stepBeatMatcherCandidate below.
+function clampedWindowStart(desiredStart: number, width: number, duration: number): number {
+  const maxStart = Math.max(0, duration - width);
+  return Math.max(0, Math.min(maxStart, desiredStart));
+}
+
+// Tab/Shift-Tab (ui/interaction.ts's attachKeyboard, gated on
+// state.hoveredBeatMatcherTimelineId) — steps the current point to the next
+// or previous entry in the CURRENTLY DRAWN suggestion list
+// (suggestedBeatMatcherOnsets — the same handful of faint lines actually
+// visible in the spectrogram), not the much larger raw pool of every
+// detected transient in the clip (onsetCandidateSeconds) — moving to a point
+// with no suggestion line under it would contradict "next candidate."
+// Clamps at either end rather than wrapping around.
+//
+// Landing on a candidate moves the current point there, so — once there are
+// no placed notes yet to anchor the reference instead — the NEXT press
+// re-ranks around wherever you just landed rather than replaying a frozen
+// list from the original click. That's intentional: it turns Tab into a
+// similarity walk ("something like this... now something like THAT"),
+// which degrades gracefully rather than confusingly once one or more notes
+// exist and the reference is their own centroid instead (stable regardless
+// of where the current point wanders).
+//
+// If an audition selection window (selectionStartSeconds/selectionEndSeconds)
+// is already active, it moves along with the point per this feature's own
+// spec: if the point being moved FROM was inside the window, the window
+// shifts by the same delta (which, since its width doesn't change, is
+// exactly "the point keeps the same relative position within it"); if the
+// point was outside the window (or there was no prior point at all), the
+// window is simply re-centered on the new point instead.
+export function stepBeatMatcherCandidate(featureEntityId: string, direction: 1 | -1): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (!state.capturedBuffer) return;
+  const candidates = suggestedBeatMatcherOnsets(state); // ascending, per rankSuggestedOnsets
+  if (candidates.length === 0) return;
+  const previousPoint = state.currentPointSeconds;
+
+  let target: number;
+  if (previousPoint === null) {
+    target = direction === 1 ? candidates[0] : candidates[candidates.length - 1];
+  } else if (direction === 1) {
+    const next = candidates.find((s) => s > previousPoint);
+    target = next !== undefined ? next : candidates[candidates.length - 1];
+  } else {
+    let prev: number | undefined;
+    for (const s of candidates) {
+      if (s < previousPoint) prev = s;
+      else break;
+    }
+    target = prev !== undefined ? prev : candidates[0];
+  }
+
+  const hadWindow = state.selectionStartSeconds !== null && state.selectionEndSeconds !== null;
+  const oldStart = state.selectionStartSeconds;
+  const oldEnd = state.selectionEndSeconds;
+  const previousInWindow = hadWindow && previousPoint !== null && previousPoint >= oldStart! && previousPoint <= oldEnd!;
+  const width = hadWindow ? oldEnd! - oldStart! : 0;
+
+  setBeatMatcherCurrentPoint(featureEntityId, target);
+  focusBeatMatcherSelection(featureEntityId, 'point');
+
+  if (hadWindow) {
+    const desiredStart = previousInWindow ? oldStart! + (target - previousPoint!) : target - width / 2;
+    const clampedStart = clampedWindowStart(desiredStart, width, state.capturedBuffer.duration);
+    setBeatMatcherSelectionRange(featureEntityId, clampedStart, clampedStart + width);
+  }
+}
+
 // Moves just the start caret, clamped so it can never cross the end (and
 // never below 0) — dragging the caret directly, or the keyboard nudge when
 // that's what's focused (see nudgeBeatMatcherSelection).
@@ -1452,6 +1554,35 @@ function hitTestSelectionLoopToggle(grid: Grid, pxPerSec: number, state: BeatMat
 
 function hitTestSelectionRulerBand(grid: Grid, point: Point): boolean {
   return point.x >= grid.left && point.x <= grid.right && point.y >= grid.selectionRulerTop && point.y <= grid.selectionRulerBottom;
+}
+
+// A plain press anywhere in the spectrogram image itself (not just the
+// selection ruler strip above it) moves the current point there too — the
+// spectrogram is where the sound you're actually looking at lives, so
+// picking a reference for onset suggestions (suggestedBeatMatcherOnsets)
+// directly off it, rather than only via the thin ruler strip, is the more
+// natural gesture. Checked well after hitTestSuggestionLine (a suggestion
+// line drawn right on top of the spectrogram takes priority over starting a
+// new reference point there) and after the playback-line grab, but ahead of
+// nothing else — this is the last, catch-all claim on the band's own pixels.
+function hitTestSpectrogramBand(grid: Grid, point: Point): boolean {
+  return point.x >= grid.left && point.x <= grid.right && point.y >= grid.selectionRulerBottom && point.y <= grid.spectrogramBottom;
+}
+
+// Suggestion lines span the same trackTop..spectrogramBottom range they're
+// drawn in (drawBeatMatcherSuggestions) — checked with the same pixel
+// tolerance as grabbing the playback line (LINE_GRAB_TOLERANCE, declared
+// further down this file but a plain top-level const, so referencing it
+// here ahead of its own declaration is fine — this function only ever runs
+// after the whole module has loaded). Returns the matched candidate's own
+// seconds (not just a boolean) so the click can snap exactly to it.
+function hitTestSuggestionLine(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): number | null {
+  if (point.y < grid.trackTop || point.y > grid.spectrogramBottom) return null;
+  for (const seconds of suggestedBeatMatcherOnsets(state)) {
+    const x = secondsToX(grid, pxPerSec, state.scrollSeconds, seconds);
+    if (Math.abs(point.x - x) <= LINE_GRAB_TOLERANCE) return seconds;
+  }
+  return null;
 }
 
 // --- Note-drag snap --------------------------------------------------------
@@ -1711,6 +1842,52 @@ export function beatMatcherSecondsAtPoint(graph: EntityGraph, featureEntityId: s
   const grid = gridFor(beatMatcherPopupRect(graph, owner, drag));
   const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
   return xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x);
+}
+
+// Which expanded beat-matcher popup (if any) the point falls within the
+// note track, selection ruler, or spectrogram of — i.e. everywhere
+// stepBeatMatcherCandidate's Tab/Shift-Tab gesture should be captured
+// (matching this feature's own "anywhere in the spectrogram, ruler or
+// sequencer track" spec), but NOT the title bar's buttons, the axis handle/
+// zoom icons, or the h-scrollbar. ui/interaction.ts tracks this continuously
+// on pure hover (no drag/press in progress) and attachKeyboard reads it.
+export function beatMatcherTimelineIdAt(graph: EntityGraph, point: Point, drag?: DragContext): string | null {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'feature' || entity.kind !== 'beatMatcher' || !entity.expanded) continue;
+    const owner = ownerOf(graph, entity);
+    if (!owner) continue;
+    const state = beatMatcherStateFor(entity.id);
+    if (!state.capturedBuffer) continue;
+    const grid = gridFor(beatMatcherPopupRect(graph, owner, drag));
+    if (point.x >= grid.left && point.x <= grid.right && point.y >= grid.trackTop && point.y <= grid.spectrogramBottom) {
+      return entity.id;
+    }
+  }
+  return null;
+}
+
+// --- Onset-similarity suggestions ---------------------------------------
+// See ui/beatMatcherSuggestions.ts's own header for the approach (nearest-
+// centroid similarity, not a trained classifier). This is the one place
+// that combines its pure feature/candidate/ranking functions with the
+// beat-matcher's own live state (which onsets exist, or the current point
+// before any do) — called fresh from both drawing
+// (drawBeatMatcherSuggestions) and hit-testing (hitTestSuggestionLine)
+// rather than cached, since the actual search (a distance scan over a few
+// dozen candidates) is cheap; only the per-frame features/candidates
+// themselves (onsetFeatures/onsetCandidateSeconds) are worth precomputing
+// once, at capture time.
+export function suggestedBeatMatcherOnsets(state: BeatMatcherState): number[] {
+  if (!state.onsetFeatures || !state.onsetCandidateSeconds || state.onsetCandidateSeconds.length === 0) return [];
+  const referenceSeconds =
+    state.notes.length > 0
+      ? state.notes.map((n) => n.onsetSeconds)
+      : state.currentPointSeconds !== null
+        ? [state.currentPointSeconds]
+        : [];
+  if (referenceSeconds.length === 0) return [];
+  const existingOnsets = state.notes.map((n) => n.onsetSeconds);
+  return rankSuggestedOnsets(state.onsetFeatures, state.onsetCandidateSeconds, referenceSeconds, existingOnsets);
 }
 
 // --- Transport -------------------------------------------------------
@@ -2245,6 +2422,8 @@ export type BeatMatcherHit =
   | { entityId: string; kind: 'selectionClearButton' }
   | { entityId: string; kind: 'selectionLoopToggle' }
   | { entityId: string; kind: 'selectionRulerPress'; seconds: number }
+  | { entityId: string; kind: 'suggestionAccept'; seconds: number }
+  | { entityId: string; kind: 'spectrogramPress'; seconds: number }
   | { entityId: string; kind: 'axisZoomIn' }
   | { entityId: string; kind: 'axisZoomOut' }
   | { entityId: string; kind: 'axisHandle' }
@@ -2361,6 +2540,14 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
       if (hitTestSelectionLoopToggle(grid, pxPerSec, state, point)) {
         return { entityId: entity.id, kind: 'selectionLoopToggle' };
       }
+      // Checked ahead of the ruler-band/scrub/noteCreate catch-alls below
+      // (which would otherwise swallow the click first) but after every
+      // precise control above — a suggestion line is a thin target, but
+      // still lower priority than an actual note/marker/button.
+      const suggestionSeconds = hitTestSuggestionLine(grid, pxPerSec, state, point);
+      if (suggestionSeconds !== null) {
+        return { entityId: entity.id, kind: 'suggestionAccept', seconds: suggestionSeconds };
+      }
       if (hitTestSelectionRulerBand(grid, point)) {
         return { entityId: entity.id, kind: 'selectionRulerPress', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
       }
@@ -2380,6 +2567,14 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
         point.y <= grid.spectrogramBottom;
       if (inRulerRow || onPlaybackLine) {
         return { entityId: entity.id, kind: 'scrub', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
+      }
+
+      // A plain press anywhere else in the spectrogram picks that point as
+      // the current point (see hitTestSpectrogramBand's own comment) —
+      // checked after the playback-line grab above (which also crosses the
+      // spectrogram) so grabbing the cursor still wins where the two overlap.
+      if (hitTestSpectrogramBand(grid, point)) {
+        return { entityId: entity.id, kind: 'spectrogramPress', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
       }
 
       // Empty track-row space — starts painting a brand-new note.
@@ -3026,6 +3221,36 @@ function drawBeatMatcherNoteSnapIndicator(
   ctx.restore();
 }
 
+// Faint, dashed vertical lines at each of suggestedBeatMatcherOnsets' own
+// candidates — same trackTop..spectrogramBottom span as
+// drawBeatMatcherNoteSnapIndicator's own single line, just drawn for a whole
+// array of them at once and dashed (rather than that indicator's solid
+// line) so the two read as distinct even when both happen to be visible.
+// Not brightened on hover — no pointer position is threaded into this draw
+// call today (unlike the drag-only indicators, which get their own state
+// object each frame), so every suggestion just stays this one faint style
+// until it's clicked into an actual note.
+const SUGGESTION_LINE_COLOR = 'rgba(255, 255, 255, 0.3)';
+
+function drawBeatMatcherSuggestions(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+  const suggestions = suggestedBeatMatcherOnsets(state);
+  if (suggestions.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = SUGGESTION_LINE_COLOR;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 2]);
+  for (const seconds of suggestions) {
+    const x = secondsToX(grid, pxPerSec, state.scrollSeconds, seconds);
+    if (x < grid.left || x > grid.right) continue;
+    ctx.beginPath();
+    ctx.moveTo(x, grid.trackTop);
+    ctx.lineTo(x, grid.spectrogramBottom);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function drawSpectrogramBand(ctx: CanvasRenderingContext2D, grid: Grid, state: BeatMatcherState): void {
   const bandTop = grid.selectionRulerBottom;
   const width = grid.right - grid.left;
@@ -3464,6 +3689,7 @@ export function drawBeatMatcherPopup(
 
   if (hasCapture) {
     drawBeatMatcherTimeGrid(ctx, grid, pxPerSec, state);
+    drawBeatMatcherSuggestions(ctx, grid, pxPerSec, state);
     drawEndMarker(ctx, grid, pxPerSec, state);
     drawSelectionRulerMarkers(ctx, grid, pxPerSec, state, beatMatcherSelectionFocusFor(entity.id));
     if (noteSnap) {
