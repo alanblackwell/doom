@@ -70,7 +70,8 @@ import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import { getEntityNodes } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';
 import type { LevelWatcher, Recording } from '../audio/nodeCapture';
-import { computeSpectrogram, renderSpectrogramImage } from './spectrogram';
+import { computeSpectrogram, createLiveSpectrogram, renderSpectrogramImage } from './spectrogram';
+import type { LiveSpectrogram } from './spectrogram';
 import { getAudioContext, resumeAudioContext } from '../audio/context';
 import { ACCENT, shadeColor } from './palette';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
@@ -188,6 +189,13 @@ export interface BeatMatcherState {
   // renderSpectrogramImage) — recomputing a full STFT every draw call would
   // be wasted work when nothing about a finished capture ever changes.
   spectrogramImage: HTMLCanvasElement | null;
+  // Non-null only while 'capturing' — a progressively-built preview
+  // (ui/spectrogram.ts's createLiveSpectrogram) fed raw samples as they
+  // arrive, so drawSpectrogramBand has something to show while the capture
+  // is still underway instead of a blank "no capture yet" band. Replaced by
+  // the real spectrogramImage (and nulled) the instant the capture actually
+  // finishes — see beginBeatMatcherCapture/finishBeatMatcherCapture.
+  liveSpectrogram: LiveSpectrogram | null;
   // Whether the source/status text is currently shown as an overlay panel
   // over the track row. Once a capture exists, that row shows the note
   // track instead of this text by default — see pressBeatMatcherRecordButton:
@@ -259,6 +267,7 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       recording: null,
       capturedBuffer: null,
       spectrogramImage: null,
+      liveSpectrogram: null,
       infoOverlayOpen: false,
       notes: [],
       zoomSeconds: DEFAULT_ZOOM_SECONDS,
@@ -318,11 +327,16 @@ function beginBeatMatcherCapture(featureEntityId: string): void {
   if (!nodes) return;
   state.capturedBuffer = null;
   state.notes = []; // notes authored against the old capture don't carry over to whatever this one turns out to be
+  // Built up one column at a time as raw samples arrive below, so
+  // drawSpectrogramBand can show the capture actually happening instead of
+  // staying blank until it finishes.
+  const liveSpectrogram = createLiveSpectrogram(getAudioContext().sampleRate);
+  state.liveSpectrogram = liveSpectrogram;
   // Tapped before `pan` (audio/graph.ts's EntityNodes) — the entity's own
   // mono mix of its generator + children, unaffected by its stereo canvas
   // position, which is a spatial/performance concern with nothing to do
   // with what's actually being captured for a spectrogram.
-  state.recording = startNodeCapture(nodes.output);
+  state.recording = startNodeCapture(nodes.output, (chunk) => liveSpectrogram.pushSamples(chunk));
   state.status = 'capturing';
 }
 
@@ -337,6 +351,7 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     // own comments for why this is plain TS run once here rather than
     // anything realtime.
     state.spectrogramImage = renderSpectrogramImage(computeSpectrogram(buffer));
+    state.liveSpectrogram = null; // the real, offline-computed image now takes over
     // Fresh view/transport for the new clip — see BeatMatcherState's own
     // comment on why a previous capture's zoom/scroll/playhead can't carry
     // over.
@@ -370,6 +385,7 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.sourceEntityId = sourceEntityId;
   state.capturedBuffer = null;
   state.spectrogramImage = null;
+  state.liveSpectrogram = null;
   state.notes = [];
   armBeatMatcher(featureEntityId);
 }
@@ -2366,6 +2382,14 @@ function drawSpectrogramBand(ctx: CanvasRenderingContext2D, grid: Grid, state: B
     const sx = duration > 0 ? (state.scrollSeconds / duration) * image.width : 0;
     const sWidth = duration > 0 ? Math.max(1, (state.zoomSeconds / duration) * image.width) : image.width;
     ctx.drawImage(image, sx, 0, sWidth, image.height, grid.left, bandTop, width, SPECTROGRAM_HEIGHT);
+  } else if (state.liveSpectrogram && state.liveSpectrogram.columnCount > 0) {
+    // A capture in progress — the clip's own final length isn't known yet,
+    // so (unlike the finished-capture case above) this doesn't map through
+    // zoomSeconds/scrollSeconds at all: it just stretches everything
+    // captured so far across the whole band, growing to fill it as more
+    // audio arrives, same visual idea as a live level meter filling up.
+    const live = state.liveSpectrogram;
+    ctx.drawImage(live.canvas, 0, 0, live.columnCount, live.canvas.height, grid.left, bandTop, width, SPECTROGRAM_HEIGHT);
   } else {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
     ctx.font = '10px monospace';

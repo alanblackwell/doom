@@ -14,13 +14,20 @@ export interface Recording {
   stop(): Promise<AudioBuffer>;
 }
 
-export function startNodeCapture(source: AudioNode): Recording {
+// `onChunk`, if given, is called synchronously with each raw mono chunk as
+// it arrives (same data pushed into `chunks` below) — lets a caller build up
+// a live preview (ui/spectrogram.ts's createLiveSpectrogram, used by
+// ui/beatMatcher.ts) without waiting for `stop()` to resolve the whole
+// buffer.
+export function startNodeCapture(source: AudioNode, onChunk?: (chunk: Float32Array) => void): Recording {
   const ctx = getAudioContext();
   const capture = new AudioWorkletNode(ctx, 'capture-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
   const chunks: Float32Array[] = [];
 
   capture.port.onmessage = (e) => {
-    chunks.push(e.data as Float32Array);
+    const chunk = e.data as Float32Array;
+    chunks.push(chunk);
+    onChunk?.(chunk);
   };
   capture.port.postMessage({ type: 'start' });
   // An additional tap alongside `source`'s existing connection(s) (its

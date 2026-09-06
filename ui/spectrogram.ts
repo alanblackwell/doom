@@ -142,3 +142,131 @@ export function renderSpectrogramImage(data: SpectrogramData): HTMLCanvasElement
   ctx.putImageData(image, 0, 0);
   return canvas;
 }
+
+// --- Live (in-progress) spectrogram --------------------------------------
+// A progressively-built preview shown while a capture is still underway
+// (ui/beatMatcher.ts's 'capturing' status) — same FFT_SIZE/HOP_SIZE/window/
+// color-ramp as computeSpectrogram/renderSpectrogramImage above, so it reads
+// as a rough preview of exactly what the finished image will look like, just
+// fed one small chunk of raw samples at a time (audio/nodeCapture.ts's own
+// onChunk callback) instead of a single finished AudioBuffer. Replaced by
+// the real, offline-computed image the moment the capture actually finishes
+// (ui/beatMatcher.ts's finishBeatMatcherCapture) — this is only ever a live
+// approximation, never the source of truth for note authoring or playback.
+export interface LiveSpectrogram {
+  pushSamples(chunk: Float32Array): void;
+  // Grows, and is occasionally reallocated wider (doubling capacity like a
+  // plain dynamic array), as pushSamples completes new hops — callers must
+  // clip to `columnCount`, not `canvas.width`, since the canvas can be wider
+  // than the audio actually drawn into it so far.
+  readonly canvas: HTMLCanvasElement;
+  readonly columnCount: number;
+  elapsedSeconds(): number;
+}
+
+class LiveSpectrogramImpl implements LiveSpectrogram {
+  private readonly sampleRate: number;
+  // The full history of raw samples seen so far — cheap to keep for the
+  // short one-shot captures this app deals with (the whole reason a
+  // spectrogram exists here at all); doubles like a plain growable array
+  // rather than a fixed-size ring, since each new hop's FFT window reaches
+  // back FFT_SIZE samples from wherever the capture currently stands.
+  private samples = new Float32Array(1 << 16);
+  private sampleCount = 0;
+  private framesDrawn = 0;
+  private img: HTMLCanvasElement;
+  private imgCtx: CanvasRenderingContext2D;
+
+  constructor(sampleRate: number) {
+    this.sampleRate = sampleRate;
+    this.img = document.createElement('canvas');
+    this.img.width = 1;
+    this.img.height = FFT_SIZE / 2;
+    this.imgCtx = this.img.getContext('2d')!;
+  }
+
+  get canvas(): HTMLCanvasElement {
+    return this.img;
+  }
+
+  get columnCount(): number {
+    return this.framesDrawn;
+  }
+
+  elapsedSeconds(): number {
+    return this.sampleCount / this.sampleRate;
+  }
+
+  pushSamples(chunk: Float32Array): void {
+    this.appendSamples(chunk);
+    // Draw every hop that's now got a full FFT_SIZE window of real samples
+    // behind it — no zero-padding for a not-yet-arrived tail the way
+    // computeSpectrogram's own final frame allows, since that would render
+    // (and then have to silently correct) a frame built from fake silence.
+    while (this.framesDrawn * HOP_SIZE + FFT_SIZE <= this.sampleCount) {
+      this.drawNextFrame();
+    }
+  }
+
+  private appendSamples(chunk: Float32Array): void {
+    const needed = this.sampleCount + chunk.length;
+    if (needed > this.samples.length) {
+      let capacity = this.samples.length * 2;
+      while (capacity < needed) capacity *= 2;
+      const grown = new Float32Array(capacity);
+      grown.set(this.samples.subarray(0, this.sampleCount));
+      this.samples = grown;
+    }
+    this.samples.set(chunk, this.sampleCount);
+    this.sampleCount += chunk.length;
+  }
+
+  // HTMLCanvasElement content is cleared by assigning to its own width/
+  // height, so growing means drawing the old canvas onto a new, wider one
+  // and swapping the reference — the `canvas` getter above always reflects
+  // whichever one is current.
+  private ensureWidth(width: number): void {
+    if (width <= this.img.width) return;
+    let capacity = Math.max(this.img.width * 2, 64);
+    while (capacity < width) capacity *= 2;
+    const grown = document.createElement('canvas');
+    grown.width = capacity;
+    grown.height = this.img.height;
+    const gctx = grown.getContext('2d')!;
+    gctx.drawImage(this.img, 0, 0);
+    this.img = grown;
+    this.imgCtx = gctx;
+  }
+
+  private drawNextFrame(): void {
+    const offset = this.framesDrawn * HOP_SIZE;
+    const re = new Float32Array(FFT_SIZE);
+    const im = new Float32Array(FFT_SIZE);
+    for (let i = 0; i < FFT_SIZE; i++) {
+      re[i] = this.samples[offset + i] * WINDOW[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+
+    const bins = FFT_SIZE / 2;
+    this.ensureWidth(this.framesDrawn + 1);
+    const column = this.imgCtx.createImageData(1, bins);
+    for (let bin = 0; bin < bins; bin++) {
+      const mag = Math.hypot(re[bin], im[bin]) / FFT_SIZE;
+      const db = 20 * Math.log10(Math.max(mag, MIN_MAGNITUDE));
+      const [r, g, b] = magnitudeColor(db);
+      const y = bins - 1 - bin; // flip: low frequency at the image's bottom, same as renderSpectrogramImage
+      const idx = y * 4;
+      column.data[idx] = r;
+      column.data[idx + 1] = g;
+      column.data[idx + 2] = b;
+      column.data[idx + 3] = 255;
+    }
+    this.imgCtx.putImageData(column, this.framesDrawn, 0);
+    this.framesDrawn++;
+  }
+}
+
+export function createLiveSpectrogram(sampleRate: number): LiveSpectrogram {
+  return new LiveSpectrogramImpl(sampleRate);
+}
