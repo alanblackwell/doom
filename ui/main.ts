@@ -8,6 +8,7 @@ import { getAudioContext, resumeAudioContext, suspendAudioContext } from '../aud
 import { initAudioEngine, buildFromEntityGraph } from '../audio/graph';
 import { getTempo, start as startTransport, stop as stopTransport } from '../audio/transport';
 import { startSequencerScheduler, stopSequencerScheduler } from '../audio/sequencerPlayer';
+import { startBeatMatcherPlaybackScheduler, stopBeatMatcherPlaybackScheduler } from '../audio/beatMatcherPlayer';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import { attachInteraction, attachKeyboard, createInteractionState, updateSequencerDragAutoscroll } from './interaction';
@@ -596,9 +597,11 @@ async function ensureEngineBuilt(): Promise<void> {
     if (running) {
       startTransport();
       startSequencerScheduler();
+      startBeatMatcherPlaybackScheduler();
     } else {
       stopTransport();
       stopSequencerScheduler();
+      stopBeatMatcherPlaybackScheduler();
     }
     setButtonState();
   };
