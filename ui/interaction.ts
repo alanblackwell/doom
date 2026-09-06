@@ -2522,5 +2522,20 @@ function finalizeDrop(
   // still bring the one you just placed to the front of the overlap.
   graph.bringToFront(entityId);
 
+  // Auto-play a sample source the moment it's dropped onto a beat-matcher,
+  // so acquisition (ui/beatMatcher.ts's own sound-triggered arm/capture)
+  // starts right away rather than needing a separate, easy-to-miss press of
+  // the sample's own pad afterward — the one exception to this feature's
+  // own "hands-off, just reacts to whatever you do" header comment. Only
+  // 'sample' (a one-shot clip, not a continuous drone the user might still
+  // be about to tweak first) and only if it isn't already mid-playback (a
+  // press on an already-playing sample means "stop," not "retrigger" — see
+  // the pointerdown pad-press handling above). Placed after activateEntity
+  // above so a just-undocked sample's audio nodes actually exist to trigger.
+  if (state.hoverBeatMatcherId && entity.kind === 'sample' && !isEntityPlaying(entityId)) {
+    triggerEntity(entityId);
+    state.triggerFlashes.set(entityId, performance.now());
+  }
+
   state.settleAnim = { id: entityId, startedAt: performance.now(), durationMs: 220 };
 }
