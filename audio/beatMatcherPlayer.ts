@@ -275,6 +275,24 @@ function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
       });
     }
   }
+
+  // The selection ruler's own current point (ui/beatMatcher.ts) — ticks the
+  // same metronome click as a note's own onset, but plain (no wired-target
+  // dispatch, no envelope/pitch/velocity: it's an audible marker for the
+  // user's own ear, not a note), so auditioning a selection loop lets you
+  // hear exactly where the point falls against the audio. Works whether or
+  // not a selection region is currently bounding playback — the point is
+  // its own independent marker.
+  const point = state.currentPointSeconds;
+  if (point !== null && point >= entry.dispatchedUpTo && point < horizon) {
+    const pointCtxTime = ctxTimeForClipSeconds(state, point);
+    playBeatMatcherTick(pointCtxTime, 1);
+    // Same cursor flash a note's own onset gets, deferred to land at the
+    // exact ctx-time the tick itself sounds (it's scheduled ahead of time,
+    // same as the note case) rather than the moment this poll ran.
+    deferToCtxTime(pointCtxTime, () => flashBeatMatcherCursor(entry.featureEntityId));
+  }
+
   entry.dispatchedUpTo = horizon;
 }
 

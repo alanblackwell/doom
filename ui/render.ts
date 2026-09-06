@@ -37,7 +37,8 @@ import type { MelodyItem } from './melody';
 import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
 import { channelConnectorAbsolutePosition, drawSequencerBody, drawSequencerPopup, noteSnapHoldFraction } from './sequencer';
 import type { NoteSnapIndicator } from './sequencer';
-import { drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
+import { beatMatcherNoteSnapHoldFraction, drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
+import type { BeatMatcherNoteSnapIndicator } from './beatMatcher';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1123,6 +1124,19 @@ export function renderFrame(
         const beatMatcherEnvelopeDrag = interaction.beatMatcherEnvelopeDrag;
         const activeBeatMatcherEnvelopeHandle =
           beatMatcherEnvelopeDrag && beatMatcherEnvelopeDrag.entityId === feature.id ? beatMatcherEnvelopeDrag.handle : null;
+        const beatMatcherNoteDrag = interaction.beatMatcherNoteDrag;
+        let beatMatcherNoteSnap: BeatMatcherNoteSnapIndicator | null = null;
+        if (
+          beatMatcherNoteDrag &&
+          beatMatcherNoteDrag.entityId === feature.id &&
+          beatMatcherNoteDrag.snap.snapCandidateSeconds !== null
+        ) {
+          beatMatcherNoteSnap = {
+            candidateSeconds: beatMatcherNoteDrag.snap.snapCandidateSeconds,
+            snapped: beatMatcherNoteDrag.snap.snapped,
+            holdFraction: beatMatcherNoteSnapHoldFraction(beatMatcherNoteDrag.snap, now),
+          };
+        }
         drawBeatMatcherPopup(
           ctx,
           graph,
@@ -1131,6 +1145,7 @@ export function renderFrame(
           interaction.hoverBeatMatcherId === feature.id,
           interaction.draggingTimeAxis?.entityId === feature.id,
           activeBeatMatcherEnvelopeHandle,
+          beatMatcherNoteSnap,
           now,
           drag
         );

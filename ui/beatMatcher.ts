@@ -79,22 +79,32 @@ import type { InteractionState } from './interaction';
 
 export const BEAT_MATCHER_POPUP_WIDTH = 420;
 // Title bar (which also houses the record button — see captureButtonPosition)
-// + a fixed-height track row + spectrogram band + time ruler + a little
-// bottom padding. The track row is dual-purpose rather than collapsing once
-// captured (an earlier version shrank the popup here — reverted): before a
-// capture exists it shows the source/status info inline; once captured, the
-// exact same space instead shows the note track (drawBeatMatcherNoteTrack),
-// so nothing needs to reflow. The two never need to show at once — before a
-// capture there's nothing to author notes against yet, and once captured
-// the info only reappears on demand (drawInfoOverlay), drawn ON TOP of the
-// track row rather than needing its own room.
+// + a fixed-height track row + a thin selection ruler + spectrogram band +
+// time ruler + a little bottom padding. The track row is dual-purpose rather
+// than collapsing once captured (an earlier version shrank the popup here —
+// reverted): before a capture exists it shows the source/status info inline;
+// once captured, the exact same space instead shows the note track
+// (drawBeatMatcherNoteTrack), so nothing needs to reflow. The two never need
+// to show at once — before a capture there's nothing to author notes against
+// yet, and once captured the info only reappears on demand (drawInfoOverlay),
+// drawn ON TOP of the track row rather than needing its own room.
 const TRACK_ROW_HEIGHT = 40;
+// The selection ruler sits between the note track and the spectrogram, time-
+// aligned with both (see drawSelectionRulerBand/drawSelectionRulerMarkers) —
+// thin, since it's just a line of carets, not a full row of content.
+const SELECTION_RULER_HEIGHT = 14;
 const SPECTROGRAM_HEIGHT = 100;
 const RULER_HEIGHT = 16;
 const H_SCROLLBAR_HEIGHT = 8;
 const BOTTOM_PADDING = 8;
 export const BEAT_MATCHER_POPUP_HEIGHT =
-  TITLE_HEIGHT + TRACK_ROW_HEIGHT + SPECTROGRAM_HEIGHT + RULER_HEIGHT + H_SCROLLBAR_HEIGHT + BOTTOM_PADDING;
+  TITLE_HEIGHT +
+  TRACK_ROW_HEIGHT +
+  SELECTION_RULER_HEIGHT +
+  SPECTROGRAM_HEIGHT +
+  RULER_HEIGHT +
+  H_SCROLLBAR_HEIGHT +
+  BOTTOM_PADDING;
 // Room on the right for the zoom axis-handle (flush against the plot
 // area), same spot ui/sequencer.ts reserves RIGHT_MARGIN for (its own
 // per-channel connectors share that margin too, which this track has no
@@ -253,6 +263,31 @@ export interface BeatMatcherState {
   // now — no resynthesis — lower-pitched) sample without resorting to
   // per-note pitch-correction machinery. See cycleBeatMatcherSpeed.
   playbackSpeed: number;
+
+  // --- Selection ruler ---------------------------------------------------
+  // A time-aligned strip between the note track and the spectrogram (see
+  // drawSelectionRulerBand/drawSelectionRulerMarkers) — a start/end pair
+  // marking a region (highlighted between the two), and a separate "current
+  // point" used both as a note-drag snap target (see
+  // applyBeatMatcherNoteSnap) and to select whatever note it sits over (see
+  // setBeatMatcherCurrentPoint). All null until first touched — quiet until
+  // the user actually uses this, same "unshaped until first touched"
+  // convention as BeatMatcherNote.envelope. Reset (back to null) whenever a
+  // fresh capture completes (finishBeatMatcherCapture) — a selection/point
+  // against one clip means nothing against a new, different-length one.
+  selectionStartSeconds: number | null;
+  selectionEndSeconds: number | null;
+  currentPointSeconds: number | null;
+  // While a selection region exists, playback is bounded to it (see
+  // startBeatMatcherPlayback/rewindBeatMatcherPlayback/
+  // advanceBeatMatcherPastEnd) — auditioning a specific point, per this
+  // feature's own spec — and this decides what happens at the selection's
+  // own end: loop back to its start (true) or stop there (false), same
+  // "loop vs. stop" meaning as loopAtEnd, just scoped to the selection
+  // instead of the whole clip. Toggled via the loop control drawn to the
+  // left of the selection region (selectionLoopTogglePosition). Meaningless
+  // (but harmless) while no selection exists.
+  selectionLoop: boolean;
 }
 
 const statesByEntity = new Map<string, BeatMatcherState>();
@@ -279,6 +314,10 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       loopAtEnd: false,
       autoScrollSuspended: false,
       playbackSpeed: 1,
+      selectionStartSeconds: null,
+      selectionEndSeconds: null,
+      currentPointSeconds: null,
+      selectionLoop: false,
     };
     statesByEntity.set(entityId, state);
   }
@@ -364,6 +403,10 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.loopAtEnd = false;
     state.autoScrollSuspended = false;
     state.playbackSpeed = 1;
+    state.selectionStartSeconds = null;
+    state.selectionEndSeconds = null;
+    state.currentPointSeconds = null;
+    state.selectionLoop = false;
   });
   stopWatcher(state);
   state.status = 'paused';
@@ -387,6 +430,10 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.spectrogramImage = null;
   state.liveSpectrogram = null;
   state.notes = [];
+  state.selectionStartSeconds = null;
+  state.selectionEndSeconds = null;
+  state.currentPointSeconds = null;
+  state.selectionLoop = false;
   armBeatMatcher(featureEntityId);
 }
 
@@ -1184,6 +1231,363 @@ export function setBeatMatcherNoteEnvelopeFromHandle(
   }
 }
 
+// --- Selection ruler -----------------------------------------------------
+// A start/end region and a separate "current point" (see BeatMatcherState's
+// own comment) — a start/end drag along the ruler defines the region; a
+// plain click, or dragging the current point's own marker, moves the point
+// instead (see ui/interaction.ts's own pointerdown/pointermove handling for
+// exactly which gesture does which). The point also doubles as an extra
+// snap target for note dragging in the track above (applyBeatMatcherNoteSnap
+// below).
+
+// Moves the current point, clamped to the clip's own bounds, and selects
+// whatever note (if any) now sits under it — the one part of this feature
+// that reaches into note selection, per this feature's own spec.
+export function setBeatMatcherCurrentPoint(featureEntityId: string, seconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (!state.capturedBuffer) return;
+  const clamped = Math.max(0, Math.min(state.capturedBuffer.duration, seconds));
+  state.currentPointSeconds = clamped;
+  const note = state.notes.find((n) => clamped >= n.onsetSeconds && clamped < n.onsetSeconds + n.durationSeconds);
+  if (note) selectBeatMatcherNote(featureEntityId, note.id);
+}
+
+// Sets the selection region from a drag's two endpoints, in whichever order
+// they were actually dragged — always normalized so start <= end.
+export function setBeatMatcherSelectionRange(featureEntityId: string, aSeconds: number, bSeconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (!state.capturedBuffer) return;
+  const duration = state.capturedBuffer.duration;
+  const a = Math.max(0, Math.min(duration, aSeconds));
+  const b = Math.max(0, Math.min(duration, bSeconds));
+  state.selectionStartSeconds = Math.min(a, b);
+  state.selectionEndSeconds = Math.max(a, b);
+}
+
+// Moves just the start caret, clamped so it can never cross the end (and
+// never below 0) — dragging the caret directly, or the keyboard nudge when
+// that's what's focused (see nudgeBeatMatcherSelection).
+export function setBeatMatcherSelectionStart(featureEntityId: string, seconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (state.selectionEndSeconds === null) return;
+  state.selectionStartSeconds = Math.max(0, Math.min(state.selectionEndSeconds, seconds));
+}
+
+// Moves just the end caret, clamped so it can never cross the start (and
+// never past the clip's own duration) — same shape as
+// setBeatMatcherSelectionStart above.
+export function setBeatMatcherSelectionEnd(featureEntityId: string, seconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (state.selectionStartSeconds === null || !state.capturedBuffer) return;
+  state.selectionEndSeconds = Math.max(state.selectionStartSeconds, Math.min(state.capturedBuffer.duration, seconds));
+}
+
+// Cancels the selection region (the "x" button just past the end caret —
+// see selectionClearButtonPosition/drawSelectionClearButton) — leaves the
+// current point untouched, since that's a separate marker with its own
+// independent lifetime.
+export function clearBeatMatcherSelection(featureEntityId: string): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  state.selectionStartSeconds = null;
+  state.selectionEndSeconds = null;
+}
+
+// The loop control to the left of the selection region (see
+// selectionLoopTogglePosition/drawSelectionLoopToggle) — same "loop vs.
+// stop at the end" meaning as toggleBeatMatcherLoopAtEnd, just for the
+// selection's own bounds instead of the whole clip's.
+export function toggleBeatMatcherSelectionLoop(featureEntityId: string): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  state.selectionLoop = !state.selectionLoop;
+}
+
+// --- Selection ruler keyboard focus ---------------------------------------
+// Which part of the ruler Left/Right's keyboard nudge acts on: one edge, the
+// whole region (null), or the current point — set by whichever
+// selection-ruler interaction happened most recently (see
+// ui/interaction.ts's own pointerdown/pointermove/endPress): dragging a
+// caret directly focuses that one edge, a drag that defines a brand-new
+// region focuses the whole thing, and moving the current point (by click or
+// by dragging its own marker) focuses that. Self-heals (see
+// resolvedSelectionFocus below) once whatever it pointed at is gone, rather
+// than needing every unrelated action elsewhere to explicitly clear it.
+type SelectionFocusTarget = 'start' | 'end' | 'point' | null; // null = whole region
+let selectionFocus: { entityId: string; target: SelectionFocusTarget } | null = null;
+
+export function focusBeatMatcherSelection(entityId: string, target: SelectionFocusTarget): void {
+  selectionFocus = { entityId, target };
+}
+
+// Self-heals a stale focus (whatever it pointed at has since been cleared)
+// the same way this file's own selectedBeatMatcherNoteFor does for note
+// selection.
+function resolvedSelectionFocus(): { entityId: string; target: SelectionFocusTarget } | null {
+  if (!selectionFocus) return null;
+  const state = beatMatcherStateFor(selectionFocus.entityId);
+  const stale =
+    selectionFocus.target === 'point' ? state.currentPointSeconds === null : state.selectionStartSeconds === null;
+  if (stale) {
+    selectionFocus = null;
+    return null;
+  }
+  return selectionFocus;
+}
+
+export function hasBeatMatcherSelectionFocus(): boolean {
+  return resolvedSelectionFocus() !== null;
+}
+
+// For drawSelectionRulerMarkers below — which caret (if any) to highlight
+// as the current keyboard-nudge target, so "special keyboard focus" isn't
+// invisible state. 'whole' means both carets move together (target === null).
+export function beatMatcherSelectionFocusFor(entityId: string): 'start' | 'end' | 'whole' | 'point' | null {
+  const focus = resolvedSelectionFocus();
+  if (!focus || focus.entityId !== entityId) return null;
+  return focus.target ?? 'whole';
+}
+
+const SELECTION_NUDGE_PX = 2; // arrow-key time nudge, converted through the current zoom — half the note track's own NOTE_NUDGE_PX, for finer adjustment
+
+// Left/Right keyboard shortcut: nudges whichever part of the ruler was last
+// touched — one edge, the current point, or (no specific edge focused —
+// including right after a full drag that defined the region) the whole
+// selection, preserving its width.
+export function nudgeBeatMatcherSelection(graph: EntityGraph, direction: -1 | 1): void {
+  const focus = resolvedSelectionFocus();
+  if (!focus) return;
+  const { entityId, target } = focus;
+  const state = beatMatcherStateFor(entityId);
+  if (!state.capturedBuffer) return;
+  const grid = resolveBeatMatcherGrid(graph, entityId);
+  if (!grid) return;
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  if (pxPerSec <= 0) return;
+  const step = direction * (SELECTION_NUDGE_PX / pxPerSec);
+
+  if (target === 'point') {
+    if (state.currentPointSeconds === null) return;
+    setBeatMatcherCurrentPoint(entityId, state.currentPointSeconds + step);
+    return;
+  }
+
+  if (state.selectionStartSeconds === null || state.selectionEndSeconds === null) return;
+  if (target === 'start') {
+    setBeatMatcherSelectionStart(entityId, state.selectionStartSeconds + step);
+  } else if (target === 'end') {
+    setBeatMatcherSelectionEnd(entityId, state.selectionEndSeconds + step);
+  } else {
+    const width = state.selectionEndSeconds - state.selectionStartSeconds;
+    const duration = state.capturedBuffer.duration;
+    const newStart = clamp(state.selectionStartSeconds + step, 0, duration - width);
+    state.selectionStartSeconds = newStart;
+    state.selectionEndSeconds = newStart + width;
+  }
+}
+
+const CURRENT_POINT_MARKER_HIT_RADIUS = 7;
+const SELECTION_CARET_HIT_RADIUS = 7; // matches CURRENT_POINT_MARKER_HIT_RADIUS
+
+function hitTestSelectionStartCaret(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  if (state.selectionStartSeconds === null) return false;
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionStartSeconds);
+  const y = (grid.selectionRulerTop + grid.selectionRulerBottom) / 2;
+  return dist(point, { x, y }) <= SELECTION_CARET_HIT_RADIUS;
+}
+
+function hitTestSelectionEndCaret(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  if (state.selectionEndSeconds === null) return false;
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionEndSeconds);
+  const y = (grid.selectionRulerTop + grid.selectionRulerBottom) / 2;
+  return dist(point, { x, y }) <= SELECTION_CARET_HIT_RADIUS;
+}
+
+function currentPointMarkerPosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point | null {
+  if (state.currentPointSeconds === null) return null;
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, state.currentPointSeconds);
+  return { x, y: (grid.selectionRulerTop + grid.selectionRulerBottom) / 2 };
+}
+
+function hitTestCurrentPointMarker(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  const center = currentPointMarkerPosition(grid, pxPerSec, state);
+  return !!center && dist(point, center) <= CURRENT_POINT_MARKER_HIT_RADIUS;
+}
+
+const SELECTION_CLEAR_BUTTON_RADIUS = 5;
+const SELECTION_CLEAR_BUTTON_GAP = 10; // from the end caret's own x to the button's center
+
+// Null (nothing to clear, or no room to draw it before the plot's own right
+// edge — the margin past that belongs to the zoom handle/scrollbar) unless
+// a selection region actually exists.
+function selectionClearButtonPosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point | null {
+  if (state.selectionStartSeconds === null || state.selectionEndSeconds === null) return null;
+  const endX = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionEndSeconds);
+  const x = endX + SELECTION_CLEAR_BUTTON_GAP;
+  if (x + SELECTION_CLEAR_BUTTON_RADIUS > grid.right) return null;
+  return { x, y: (grid.selectionRulerTop + grid.selectionRulerBottom) / 2 };
+}
+
+function hitTestSelectionClearButton(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  const center = selectionClearButtonPosition(grid, pxPerSec, state);
+  return !!center && dist(point, center) <= SELECTION_CLEAR_BUTTON_RADIUS + 3;
+}
+
+const SELECTION_LOOP_TOGGLE_GAP = 10; // from the start caret's own x to the toggle's own center, mirroring SELECTION_CLEAR_BUTTON_GAP on the other side
+
+// Null (no selection, or no room to draw it past the plot's own left edge)
+// unless a selection region actually exists — same shape as
+// selectionClearButtonPosition, just anchored off the start caret instead
+// of the end one, and on the opposite side.
+function selectionLoopTogglePosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point | null {
+  if (state.selectionStartSeconds === null || state.selectionEndSeconds === null) return null;
+  const startX = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionStartSeconds);
+  const x = startX - SELECTION_LOOP_TOGGLE_GAP;
+  if (x - TRANSPORT_BUTTON_RADIUS < grid.left) return null;
+  return { x, y: (grid.selectionRulerTop + grid.selectionRulerBottom) / 2 };
+}
+
+function hitTestSelectionLoopToggle(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  const center = selectionLoopTogglePosition(grid, pxPerSec, state);
+  return !!center && dist(point, center) <= TRANSPORT_BUTTON_RADIUS + 4;
+}
+
+function hitTestSelectionRulerBand(grid: Grid, point: Point): boolean {
+  return point.x >= grid.left && point.x <= grid.right && point.y >= grid.selectionRulerTop && point.y <= grid.selectionRulerBottom;
+}
+
+// --- Note-drag snap --------------------------------------------------------
+// Speed-gated hold-to-snap: a dragged note edge/position only locks onto
+// another note's boundary (or the selection ruler's own current point)
+// after the cursor has been both close to that candidate AND moving slowly
+// for SNAP_HOLD_MS continuously — a fast drag glides straight past nearby
+// candidates with no snap at all. Same algorithm as ui/sequencer.ts's own
+// note-edge snap, duplicated per this file's own header on staying
+// independent of ui/sequencer.ts — the candidate set is what differs: a
+// single track has no "other channels" to align across the way the
+// sequencer's own snap does, so this track's own other notes plus the
+// selection ruler's current point stand in for that.
+const SNAP_PROXIMITY_PX = 8; // must be this close on screen to be an eligible candidate
+const SNAP_RELEASE_PROXIMITY_PX = 16; // hysteresis: once snapped, must move this far to release
+const SNAP_SPEED_THRESHOLD_PX_PER_MS = 0.3; // "slow enough" for the hold to count at all
+const SNAP_HOLD_MS = 350; // how long "slow and near" has to hold before it locks
+
+export interface BeatMatcherNoteSnapState {
+  lastPointer: Point;
+  lastMoveAt: number; // performance.now()
+  snapCandidateSeconds: number | null; // shown as a guide line whenever set, whether or not the hold has completed
+  snapHoldStartAt: number | null; // null unless actively counting down toward a lock
+  snapped: boolean;
+}
+
+export function initialBeatMatcherNoteSnapState(pointer: Point, now: number): BeatMatcherNoteSnapState {
+  return { lastPointer: pointer, lastMoveAt: now, snapCandidateSeconds: null, snapHoldStartAt: null, snapped: false };
+}
+
+// null once snapped (nothing left to count down) or not currently holding —
+// exported so ui/render.ts can turn this into the countdown dial's fill
+// fraction, same as ui/sequencer.ts's own noteSnapHoldFraction.
+export function beatMatcherNoteSnapHoldFraction(snap: BeatMatcherNoteSnapState, now: number): number | null {
+  if (snap.snapped || snap.snapHoldStartAt === null) return null;
+  return Math.min(1, (now - snap.snapHoldStartAt) / SNAP_HOLD_MS);
+}
+
+// Every note boundary (onset and offset) in the track except the note
+// currently being dragged, plus the selection ruler's own current point (if
+// set) — see this section's own header.
+function snapCandidatesFor(state: BeatMatcherState, excludeNoteId: string | null): number[] {
+  const candidates: number[] = [];
+  for (const note of state.notes) {
+    if (note.id === excludeNoteId) continue;
+    candidates.push(note.onsetSeconds, note.onsetSeconds + note.durationSeconds);
+  }
+  if (state.currentPointSeconds !== null) candidates.push(state.currentPointSeconds);
+  return candidates;
+}
+
+function applyNoteSnap(
+  snap: BeatMatcherNoteSnapState,
+  candidates: number[],
+  rawSeconds: number,
+  pointer: Point,
+  now: number,
+  pxPerSec: number
+): number {
+  const dtMs = Math.max(1, now - snap.lastMoveAt); // avoid div-by-zero on a same-tick call
+  const speedPxPerMs = dist(pointer, snap.lastPointer) / dtMs;
+  snap.lastPointer = pointer;
+  snap.lastMoveAt = now;
+
+  // Stay snapped as long as we're within the (larger) release tolerance of
+  // whatever we snapped to, regardless of speed — deliberate hysteresis so
+  // a snapped edge doesn't immediately chatter loose from a tiny jitter.
+  if (snap.snapped && snap.snapCandidateSeconds !== null) {
+    const releaseSeconds = SNAP_RELEASE_PROXIMITY_PX / pxPerSec;
+    if (Math.abs(rawSeconds - snap.snapCandidateSeconds) <= releaseSeconds) {
+      return snap.snapCandidateSeconds;
+    }
+    snap.snapped = false;
+    snap.snapCandidateSeconds = null;
+    snap.snapHoldStartAt = null;
+  }
+
+  const proximitySeconds = SNAP_PROXIMITY_PX / pxPerSec;
+  let nearest: number | null = null;
+  let nearestDist = Infinity;
+  for (const c of candidates) {
+    const d = Math.abs(rawSeconds - c);
+    if (d <= proximitySeconds && d < nearestDist) {
+      nearest = c;
+      nearestDist = d;
+    }
+  }
+
+  if (nearest === null) {
+    snap.snapCandidateSeconds = null;
+    snap.snapHoldStartAt = null;
+    return rawSeconds;
+  }
+
+  // In range — always shown as a guide line (snapCandidateSeconds set), but
+  // the hold-timeout countdown only actually runs while the cursor stays
+  // slow at THIS candidate; picking up speed, or drifting to a different
+  // one, restarts it from zero rather than carrying over partial progress.
+  const candidateChanged = snap.snapCandidateSeconds !== nearest;
+  const tooFast = speedPxPerMs >= SNAP_SPEED_THRESHOLD_PX_PER_MS;
+  snap.snapCandidateSeconds = nearest;
+
+  if (tooFast || candidateChanged) {
+    snap.snapHoldStartAt = tooFast ? null : now;
+    return rawSeconds;
+  }
+  if (snap.snapHoldStartAt === null) {
+    snap.snapHoldStartAt = now;
+  } else if (now - snap.snapHoldStartAt >= SNAP_HOLD_MS) {
+    snap.snapped = true;
+    return nearest;
+  }
+  return rawSeconds;
+}
+
+// Resolves grid/state/candidates from just (graph, entityId), same shape as
+// ui/sequencer.ts's own applySequencerNoteSnap — `snap` is mutated in place,
+// and the seconds value to actually apply is returned.
+export function applyBeatMatcherNoteSnap(
+  graph: EntityGraph,
+  entityId: string,
+  snap: BeatMatcherNoteSnapState,
+  excludeNoteId: string | null,
+  rawSeconds: number,
+  pointer: Point,
+  now: number,
+  drag?: DragContext
+): number {
+  const grid = resolveBeatMatcherGrid(graph, entityId, drag);
+  if (!grid) return rawSeconds;
+  const state = beatMatcherStateFor(entityId);
+  const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
+  const candidates = snapCandidatesFor(state, excludeNoteId);
+  return applyNoteSnap(snap, candidates, rawSeconds, pointer, now, pxPerSec);
+}
+
 // --- Grid / zoom / scroll ------------------------------------------------
 // Real-time-seconds timeline, same coordinate model as ui/organelle.ts's
 // envelope curve and ui/sequencer.ts's own popup: zoomSeconds is how many
@@ -1255,6 +1659,8 @@ interface Grid {
   right: number; // popup's own right edge minus RIGHT_MARGIN — where the axis handle/zoom icons live
   trackTop: number;
   trackBottom: number;
+  selectionRulerTop: number;
+  selectionRulerBottom: number;
   spectrogramBottom: number;
   rulerTop: number;
   rulerBottom: number;
@@ -1264,13 +1670,17 @@ function gridFor(popup: Rect): Grid {
   const b = popupBounds(popup);
   const trackTop = b.top + TITLE_HEIGHT;
   const trackBottom = trackTop + TRACK_ROW_HEIGHT;
-  const spectrogramBottom = trackBottom + SPECTROGRAM_HEIGHT;
+  const selectionRulerTop = trackBottom;
+  const selectionRulerBottom = selectionRulerTop + SELECTION_RULER_HEIGHT;
+  const spectrogramBottom = selectionRulerBottom + SPECTROGRAM_HEIGHT;
   const rulerTop = spectrogramBottom;
   return {
     left: b.left,
     right: b.right - RIGHT_MARGIN,
     trackTop,
     trackBottom,
+    selectionRulerTop,
+    selectionRulerBottom,
     spectrogramBottom,
     rulerTop,
     rulerBottom: rulerTop + RULER_HEIGHT,
@@ -1343,11 +1753,18 @@ function beatMatcherCursorFlashGlow(featureEntityId: string, now: number): numbe
 export function startBeatMatcherPlayback(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (state.playing || !state.capturedBuffer) return;
-  // Restart from the top if it's already run off the end (or sitting
-  // exactly at the end marker, having just stopped there) — pressing play
-  // again should replay from 0, not immediately re-trigger
-  // advanceBeatMatcherPastEnd on the very next frame and stop again.
-  if (state.pausedAtSeconds >= state.endSeconds) state.pausedAtSeconds = 0;
+  if (state.selectionStartSeconds !== null) {
+    // Auditioning a specific point (this feature's own spec): while a
+    // selection region exists, playback always starts at its own start,
+    // not wherever the playhead happened to be parked.
+    state.pausedAtSeconds = state.selectionStartSeconds;
+  } else if (state.pausedAtSeconds >= state.endSeconds) {
+    // Restart from the top if it's already run off the end (or sitting
+    // exactly at the end marker, having just stopped there) — pressing play
+    // again should replay from 0, not immediately re-trigger
+    // advanceBeatMatcherPastEnd on the very next frame and stop again.
+    state.pausedAtSeconds = 0;
+  }
   state.playing = true;
   state.playStartCtxTime = getAudioContext().currentTime;
   // Same "unfreeze ctx.currentTime from a real click" fire-and-forget as
@@ -1374,10 +1791,12 @@ export function toggleBeatMatcherPlayback(featureEntityId: string): void {
 
 // Zeroes both the playhead and the view's scroll position, same as
 // ui/sequencer.ts's own rewindSequencer — brings a panned-away view back
-// to the start along with the playhead.
+// to the start along with the playhead. While a selection region exists,
+// "the start" means the selection's own start instead of absolute zero —
+// same reasoning as startBeatMatcherPlayback.
 export function rewindBeatMatcherPlayback(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
-  state.pausedAtSeconds = 0;
+  state.pausedAtSeconds = state.selectionStartSeconds ?? 0;
   state.scrollSeconds = 0;
   if (state.playing) state.playStartCtxTime = getAudioContext().currentTime;
   state.autoScrollSuspended = false;
@@ -1402,6 +1821,28 @@ export function scrubBeatMatcherPlayback(featureEntityId: string, seconds: numbe
 function advanceBeatMatcherPastEnd(state: BeatMatcherState): void {
   if (!state.playing || !state.capturedBuffer) return;
   const playhead = currentBeatMatcherPlaybackSeconds(state);
+
+  // Auditioning a specific point (this feature's own spec): while a
+  // selection region exists, it bounds playback instead of the whole
+  // clip's own endSeconds/loopAtEnd — same loop-or-stop shape as the plain
+  // case below, just against the selection's own start/end/selectionLoop.
+  if (state.selectionStartSeconds !== null && state.selectionEndSeconds !== null) {
+    const start = state.selectionStartSeconds;
+    const end = state.selectionEndSeconds;
+    if (playhead < end) return;
+    if (state.selectionLoop) {
+      // Same "shift the ctx-time anchor back by exactly one loop length"
+      // technique as the plain case below, just a (end - start)-long loop
+      // instead of one starting at 0.
+      state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + (end - start) / state.playbackSpeed;
+    } else {
+      state.pausedAtSeconds = end;
+      state.playing = false;
+      state.playStartCtxTime = null;
+    }
+    return;
+  }
+
   if (playhead < state.endSeconds) return;
   if (state.loopAtEnd) {
     // Shifts the ctx-time reference forward by exactly one loop length
@@ -1798,6 +2239,12 @@ export type BeatMatcherHit =
   | { entityId: string; kind: 'noteVelocityTextClick'; noteId: string }
   | { entityId: string; kind: 'noteVelocitySliderDrag'; noteId: string }
   | { entityId: string; kind: 'noteEnvelopeHandle'; noteId: string; handle: HandleKind }
+  | { entityId: string; kind: 'currentPointMarkerDrag' }
+  | { entityId: string; kind: 'selectionStartCaretDrag' }
+  | { entityId: string; kind: 'selectionEndCaretDrag' }
+  | { entityId: string; kind: 'selectionClearButton' }
+  | { entityId: string; kind: 'selectionLoopToggle' }
+  | { entityId: string; kind: 'selectionRulerPress'; seconds: number }
   | { entityId: string; kind: 'axisZoomIn' }
   | { entityId: string; kind: 'axisZoomOut' }
   | { entityId: string; kind: 'axisHandle' }
@@ -1886,6 +2333,37 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
 
       const noteHit = hitTestNoteTrack(grid, pxPerSec, state, point);
       if (noteHit) return { entityId: entity.id, ...noteHit };
+
+      // The selection ruler's own current-point marker takes priority over
+      // a plain press elsewhere on the ruler, which instead starts a
+      // start/end selection drag (or, without crossing the drag threshold,
+      // just moves the current point — see ui/interaction.ts's own
+      // pointerdown/pointermove handling for the click-vs-drag split).
+      if (hitTestCurrentPointMarker(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'currentPointMarkerDrag' };
+      }
+      // A press directly on the start/end caret drags just that edge,
+      // rather than starting a new selection drag — checked ahead of the
+      // clear button/loop toggle/plain ruler press below.
+      if (hitTestSelectionStartCaret(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'selectionStartCaretDrag' };
+      }
+      if (hitTestSelectionEndCaret(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'selectionEndCaretDrag' };
+      }
+      // The clear ("x") button sits just past the end caret, and the loop
+      // toggle just before the start caret, both inside the ruler's own
+      // bounds — checked ahead of a plain ruler press so neither gets
+      // swallowed by the "start a new selection drag" case.
+      if (hitTestSelectionClearButton(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'selectionClearButton' };
+      }
+      if (hitTestSelectionLoopToggle(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'selectionLoopToggle' };
+      }
+      if (hitTestSelectionRulerBand(grid, point)) {
+        return { entityId: entity.id, kind: 'selectionRulerPress', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
+      }
 
       // Two ways to start a scrub: anywhere along the ruler row (a "click
       // to jump there" strip), or a grab directly on the drawn playback
@@ -2365,8 +2843,191 @@ function drawBeatMatcherNoteTrack(
   ctx.restore();
 }
 
+// --- Selection ruler ------------------------------------------------------
+// Sits between the note track and the spectrogram, time-aligned with both
+// (see BeatMatcherState's own comment on the feature) — carets mark the
+// start/end selection region (highlighted between them) and the current
+// point. drawSelectionRulerBand draws the row's own background (always,
+// even before a capture, so the row doesn't look like a gap in the
+// layout); drawSelectionRulerMarkers draws the carets/highlight themselves
+// (gated on hasCapture, same as the note track/end marker).
+
+const SELECTION_RULER_BG = 'rgba(0, 0, 0, 0.3)';
+const SELECTION_HIGHLIGHT = 'rgba(201, 138, 60, 0.22)'; // translucent NOTE_COLOR wash
+const CARET_COLOR = 'rgba(255, 255, 255, 0.65)';
+const CARET_SIZE = 5;
+
+function drawSelectionRulerBand(ctx: CanvasRenderingContext2D, grid: Grid): void {
+  const height = grid.selectionRulerBottom - grid.selectionRulerTop;
+  ctx.save();
+  ctx.fillStyle = SELECTION_RULER_BG;
+  ctx.fillRect(grid.left, grid.selectionRulerTop, grid.right - grid.left, height);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(grid.left, grid.selectionRulerTop, grid.right - grid.left, height);
+  ctx.restore();
+}
+
+// A small downward-pointing triangle sitting on the ruler's own line — same
+// "caret" shape a text cursor or a DAW loop-region handle uses.
+function drawCaret(ctx: CanvasRenderingContext2D, x: number, grid: Grid, color: string): void {
+  const midY = (grid.selectionRulerTop + grid.selectionRulerBottom) / 2;
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x - CARET_SIZE / 2, grid.selectionRulerTop);
+  ctx.lineTo(x + CARET_SIZE / 2, grid.selectionRulerTop);
+  ctx.lineTo(x, midY);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSelectionRulerMarkers(
+  ctx: CanvasRenderingContext2D,
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  keyboardFocus: 'start' | 'end' | 'whole' | 'point' | null
+): void {
+  if (state.selectionStartSeconds !== null && state.selectionEndSeconds !== null) {
+    const startX = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionStartSeconds);
+    const endX = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionEndSeconds);
+    if (endX >= grid.left && startX <= grid.right) {
+      const left = Math.max(grid.left, startX);
+      const right = Math.min(grid.right, endX);
+      ctx.save();
+      ctx.fillStyle = SELECTION_HIGHLIGHT;
+      ctx.fillRect(left, grid.selectionRulerTop, Math.max(0, right - left), grid.selectionRulerBottom - grid.selectionRulerTop);
+      ctx.restore();
+    }
+    // Whichever edge (or both, for 'whole') is the current keyboard-nudge
+    // target reads as ACCENT — same "highlight what arrow keys would move"
+    // idea as ui/sequencer.ts's own edgeFocus outline on a selected note.
+    const startFocused = keyboardFocus === 'start' || keyboardFocus === 'whole';
+    const endFocused = keyboardFocus === 'end' || keyboardFocus === 'whole';
+    if (startX >= grid.left && startX <= grid.right) drawCaret(ctx, startX, grid, startFocused ? ACCENT : CARET_COLOR);
+    if (endX >= grid.left && endX <= grid.right) drawCaret(ctx, endX, grid, endFocused ? ACCENT : CARET_COLOR);
+
+    const clearButton = selectionClearButtonPosition(grid, pxPerSec, state);
+    if (clearButton) drawSelectionClearButton(ctx, clearButton);
+
+    const loopToggle = selectionLoopTogglePosition(grid, pxPerSec, state);
+    if (loopToggle) drawSelectionLoopToggle(ctx, loopToggle, state.selectionLoop);
+  }
+
+  const point = currentPointMarkerPosition(grid, pxPerSec, state);
+  if (point && point.x >= grid.left && point.x <= grid.right) {
+    drawCaret(ctx, point.x, grid, ACCENT);
+  }
+}
+
+// A small "x" just past the selection's own end caret, for
+// clearBeatMatcherSelection — same small-circle-with-glyph visual language
+// as this file's own drawDuplicateButton.
+function drawSelectionClearButton(ctx: CanvasRenderingContext2D, center: Point): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, SELECTION_CLEAR_BUTTON_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fill();
+  ctx.strokeStyle = CARET_COLOR;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.lineCap = 'round';
+  const s = SELECTION_CLEAR_BUTTON_RADIUS * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(center.x - s, center.y - s);
+  ctx.lineTo(center.x + s, center.y + s);
+  ctx.moveTo(center.x + s, center.y - s);
+  ctx.lineTo(center.x - s, center.y + s);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The loop control to the left of the selection region — same ring+glyph
+// visual language as the whole-clip end marker's own toggle
+// (drawTransportButtonRing/drawLoopStopIcon, both defined further down this
+// file), reused directly rather than redrawn, since it's the identical
+// "loop vs. stop" glyph either way.
+function drawSelectionLoopToggle(ctx: CanvasRenderingContext2D, center: Point, looping: boolean): void {
+  drawTransportButtonRing(ctx, center);
+  drawLoopStopIcon(ctx, center, looping);
+}
+
+// The dotted vertical line marking the current point, spanning the note
+// track and the spectrogram (per this feature's own spec) — drawn on top of
+// both, same "overlay cursor" treatment as drawBeatMatcherPlaybackLine, just
+// dashed and in a distinct style so the two are never mistaken for one
+// another when both happen to be visible at once.
+function drawCurrentPointLine(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+  const point = currentPointMarkerPosition(grid, pxPerSec, state);
+  if (!point || point.x < grid.left || point.x > grid.right) return;
+  ctx.save();
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, grid.trackTop);
+  ctx.lineTo(point.x, grid.spectrogramBottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// Shown for a note-edge/move drag while a snap candidate is in range —
+// whether or not the hold has completed. Same shape as
+// ui/sequencer.ts's own NoteSnapIndicator, independent code.
+export interface BeatMatcherNoteSnapIndicator {
+  candidateSeconds: number;
+  snapped: boolean;
+  holdFraction: number | null;
+}
+
+const SNAP_DIAL_RADIUS = 5;
+
+function drawBeatMatcherNoteSnapIndicator(
+  ctx: CanvasRenderingContext2D,
+  grid: Grid,
+  pxPerSec: number,
+  state: BeatMatcherState,
+  indicator: BeatMatcherNoteSnapIndicator
+): void {
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, indicator.candidateSeconds);
+  if (x < grid.left || x > grid.right) return;
+
+  ctx.save();
+  ctx.strokeStyle = indicator.snapped ? ACCENT : 'rgba(255, 255, 255, 0.4)';
+  ctx.lineWidth = indicator.snapped ? 2 : 1;
+  ctx.beginPath();
+  ctx.moveTo(x, grid.trackTop);
+  ctx.lineTo(x, grid.spectrogramBottom);
+  ctx.stroke();
+  ctx.restore();
+
+  if (indicator.holdFraction === null) return;
+  const center = { x, y: (grid.trackTop + grid.trackBottom) / 2 };
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, SNAP_DIAL_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const startAngle = -Math.PI / 2;
+  const endAngle = startAngle + indicator.holdFraction * Math.PI * 2;
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.moveTo(center.x, center.y);
+  ctx.arc(center.x, center.y, SNAP_DIAL_RADIUS, startAngle, endAngle);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawSpectrogramBand(ctx: CanvasRenderingContext2D, grid: Grid, state: BeatMatcherState): void {
-  const bandTop = grid.trackBottom;
+  const bandTop = grid.selectionRulerBottom;
   const width = grid.right - grid.left;
   ctx.save();
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -2719,6 +3380,7 @@ export function drawBeatMatcherPopup(
   isDropHover: boolean,
   isAxisDragging: boolean,
   activeEnvelopeHandle: HandleKind | null,
+  noteSnap: BeatMatcherNoteSnapIndicator | null,
   now: number,
   drag?: DragContext
 ): void {
@@ -2792,12 +3454,22 @@ export function drawBeatMatcherPopup(
     drawInlineCaptureInfo(ctx, popup, bodyTop, source, state);
   }
 
+  // Reserved the same whether or not there's a capture yet (like the track
+  // row above), so the layout never reflows — its own carets/highlight only
+  // draw once there's actually a clip to place them against (below).
+  drawSelectionRulerBand(ctx, grid);
+
   drawSpectrogramBand(ctx, grid, state);
   drawTimeRuler(ctx, grid, pxPerSec, state);
 
   if (hasCapture) {
     drawBeatMatcherTimeGrid(ctx, grid, pxPerSec, state);
     drawEndMarker(ctx, grid, pxPerSec, state);
+    drawSelectionRulerMarkers(ctx, grid, pxPerSec, state, beatMatcherSelectionFocusFor(entity.id));
+    if (noteSnap) {
+      drawBeatMatcherNoteSnapIndicator(ctx, grid, pxPerSec, state, noteSnap);
+    }
+    drawCurrentPointLine(ctx, grid, pxPerSec, state);
     drawBeatMatcherPlaybackLine(ctx, grid, pxPerSec, state, beatMatcherCursorFlashGlow(entity.id, now));
     drawAxisHandle(ctx, grid, isAxisDragging);
     drawZoomIcon(ctx, axisZoomInIconPosition(grid), 'in');

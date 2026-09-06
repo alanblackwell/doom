@@ -141,12 +141,15 @@ import {
   beatMatcherAttackDecayHandlesCoincide,
   beatMatcherClearDropPosition,
   beatMatcherDropTargetAt,
+  beatMatcherNoteSnapHoldFraction,
   beatMatcherSecondsAtPoint,
   beatMatcherStateFor,
   beatMatcherVelocityDragTrackAtPointer,
   beatMatcherVelocitySliderOpenFor,
   beatMatcherZoomStep,
+  applyBeatMatcherNoteSnap,
   closeBeatMatcherInfoOverlay,
+  clearBeatMatcherSelection,
   closeBeatMatcherVelocitySlider,
   createBeatMatcherNoteAt,
   cycleBeatMatcherSpeed,
@@ -154,9 +157,13 @@ import {
   deleteSelectedBeatMatcherNote,
   deselectBeatMatcherNote,
   duplicateSelectedBeatMatcherNote,
+  focusBeatMatcherSelection,
+  hasBeatMatcherSelectionFocus,
   hasSelectedBeatMatcherNote,
   hitTestBeatMatcherPopup,
+  initialBeatMatcherNoteSnapState,
   moveBeatMatcherNote,
+  nudgeBeatMatcherSelection,
   nudgeSelectedBeatMatcherNotePitch,
   nudgeSelectedBeatMatcherNoteTime,
   pressBeatMatcherRecordButton,
@@ -165,9 +172,13 @@ import {
   rewindBeatMatcherPlayback,
   scrubBeatMatcherPlayback,
   selectBeatMatcherNote,
+  setBeatMatcherCurrentPoint,
   setBeatMatcherEnd,
   setBeatMatcherNoteEnvelopeFromHandle,
   setBeatMatcherNoteVelocityFromTrack,
+  setBeatMatcherSelectionEnd,
+  setBeatMatcherSelectionRange,
+  setBeatMatcherSelectionStart,
   setBeatMatcherSource,
   setSelectedBeatMatcherNoteEdgeFocus,
   setSelectedBeatMatcherNotePitchClass,
@@ -175,10 +186,11 @@ import {
   sharpenSelectedBeatMatcherNote,
   toggleBeatMatcherLoopAtEnd,
   toggleBeatMatcherPlayback,
+  toggleBeatMatcherSelectionLoop,
   toggleBeatMatcherVelocitySlider,
   updateBeatMatcherScrollFromTrackX,
 } from './beatMatcher';
-import type { BeatMatcherVelocityTrack } from './beatMatcher';
+import type { BeatMatcherNoteSnapState, BeatMatcherVelocityTrack } from './beatMatcher';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -393,12 +405,15 @@ export interface InteractionState {
   // 'create' mode/threshold the way sequencerNoteDrag has: a press on empty
   // track space creates a minimum-duration note immediately and starts
   // dragging its right edge, so a plain click still leaves a short, visible
-  // note rather than requiring a drag to produce anything at all.
+  // note rather than requiring a drag to produce anything at all. `snap` is
+  // mutated in place every pointermove by ui/beatMatcher.ts's own
+  // applyBeatMatcherNoteSnap, same shape as sequencerNoteDrag's own snap.
   beatMatcherNoteDrag: {
     entityId: string;
     noteId: string;
     mode: 'move' | 'resizeLeft' | 'resizeRight';
     grabOffsetSeconds: number; // 'move' only — preserves where within the note you grabbed it
+    snap: BeatMatcherNoteSnapState;
   } | null;
 
   // The beat-matcher feature whose playback line/ruler is currently being
@@ -423,6 +438,26 @@ export interface InteractionState {
   // drag direction) as sequencerEnvelopeDrag above (see
   // ui/beatMatcher.ts's setBeatMatcherNoteEnvelopeFromHandle).
   beatMatcherEnvelopeDrag: { entityId: string; noteId: string; handle: HandleKind; pendingAxisFrom: Point | null } | null;
+
+  // The beat-matcher's selection ruler (ui/beatMatcher.ts) being dragged —
+  // 'create' is a press on the ruler body itself, not yet resolved into
+  // either a click (sets the current point, on release without crossing the
+  // drag threshold — see endPress) or a drag (sets the start/end selection
+  // region live, from `startSeconds` to wherever the pointer currently is),
+  // same press/threshold shape as melodyPress and sequencerNoteDrag's own
+  // 'create' mode above. 'resizeStart'/'resizeEnd' are a direct grab of one
+  // caret — no click-vs-drag ambiguity, so no threshold/startSeconds needed.
+  beatMatcherSelectionDrag:
+    | { entityId: string; mode: 'create'; startPointer: Point; startSeconds: number; dragging: boolean }
+    | { entityId: string; mode: 'resizeStart' | 'resizeEnd' }
+    | null;
+
+  // The beat-matcher selection ruler's own current-point marker being
+  // dragged directly — moves the point (and whatever note selection follows
+  // it, see ui/beatMatcher.ts's setBeatMatcherCurrentPoint) rather than
+  // defining a selection region, distinct from beatMatcherSelectionDrag
+  // above.
+  beatMatcherCurrentPointDrag: { entityId: string } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -464,6 +499,8 @@ export function createInteractionState(): InteractionState {
     beatMatcherEndDrag: null,
     beatMatcherVelocityDrag: null,
     beatMatcherEnvelopeDrag: null,
+    beatMatcherSelectionDrag: null,
+    beatMatcherCurrentPointDrag: null,
   };
 }
 
@@ -1082,8 +1119,12 @@ export function attachInteraction(
       // Every case below re-selects its own note (noteCreate included — a
       // beat-matcher note exists the instant it's created, unlike the
       // sequencer's own deferred-until-drag creation, so it can be selected
-      // right away) except these four — for anything else, a press
-      // deselects whatever note was current. noteDuplicateButton doesn't
+      // right away) except the ones listed below — for anything else, a
+      // press deselects whatever note was current (currentPointMarkerDrag/
+      // selectionRulerPress included: those go through
+      // setBeatMatcherCurrentPoint instead, which re-selects on its own if
+      // the point lands on a note — see ui/beatMatcher.ts's own comment).
+      // noteDuplicateButton doesn't
       // itself call selectBeatMatcherNote (it hands off to
       // duplicateSelectedBeatMatcherNote, which selects the CLONE instead)
       // but still needs the ORIGINAL to still be selected when that runs,
@@ -1127,6 +1168,7 @@ export function attachInteraction(
             noteId,
             mode: 'resizeRight',
             grabOffsetSeconds: 0,
+            snap: initialBeatMatcherNoteSnapState(point, performance.now()),
           };
         }
       } else if (beatMatcherHit.kind === 'noteMove') {
@@ -1139,6 +1181,7 @@ export function attachInteraction(
           noteId: beatMatcherHit.noteId,
           mode: 'move',
           grabOffsetSeconds: beatMatcherHit.grabOffsetSeconds,
+          snap: initialBeatMatcherNoteSnapState(point, performance.now()),
         };
       } else if (beatMatcherHit.kind === 'noteResizeLeft' || beatMatcherHit.kind === 'noteResizeRight') {
         canvas.setPointerCapture(e.pointerId);
@@ -1150,6 +1193,47 @@ export function attachInteraction(
           noteId: beatMatcherHit.noteId,
           mode: beatMatcherHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
           grabOffsetSeconds: 0,
+          snap: initialBeatMatcherNoteSnapState(point, performance.now()),
+        };
+      } else if (beatMatcherHit.kind === 'currentPointMarkerDrag') {
+        canvas.setPointerCapture(e.pointerId);
+        setBeatMatcherCurrentPoint(beatMatcherHit.entityId, beatMatcherSecondsAtPoint(graph, beatMatcherHit.entityId, point) ?? 0); // jump to the click, then keep tracking on move
+        focusBeatMatcherSelection(beatMatcherHit.entityId, 'point');
+        state.beatMatcherCurrentPointDrag = { entityId: beatMatcherHit.entityId };
+      } else if (beatMatcherHit.kind === 'selectionStartCaretDrag') {
+        // A press directly on the start caret drags just that edge, rather
+        // than starting a new selection — see ui/beatMatcher.ts's own
+        // hitTestSelectionStartCaret. Focuses this edge for the keyboard
+        // nudge too (see this feature's own spec).
+        canvas.setPointerCapture(e.pointerId);
+        focusBeatMatcherSelection(beatMatcherHit.entityId, 'start');
+        state.beatMatcherSelectionDrag = { entityId: beatMatcherHit.entityId, mode: 'resizeStart' };
+      } else if (beatMatcherHit.kind === 'selectionEndCaretDrag') {
+        canvas.setPointerCapture(e.pointerId);
+        focusBeatMatcherSelection(beatMatcherHit.entityId, 'end');
+        state.beatMatcherSelectionDrag = { entityId: beatMatcherHit.entityId, mode: 'resizeEnd' };
+      } else if (beatMatcherHit.kind === 'selectionClearButton') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the note track's own duplicate button.
+        clearBeatMatcherSelection(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'selectionLoopToggle') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the whole-clip end marker's own loop/stop toggle.
+        toggleBeatMatcherSelectionLoop(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'selectionRulerPress') {
+        // Not yet resolved into a click (sets the current point) or a drag
+        // (defines the start/end selection region, and focuses the WHOLE
+        // selection for the keyboard nudge the moment it actually starts —
+        // see pointermove below) — see this decision in pointermove/endPress
+        // below, same press/threshold shape as sequencerNoteDrag's own
+        // 'create' mode.
+        canvas.setPointerCapture(e.pointerId);
+        state.beatMatcherSelectionDrag = {
+          entityId: beatMatcherHit.entityId,
+          mode: 'create',
+          startPointer: point,
+          startSeconds: beatMatcherHit.seconds,
+          dragging: false,
         };
       } else if (beatMatcherHit.kind === 'noteDuplicateButton') {
         // A discrete click, not a drag — no pointer capture needed, same as
@@ -1505,13 +1589,48 @@ export function attachInteraction(
     }
 
     if (state.beatMatcherNoteDrag) {
-      const { entityId, noteId, mode, grabOffsetSeconds } = state.beatMatcherNoteDrag;
-      const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
-      if (seconds !== null) {
-        if (mode === 'move') moveBeatMatcherNote(entityId, noteId, seconds - grabOffsetSeconds);
-        else if (mode === 'resizeLeft') resizeBeatMatcherNoteLeft(entityId, noteId, seconds);
-        else resizeBeatMatcherNoteRight(entityId, noteId, seconds);
+      const noteDrag = state.beatMatcherNoteDrag;
+      const { entityId, noteId, mode, grabOffsetSeconds } = noteDrag;
+      const rawSeconds = beatMatcherSecondsAtPoint(graph, entityId, point);
+      if (rawSeconds !== null) {
+        const targetSeconds = mode === 'move' ? rawSeconds - grabOffsetSeconds : rawSeconds;
+        const snappedSeconds = applyBeatMatcherNoteSnap(graph, entityId, noteDrag.snap, noteId, targetSeconds, point, performance.now());
+        if (mode === 'move') moveBeatMatcherNote(entityId, noteId, snappedSeconds);
+        else if (mode === 'resizeLeft') resizeBeatMatcherNoteLeft(entityId, noteId, snappedSeconds);
+        else resizeBeatMatcherNoteRight(entityId, noteId, snappedSeconds);
       }
+      return;
+    }
+
+    if (state.beatMatcherSelectionDrag) {
+      const drag = state.beatMatcherSelectionDrag;
+      if (drag.mode === 'create') {
+        if (!drag.dragging) {
+          const dx = point.x - drag.startPointer.x;
+          const dy = point.y - drag.startPointer.y;
+          if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
+          drag.dragging = true;
+          // Only now — an actual region is being defined, not just a
+          // still-ambiguous press — does this focus the WHOLE selection for
+          // the keyboard nudge (see this feature's own spec).
+          focusBeatMatcherSelection(drag.entityId, null);
+        }
+        const seconds = beatMatcherSecondsAtPoint(graph, drag.entityId, point);
+        if (seconds !== null) setBeatMatcherSelectionRange(drag.entityId, drag.startSeconds, seconds);
+      } else {
+        const seconds = beatMatcherSecondsAtPoint(graph, drag.entityId, point);
+        if (seconds !== null) {
+          if (drag.mode === 'resizeStart') setBeatMatcherSelectionStart(drag.entityId, seconds);
+          else setBeatMatcherSelectionEnd(drag.entityId, seconds);
+        }
+      }
+      return;
+    }
+
+    if (state.beatMatcherCurrentPointDrag) {
+      const { entityId } = state.beatMatcherCurrentPointDrag;
+      const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
+      if (seconds !== null) setBeatMatcherCurrentPoint(entityId, seconds);
       return;
     }
 
@@ -1851,6 +1970,28 @@ export function attachInteraction(
       return;
     }
 
+    if (state.beatMatcherSelectionDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      const drag = state.beatMatcherSelectionDrag;
+      if (drag.mode === 'create' && !drag.dragging) {
+        // Never crossed the drag threshold — a plain click, so it sets the
+        // current point instead of leaving a zero-length selection region,
+        // and focuses it for the keyboard nudge too.
+        setBeatMatcherCurrentPoint(drag.entityId, drag.startSeconds);
+        focusBeatMatcherSelection(drag.entityId, 'point');
+      }
+      // A real drag (of any mode) already committed the selection region
+      // live via every pointermove above — nothing further to do here.
+      state.beatMatcherSelectionDrag = null;
+      return;
+    }
+
+    if (state.beatMatcherCurrentPointDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherCurrentPointDrag = null;
+      return;
+    }
+
     if (state.scrubbingBeatMatcherId) {
       canvas.releasePointerCapture(e.pointerId);
       state.scrubbingBeatMatcherId = null;
@@ -2148,6 +2289,20 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
         return;
       }
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      // The beat-matcher's own selection ruler acts as a genuinely "special"
+      // keyboard focus (per this feature's own spec) — checked FIRST, ahead
+      // of melody/sampler/sequencer/beat-matcher-note selection, so a stale
+      // selection left over in one of those (e.g. a sequencer note selected
+      // earlier in the session, whose popup was since closed) can never
+      // silently swallow the arrow key meant for the selection the user just
+      // touched. hasBeatMatcherSelectionFocus() is only ever true right
+      // after a real drag on the ruler (see ui/beatMatcher.ts's own
+      // resolvedSelectionFocus), so this can't misfire for unrelated work.
+      if (hasBeatMatcherSelectionFocus()) {
+        nudgeBeatMatcherSelection(graph, e.code === 'ArrowRight' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
       if (activeSelectedItem(graph)) {
         selectAdjacentItem(e.code === 'ArrowRight' ? 'next' : 'previous');
         e.preventDefault();
