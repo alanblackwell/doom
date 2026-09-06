@@ -135,6 +135,29 @@ import {
   zoomStep,
 } from './sequencer';
 import type { NoteSnapState, SequencerResizeStart, VelocityTrack } from './sequencer';
+import {
+  applyBeatMatcherZoomDrag,
+  beatMatcherClearDropPosition,
+  beatMatcherDropTargetAt,
+  beatMatcherSecondsAtPoint,
+  beatMatcherStateFor,
+  beatMatcherZoomStep,
+  closeBeatMatcherInfoOverlay,
+  createBeatMatcherNoteAt,
+  deleteBeatMatcherNote,
+  hitTestBeatMatcherPopup,
+  moveBeatMatcherNote,
+  pressBeatMatcherRecordButton,
+  resizeBeatMatcherNoteLeft,
+  resizeBeatMatcherNoteRight,
+  rewindBeatMatcherPlayback,
+  scrubBeatMatcherPlayback,
+  setBeatMatcherEnd,
+  setBeatMatcherSource,
+  toggleBeatMatcherLoopAtEnd,
+  toggleBeatMatcherPlayback,
+  updateBeatMatcherScrollFromTrackX,
+} from './beatMatcher';
 
 // Only sink+source ("pedal") kinds are valid containers — nesting one
 // instrument inside another has no coherent audio meaning (what would that
@@ -153,6 +176,12 @@ export interface InteractionState {
   // and the dragged entity is dockable (ui/docking.ts) — mutually exclusive
   // with hoverTargetId, same "one drop-target cue at a time" reasoning.
   hoverDock: boolean;
+  // The beat-matcher feature entity (ui/beatMatcher.ts) whose open popup the
+  // drag is currently poised to drop a Source/liveInput onto, if any — a
+  // reference, not containment (a Control is never a container), so it's
+  // tracked independently of hoverTargetId/hoverDock rather than reusing
+  // either.
+  hoverBeatMatcherId: string | null;
   settleAnim: { id: string; startedAt: number; durationMs: number } | null;
 
   // The tap entity the pointer is currently over (pure hover, nothing
@@ -330,6 +359,30 @@ export interface InteractionState {
     handle: HandleKind;
     pendingAxisFrom: Point | null;
   } | null;
+
+  // A beat-matcher note being moved or resized (ui/beatMatcher.ts) — no
+  // 'create' mode/threshold the way sequencerNoteDrag has: a press on empty
+  // track space creates a minimum-duration note immediately and starts
+  // dragging its right edge, so a plain click still leaves a short, visible
+  // note rather than requiring a drag to produce anything at all.
+  beatMatcherNoteDrag: {
+    entityId: string;
+    noteId: string;
+    mode: 'move' | 'resizeLeft' | 'resizeRight';
+    grabOffsetSeconds: number; // 'move' only — preserves where within the note you grabbed it
+  } | null;
+
+  // The beat-matcher feature whose playback line/ruler is currently being
+  // scrubbed, or whose horizontal scrollbar is being dragged — same shape
+  // as scrubbingSequencerId/sequencerHScrollDrag, independent state (see
+  // ui/beatMatcher.ts's own header on why). Zoom-axis dragging reuses the
+  // existing draggingTimeAxis field instead of a third one here — see its
+  // own comment for how that's branched by feature kind.
+  scrubbingBeatMatcherId: string | null;
+  beatMatcherHScrollDrag: { entityId: string } | null;
+  // The beat-matcher end marker currently being dragged (ui/beatMatcher.ts's
+  // setBeatMatcherEnd) — same shape as beatMatcherHScrollDrag above.
+  beatMatcherEndDrag: { entityId: string } | null;
 }
 
 export function createInteractionState(): InteractionState {
@@ -339,6 +392,7 @@ export function createInteractionState(): InteractionState {
     dragPointer: null,
     hoverTargetId: null,
     hoverDock: false,
+    hoverBeatMatcherId: null,
     settleAnim: null,
     hoveredTapId: null,
     hoverControl: null,
@@ -363,6 +417,10 @@ export function createInteractionState(): InteractionState {
     sequencerNoteDrag: null,
     sequencerVelocityDrag: null,
     sequencerEnvelopeDrag: null,
+    beatMatcherNoteDrag: null,
+    scrubbingBeatMatcherId: null,
+    beatMatcherHScrollDrag: null,
+    beatMatcherEndDrag: null,
   };
 }
 
@@ -969,6 +1027,88 @@ export function attachInteraction(
       return;
     }
 
+    // An open beat-matcher popup (ui/beatMatcher.ts) — its own independent
+    // control kind (see that file's header for why it's not built on the
+    // sequencer above), but same "sits on top of everything, checked early"
+    // treatment as every other feature popup here.
+    const beatMatcherHit = hitTestBeatMatcherPopup(graph, point);
+    if (beatMatcherHit) {
+      if (beatMatcherHit.kind === 'close') {
+        const feature = graph.get(beatMatcherHit.entityId);
+        if (feature) feature.expanded = false;
+      } else if (beatMatcherHit.kind === 'captureButton') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the sequencer's own transport buttons. What this actually does
+        // depends on current status — see ui/beatMatcher.ts's own header.
+        pressBeatMatcherRecordButton(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'infoOverlayClose') {
+        closeBeatMatcherInfoOverlay(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'noteCreate') {
+        // Immediate, unlike the sequencer's own create-drag threshold — see
+        // InteractionState.beatMatcherNoteDrag's own comment for why a plain
+        // click still needs to leave something behind here.
+        const seconds = beatMatcherSecondsAtPoint(graph, beatMatcherHit.entityId, point);
+        const noteId = seconds !== null ? createBeatMatcherNoteAt(beatMatcherHit.entityId, seconds) : null;
+        if (noteId) {
+          canvas.setPointerCapture(e.pointerId);
+          state.beatMatcherNoteDrag = {
+            entityId: beatMatcherHit.entityId,
+            noteId,
+            mode: 'resizeRight',
+            grabOffsetSeconds: 0,
+          };
+        }
+      } else if (beatMatcherHit.kind === 'noteMove') {
+        canvas.setPointerCapture(e.pointerId);
+        state.beatMatcherNoteDrag = {
+          entityId: beatMatcherHit.entityId,
+          noteId: beatMatcherHit.noteId,
+          mode: 'move',
+          grabOffsetSeconds: beatMatcherHit.grabOffsetSeconds,
+        };
+      } else if (beatMatcherHit.kind === 'noteResizeLeft' || beatMatcherHit.kind === 'noteResizeRight') {
+        canvas.setPointerCapture(e.pointerId);
+        state.beatMatcherNoteDrag = {
+          entityId: beatMatcherHit.entityId,
+          noteId: beatMatcherHit.noteId,
+          mode: beatMatcherHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
+          grabOffsetSeconds: 0,
+        };
+      } else if (beatMatcherHit.kind === 'rewind') {
+        rewindBeatMatcherPlayback(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'play') {
+        toggleBeatMatcherPlayback(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'scrub') {
+        canvas.setPointerCapture(e.pointerId);
+        scrubBeatMatcherPlayback(beatMatcherHit.entityId, beatMatcherHit.seconds); // jump to the click, then keep tracking on move
+        state.scrubbingBeatMatcherId = beatMatcherHit.entityId;
+      } else if (beatMatcherHit.kind === 'axisZoomIn' || beatMatcherHit.kind === 'axisZoomOut') {
+        // A discrete click, not a drag — no pointer capture needed, same as
+        // the zoom icons above the axis handle drag zone.
+        beatMatcherZoomStep(beatMatcherHit.entityId, beatMatcherHit.kind === 'axisZoomIn' ? 'in' : 'out');
+      } else if (beatMatcherHit.kind === 'axisHandle') {
+        canvas.setPointerCapture(e.pointerId);
+        state.draggingTimeAxis = {
+          entityId: beatMatcherHit.entityId,
+          startX: point.x,
+          startTimeScale: beatMatcherStateFor(beatMatcherHit.entityId).zoomSeconds,
+        };
+      } else if (beatMatcherHit.kind === 'hScroll') {
+        canvas.setPointerCapture(e.pointerId);
+        updateBeatMatcherScrollFromTrackX(graph, beatMatcherHit.entityId, point.x); // jump to the click, then keep tracking on move
+        state.beatMatcherHScrollDrag = { entityId: beatMatcherHit.entityId };
+      } else if (beatMatcherHit.kind === 'endMarkerToggle') {
+        toggleBeatMatcherLoopAtEnd(beatMatcherHit.entityId);
+      } else if (beatMatcherHit.kind === 'endMarkerDrag') {
+        canvas.setPointerCapture(e.pointerId);
+        setBeatMatcherEnd(beatMatcherHit.entityId, beatMatcherHit.seconds); // jump to the click, then keep tracking on move
+        state.beatMatcherEndDrag = { entityId: beatMatcherHit.entityId };
+      }
+      // 'background' is absorbed with no further action, same as every
+      // other feature popup's own catch-all.
+      return;
+    }
+
     // Nothing past this point is the sequencer popup or one of its notes
     // (that branch always returned above) — a press anywhere else on the
     // canvas always clears the sequencer's own note selection.
@@ -1154,6 +1294,10 @@ export function attachInteraction(
         // different backing store.
         sequencerStateFor(entityId).zoomSeconds = zoomFromDrag(startTimeScale, point.x - startX);
         relocateAbandonedEndMarker(graph, entityId);
+      } else if (feature?.kind === 'beatMatcher') {
+        // Same "own module-state zoomSeconds" reasoning as the sequencer
+        // case above, independent code (ui/beatMatcher.ts's own header).
+        applyBeatMatcherZoomDrag(entityId, startTimeScale, point.x - startX);
       } else if (feature) {
         // Written directly rather than through applyControlValue — timeScale
         // is UI-only display state (how the popup renders), not one of
@@ -1197,6 +1341,35 @@ export function attachInteraction(
 
     if (state.sequencerNoteDrag) {
       applySequencerNoteDrag(graph, state.sequencerNoteDrag, point);
+      return;
+    }
+
+    if (state.beatMatcherNoteDrag) {
+      const { entityId, noteId, mode, grabOffsetSeconds } = state.beatMatcherNoteDrag;
+      const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
+      if (seconds !== null) {
+        if (mode === 'move') moveBeatMatcherNote(entityId, noteId, seconds - grabOffsetSeconds);
+        else if (mode === 'resizeLeft') resizeBeatMatcherNoteLeft(entityId, noteId, seconds);
+        else resizeBeatMatcherNoteRight(entityId, noteId, seconds);
+      }
+      return;
+    }
+
+    if (state.scrubbingBeatMatcherId) {
+      const seconds = beatMatcherSecondsAtPoint(graph, state.scrubbingBeatMatcherId, point);
+      if (seconds !== null) scrubBeatMatcherPlayback(state.scrubbingBeatMatcherId, seconds);
+      return;
+    }
+
+    if (state.beatMatcherHScrollDrag) {
+      updateBeatMatcherScrollFromTrackX(graph, state.beatMatcherHScrollDrag.entityId, point.x);
+      return;
+    }
+
+    if (state.beatMatcherEndDrag) {
+      const { entityId } = state.beatMatcherEndDrag;
+      const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
+      if (seconds !== null) setBeatMatcherEnd(entityId, seconds);
       return;
     }
 
@@ -1355,8 +1528,24 @@ export function attachInteraction(
     if (entity.type === 'control') {
       state.hoverTargetId = null;
       state.hoverDock = false; // controls never dock — see ui/docking.ts's isDockable
+      state.hoverBeatMatcherId = null;
       return;
     }
+
+    // Dragging a Source/liveInput over an open beat-matcher popup (ui/
+    // beatMatcher.ts) references it as that beat-matcher's capture source on
+    // drop — not containment (a Control is never a container; see that
+    // file's own header), so this is checked ahead of, and mutually
+    // exclusive with, the dock/container-hover checks below, same
+    // "one drop-target cue at a time" priority the dock check gets.
+    const beatMatcherId = beatMatcherDropTargetAt(graph, target) ?? beatMatcherDropTargetAt(graph, point);
+    if (beatMatcherId) {
+      state.hoverBeatMatcherId = beatMatcherId;
+      state.hoverTargetId = null;
+      state.hoverDock = false;
+      return;
+    }
+    state.hoverBeatMatcherId = null;
 
     if (isDockable(entity) && isOverDock(canvas, target)) {
       state.hoverDock = true;
@@ -1454,6 +1643,30 @@ export function attachInteraction(
       // to do here besides releasing capture and clearing the drag.
       canvas.releasePointerCapture(e.pointerId);
       state.sequencerNoteDrag = null;
+      return;
+    }
+
+    if (state.beatMatcherNoteDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherNoteDrag = null;
+      return;
+    }
+
+    if (state.scrubbingBeatMatcherId) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.scrubbingBeatMatcherId = null;
+      return;
+    }
+
+    if (state.beatMatcherHScrollDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherHScrollDrag = null;
+      return;
+    }
+
+    if (state.beatMatcherEndDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherEndDrag = null;
       return;
     }
 
@@ -1561,6 +1774,7 @@ export function attachInteraction(
     state.dragPointer = null;
     state.hoverTargetId = null;
     state.hoverDock = false;
+    state.hoverBeatMatcherId = null;
 
     // Gate-off for a held pad press (see pointerdown's matching gate-on) —
     // unconditional on release regardless of whether a repositioning drag
@@ -1591,6 +1805,22 @@ export function attachInteraction(
     if (melodyHit) {
       e.preventDefault();
       if (melodyHit.kind === 'item') cycleDurationUp(melodyHit.item);
+      return;
+    }
+
+    // Right-click removes a beat-matcher note — same priority/reasoning as
+    // the melody popup above (swallow the browser's own menu for any click
+    // inside this popup, note-authoring track included).
+    const beatMatcherHit = hitTestBeatMatcherPopup(graph, point);
+    if (beatMatcherHit) {
+      e.preventDefault();
+      if (
+        beatMatcherHit.kind === 'noteMove' ||
+        beatMatcherHit.kind === 'noteResizeLeft' ||
+        beatMatcherHit.kind === 'noteResizeRight'
+      ) {
+        deleteBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+      }
       return;
     }
 
@@ -1828,6 +2058,23 @@ function finalizeDrop(
 
   const wasDocked = entity.docked;
   entity.docked = false;
+
+  // Dropped onto an open beat-matcher popup (ui/beatMatcher.ts) — reference
+  // it as that beat-matcher's capture source and fall through to the normal
+  // placement logic below (hoverTargetId is null throughout this branch, so
+  // it still isn't reparented) rather than returning early the way the dock
+  // case above does: unlike docking, this entity isn't going anywhere
+  // special, it's just additionally being referenced. It does NOT land at
+  // the raw drop point, though — that's necessarily inside the popup's own
+  // interior, which would leave it rendered underneath the popup (popups
+  // always draw on top — see beatMatcherClearDropPosition's own comment)
+  // and unreachable afterward, so its landing position is overridden to
+  // just outside the popup instead.
+  if (state.hoverBeatMatcherId) {
+    setBeatMatcherSource(state.hoverBeatMatcherId, entityId);
+    const clearPosition = beatMatcherClearDropPosition(graph, state.hoverBeatMatcherId, entity.height / 2);
+    if (clearPosition) state.dragPointer = clearPosition;
+  }
 
   // Trust hoverTargetId rather than re-deriving the drop target from
   // scratch here — it's already been maintained continuously (and stickily,

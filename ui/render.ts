@@ -37,6 +37,7 @@ import type { MelodyItem } from './melody';
 import { beginSamplerFrame, drawSamplerPopup, endSamplerFrame } from './sampler';
 import { channelConnectorAbsolutePosition, drawSequencerBody, drawSequencerPopup, noteSnapHoldFraction } from './sequencer';
 import type { NoteSnapIndicator } from './sequencer';
+import { drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -154,6 +155,8 @@ function drawEntity(
       drawTap(ctx, entity, bounds, highlighted, now, interaction);
     } else if (entity.kind === 'sequencer') {
       drawSequencerBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
+    } else if (entity.kind === 'beatMatcher') {
+      drawBeatMatcherBody(ctx, entity, bounds, entity.id === interaction.selectedId);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }
@@ -1114,6 +1117,17 @@ export function renderFrame(
           noteSnap,
           activeEnvelopeHandle,
           cursorDragging,
+          drag
+        );
+      } else if (feature.kind === 'beatMatcher') {
+        drawBeatMatcherPopup(
+          ctx,
+          graph,
+          feature,
+          owner,
+          interaction.hoverBeatMatcherId === feature.id,
+          interaction.draggingTimeAxis?.entityId === feature.id,
+          now,
           drag
         );
       } else {

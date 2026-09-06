@@ -407,6 +407,49 @@ graph.add({
   ownerId: 'sequencer-1',
   expanded: false,
 });
+// The beat-matcher (TODO.md item 4), a standalone Control entity — see
+// ui/beatMatcher.ts's own header for why it's independent of the sequencer
+// above despite the similar shape. Same small round body as knob/clock/
+// tap/sequencer; its right-edge bulge houses its own organelle porthole
+// (ui/organelle.ts's portholePosition control-type-owner case), same as the
+// sequencer's.
+graph.add({
+  id: 'beat-matcher-1',
+  type: 'control',
+  kind: 'beatMatcher',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 60,
+  y: 410,
+  width: 30,
+  height: 30,
+  seed: 20,
+  docked: false, // controls never dock — see ui/docking.ts's isDockable
+  ownerId: null,
+  expanded: false,
+});
+// beat-matcher-1's authoring organelle (EntityType 'feature', kind
+// 'beatMatcher' — ui/beatMatcher.ts) — same porthole/popup mechanism as the
+// sequencer's own above, just its own independent module. x/y/width/
+// height/seed are unused for a feature entity, same as every other feature
+// in this file.
+graph.add({
+  id: 'beat-matcher-1-track',
+  type: 'feature',
+  kind: 'beatMatcher',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 21,
+  docked: false,
+  ownerId: 'beat-matcher-1',
+  expanded: false,
+});
 // A sampler: kind 'sample' like a dropped-in file (ui/sampleDrop.ts), just
 // starting with no buffer registered yet — its pad/level/speed controls
 // (controlSpecs.ts's existing 'sample' entry) work completely unmodified

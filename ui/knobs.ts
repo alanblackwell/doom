@@ -62,8 +62,10 @@ export function hitTestWireHandle(
     // see drawBodyBulge) houses its organelle porthole, not a wire jack.
     // Without this exclusion, wireHandlePosition would still return an
     // invisible, clickable phantom wire-start handle right on top of that
-    // porthole.
-    if (entity.kind === 'sequencer') continue;
+    // porthole. Same story for the beat-matcher (ui/beatMatcher.ts) — an
+    // independent control kind, but it reuses this same bulge spot for its
+    // own porthole too.
+    if (entity.kind === 'sequencer' || entity.kind === 'beatMatcher') continue;
     const bounds = effectiveBounds(graph, entity, drag);
     const handle = wireHandlePosition(bounds);
     if (Math.hypot(point.x - handle.x, point.y - handle.y) <= HANDLE_HIT_RADIUS) {
