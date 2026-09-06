@@ -45,6 +45,7 @@ import {
   hitTestFeatureDot,
   hitTestPopup,
   hitTestPorthole,
+  ownerOf,
   requiredTimeScaleFor,
   timeScaleFromDrag,
   DEFAULT_TIME_SCALE,
@@ -212,6 +213,14 @@ export interface InteractionState {
   // render loop runs continuously (ui/main.ts's rAF loop) whether or not
   // the pointer is actually moving right now.
   lastPointerPoint: Point | null;
+
+  // A porthole (ui/organelle.ts) pressed but not yet resolved into either a
+  // click (open its popup, on release without a drag) or a drag (currently
+  // only meaningful for a beat-matcher's porthole, which doubles as its own
+  // single event-output jack — see pointermove's own handling). Replaces
+  // the porthole's old immediate-on-press open, specifically to leave room
+  // for that drag.
+  portholePress: { entity: Entity; startPoint: Point } | null;
 
   // Set while dragging a new wire out from a knob's wire-start handle.
   wiringFrom: { entityId: string; sourcePort?: number } | null;
@@ -400,6 +409,7 @@ export function createInteractionState(): InteractionState {
     draggingControl: null,
     triggerFlashes: new Map(),
     lastPointerPoint: null,
+    portholePress: null,
     wiringFrom: null,
     wireDragPoint: null,
     wireHoverTarget: null,
@@ -1146,12 +1156,17 @@ export function attachInteraction(
       return;
     }
 
-    // A collapsed feature's porthole (ui/organelle.ts) — click to expand.
-    // Only meaningful while collapsed; an open popup has its own close
-    // button instead (handled above).
+    // A feature's porthole (ui/organelle.ts) — click to toggle its popup
+    // open/closed, now meaningful in both states (see hitTestPorthole's own
+    // comment). Deferred to release rather than resolved immediately here:
+    // a beat-matcher's porthole doubles as its own single event-output jack
+    // (ui/organelle.ts's portholePosition control-owner case), so a drag
+    // away from this same spot needs to be free to start a wire instead —
+    // see pointermove's own portholePress handling below.
     const portholeHit = hitTestPorthole(graph, point);
     if (portholeHit) {
-      portholeHit.expanded = true;
+      canvas.setPointerCapture(e.pointerId);
+      state.portholePress = { entity: portholeHit, startPoint: point };
       return;
     }
 
@@ -1270,6 +1285,27 @@ export function attachInteraction(
     // loop runs continuously (ui/main.ts's rAF loop) whether or not the
     // pointer is actually moving right now.
     state.lastPointerPoint = point;
+
+    if (state.portholePress) {
+      const { entity, startPoint } = state.portholePress;
+      if (Math.hypot(point.x - startPoint.x, point.y - startPoint.y) < DRAG_START_THRESHOLD) return;
+      // Past the threshold — a drag, not a click, so the popup no longer
+      // opens (see endPress's matching branch). Only a beat-matcher's
+      // porthole doubles as an event-output jack (ui/organelle.ts's
+      // portholePosition control-owner case); anywhere else, a drag from
+      // here just cancels the pending click with no further action.
+      state.portholePress = null;
+      if (entity.kind === 'beatMatcher') {
+        const owner = ownerOf(graph, entity);
+        if (owner) {
+          state.wiringFrom = { entityId: owner.id };
+          state.wireDragPoint = point;
+          state.wireHoverTarget = null;
+          state.eventWireHoverTarget = null;
+        }
+      }
+      return;
+    }
 
     if (state.draggingHandle) {
       const { entityId, handle } = state.draggingHandle;
@@ -1605,6 +1641,20 @@ export function attachInteraction(
   });
 
   function endPress(e: PointerEvent): void {
+    if (state.portholePress) {
+      // Never dragged past the threshold (pointermove's own portholePress
+      // branch would have cleared this otherwise) — a plain click, so it
+      // toggles now, same as the porthole's old immediate-on-press open
+      // just deferred to release. A toggle rather than always opening,
+      // since hitTestPorthole now matches an already-expanded feature too
+      // (where a click should close it instead) — for a still-collapsed
+      // one this is equivalent to the old unconditional open.
+      canvas.releasePointerCapture(e.pointerId);
+      state.portholePress.entity.expanded = !state.portholePress.entity.expanded;
+      state.portholePress = null;
+      return;
+    }
+
     if (state.melodyScrollDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.melodyScrollDrag = null;

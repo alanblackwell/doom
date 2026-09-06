@@ -1136,9 +1136,13 @@ export function renderFrame(
         const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
         drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
       }
-    } else {
-      drawPorthole(ctx, graph, feature, owner, drag);
     }
+
+    // The porthole/bump is drawn regardless of expanded state now — see
+    // ui/organelle.ts's hitTestPorthole, generalized so this stays a live,
+    // visible affordance (close on click; for a beat-matcher, also a wire
+    // jack) even once the popup is open, not just while collapsed.
+    drawPorthole(ctx, graph, feature, owner, drag);
   }
 
   // A wash over everything drawn on the canvas so far (entities, wires,

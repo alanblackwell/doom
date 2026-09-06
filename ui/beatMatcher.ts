@@ -64,7 +64,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { gridStepSeconds, ownerOf, portholePosition, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { gridStepSeconds, ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import { getEntityNodes } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';

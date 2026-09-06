@@ -390,11 +390,20 @@ export function hitTestPopup(graph: EntityGraph, point: Point, drag?: DragContex
   return null;
 }
 
-// Only meaningful while collapsed — an expanded popup has its own close
-// button (hitTestPopup above) instead.
+// Meaningful in both states now, not just collapsed: while expanded, a
+// click here closes the popup exactly like its own close button would
+// (ui/interaction.ts's portholePress resolves as a toggle of
+// entity.expanded, not an unconditional open, for exactly this reason) — a
+// second, always-reachable way to dismiss any popup without hunting for
+// the small close (×) button. For a kind whose porthole doubles as a wire
+// jack (currently only the beat-matcher's — see portholePosition's
+// control-owner case and ui/interaction.ts's own portholePress drag
+// handling), a drag from here starts a wire regardless of expanded state
+// too, for the same reason: this is the one spot to press, whichever
+// state the popup happens to be in.
 export function hitTestPorthole(graph: EntityGraph, point: Point, drag?: DragContext): Entity | null {
   for (const entity of graph.all()) {
-    if (entity.type !== 'feature' || entity.expanded) continue;
+    if (entity.type !== 'feature') continue;
     const owner = ownerOf(graph, entity);
     if (!owner) continue;
     if (dist(point, portholePosition(graph, owner, drag)) <= PORTHOLE_RADIUS + 4) return entity;
