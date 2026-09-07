@@ -23,18 +23,13 @@ Placeholders for larger features to elaborate on when we get to each one.
    (mouse-drag and keyboard nudge), a name field, and export as a
    WAV-encoded sample.
 
-## Remaining
-
-3. Sequencer.
+3. **Sequencer** (`ui/sequencer.ts`, `audio/sequencerPlayer.ts`).
 
    A `control`-type entity (canvas top-level, like knob/clock/tap — not
    nested inside a source), pairing an event-source role on the canvas
    with an authoring `feature` organelle (same porthole/popup invocation
    as the melody/envelope organelles) that opens a piano-roll-style editor
-   for the sequence itself. Note: a `feature`'s `ownerId` is currently
-   documented as a SOURCE's id only (`audio/entityGraph.ts`'s `Entity`
-   comment) — hosting one on a control entity instead is a small
-   architecture extension this needs.
+   for the sequence itself.
 
    - **Channels:** 4 to start, each with its own output port at that
      channel's own far right — not one shared output the way the
@@ -53,21 +48,38 @@ Placeholders for larger features to elaborate on when we get to each one.
      note's onset (drag start) and duration (drag length) — a "paint a
      block" gesture, in the same spirit as the melody organelle's
      click-to-add but continuous rather than snapped to a fixed duration.
-     Each note also carries pitch and velocity, annotated some way still
-     to be decided (not spatial position — a channel lane's own vertical
-     axis isn't pitch here) — its own interaction design needed once this
-     gets built.
+     Each note also carries pitch, velocity, and an ADSR envelope; can be
+     dragged past/over another note in the same channel (resolved back to
+     a free gap on release) and can be created by dragging in either
+     direction.
 
-4. Beat matcher organelle for the sequencer.
-5. Animation of the event connection line.
-6. Multiple sequencer instances, chained the way multiple instrument
-   instances would be — dragging a repeated copy out rather than there
-   only ever being one fixed `sequencer-1`. Not yet possible for anything
-   in the app today, sampler included: `ui/dock.ts`'s icons just list
-   whichever entities already exist and happen to be `docked: true`
-   (`graph.dockedEntities()`) — undocking one un-parks that same entity,
-   it doesn't spawn a copy. Building this needs a real duplicate/spawn
-   mechanism (new, not a retrofit of an existing one), plus making the
-   sequencer dockable at all — currently blocked outright for any
-   `control`-type entity (`ui/docking.ts`'s `isDockable`), since a control
-   has no independent sound to park the way a source does.
+4. **Beat matcher organelle** (`ui/beatMatcher.ts`,
+   `ui/beatMatcherSuggestions.ts`, `audio/beatMatcherPlayer.ts`). A
+   single-track `control`-type entity that captures a one-shot sample
+   (sound-triggered, from any connected source or live input) and lets
+   notes be laid down against its spectrogram — same paint/pitch/velocity/
+   envelope/drag-over note editing as the sequencer, plus onset-similarity
+   suggestions (Tab/Shift-Tab through the clip's own best-ranked matches to
+   a confirmed reference point) and a selection ruler for auditioning a
+   specific point. Once its popup is closed, it behaves like a closed
+   sequencer: silent itself, still dispatching notes to whatever it's
+   wired to.
+
+5. **Event connection line animation** (`ui/eventPulse.ts`). Each event
+   wire glows along its whole curve in sync with its source's actual
+   firing rate (adaptively tracked, not fixed), decaying toward a dim
+   floor between pulses rather than sitting fully dark.
+
+## Maybe someday
+
+Speculative — not committed work, and not clear it's ever actually needed.
+Noted here so the idea isn't lost, not as a plan.
+
+- Multiple sequencer/beat-matcher instances, chained the way multiple
+  instrument instances would be — dragging a repeated copy out rather than
+  there only ever being one fixed `sequencer-1`/`beat-matcher-1`. Nothing
+  in the app has a duplicate/spawn mechanism for a whole entity today
+  (sampler included), and `ui/docking.ts`'s `isDockable` still excludes
+  every `control`-type entity outright — a control has no independent
+  sound to park the way a source does. Both would need solving, and only
+  worth it if a real need for more than one instance shows up.
