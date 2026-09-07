@@ -56,7 +56,11 @@ export function ownerOf(graph: EntityGraph, entity: Entity): Entity | undefined 
   return owner && !owner.docked ? owner : undefined;
 }
 
-export function portholePosition(graph: EntityGraph, owner: Entity, drag?: DragContext): Point {
+// A stacking gap for a second (third, ...) porthole on the same owner — see
+// `feature`'s own comment below.
+const PORTHOLE_STACK_GAP = PORTHOLE_RADIUS * 2 + 6;
+
+export function portholePosition(graph: EntityGraph, owner: Entity, drag?: DragContext, feature?: Entity): Point {
   const bounds = effectiveBounds(graph, owner, drag);
   // A control-type owner (currently only the sequencer, ui/sequencer.ts) has
   // no box corner to inset a porthole into — it shares the same right-edge
@@ -64,7 +68,21 @@ export function portholePosition(graph: EntityGraph, owner: Entity, drag?: DragC
   // wireHandlePosition), just repurposed here as the door into its
   // authoring popup instead of a wire connector.
   if (owner.type === 'control') return wireHandlePosition(bounds);
-  return { x: bounds.x + bounds.width / 2 - PORTHOLE_INSET, y: bounds.y + bounds.height / 2 - PORTHOLE_INSET };
+  const base = { x: bounds.x + bounds.width / 2 - PORTHOLE_INSET, y: bounds.y + bounds.height / 2 - PORTHOLE_INSET };
+  // `feature` is optional and only matters once an owner has MORE than one
+  // (e.g. metal-1's envelope plus its own tuning organelle, ui/metalTuner.ts)
+  // — every existing single-feature owner keeps the exact same porthole
+  // position it always had, since callers that never pass it (most of them —
+  // sampler.ts/melody.ts/sequencer.ts/beatMatcher.ts's own popupRect
+  // wrappers) get `base` unchanged. When it IS passed, later features
+  // (by EntityGraph.featuresOf's own insertion order — earliest stays at
+  // `base`) stack upward along the same right edge instead of drawing
+  // exactly on top of the first one, which would make every feature past
+  // the first both visually indistinguishable and unclickable.
+  if (!feature) return base;
+  const index = graph.featuresOf(owner.id).indexOf(feature);
+  if (index <= 0) return base;
+  return { x: base.x, y: base.y - index * PORTHOLE_STACK_GAP };
 }
 
 export const POPUP_WIDTH = 240;
@@ -85,16 +103,23 @@ const DOT_BOTTOM_INSET = 22; // from the popup's bottom edge, where index 0 sits
 // ui/melody.ts's grand-staff editor, much bigger than the envelope's curve)
 // can reuse the same anchoring math — popupRect below is just this called
 // with the envelope's own fixed size.
-export function popupRectFor(graph: EntityGraph, owner: Entity, width: number, height: number, drag?: DragContext): Rect {
-  const porthole = portholePosition(graph, owner, drag);
+export function popupRectFor(
+  graph: EntityGraph,
+  owner: Entity,
+  width: number,
+  height: number,
+  drag?: DragContext,
+  feature?: Entity
+): Rect {
+  const porthole = portholePosition(graph, owner, drag, feature);
   const left = porthole.x + POPUP_OFFSET_X;
   const bottom = porthole.y - POPUP_OFFSET_Y;
   const top = bottom - height;
   return { x: left + width / 2, y: top + height / 2, width, height };
 }
 
-export function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext): Rect {
-  return popupRectFor(graph, owner, POPUP_WIDTH, POPUP_HEIGHT, drag);
+export function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext, feature?: Entity): Rect {
+  return popupRectFor(graph, owner, POPUP_WIDTH, POPUP_HEIGHT, drag, feature);
 }
 
 export function closeButtonPosition(popup: Rect): Point {
@@ -360,7 +385,7 @@ export function hitTestPopup(graph: EntityGraph, point: Point, drag?: DragContex
     const owner = ownerOf(graph, entity);
     if (!owner) continue;
 
-    const popup = popupRect(graph, owner, drag);
+    const popup = popupRect(graph, owner, drag, entity);
     if (dist(point, closeButtonPosition(popup)) <= CLOSE_BUTTON_RADIUS + 4) {
       return { entityId: entity.id, kind: 'close' };
     }
@@ -406,7 +431,7 @@ export function hitTestPorthole(graph: EntityGraph, point: Point, drag?: DragCon
     if (entity.type !== 'feature') continue;
     const owner = ownerOf(graph, entity);
     if (!owner) continue;
-    if (dist(point, portholePosition(graph, owner, drag)) <= PORTHOLE_RADIUS + 4) return entity;
+    if (dist(point, portholePosition(graph, owner, drag, entity)) <= PORTHOLE_RADIUS + 4) return entity;
   }
   return null;
 }
@@ -494,7 +519,7 @@ const PORTHOLE_RING = 'rgba(255, 255, 255, 0.35)';
 const CURVE_COLOR = 'rgba(232, 220, 192, 0.9)'; // matches a knob's indicator (ui/palette.ts adjacent tone)
 
 export function drawPorthole(ctx: CanvasRenderingContext2D, graph: EntityGraph, entity: Entity, owner: Entity, drag?: DragContext): void {
-  const p = portholePosition(graph, owner, drag);
+  const p = portholePosition(graph, owner, drag, entity);
   ctx.save();
   ctx.beginPath();
   ctx.arc(p.x, p.y, PORTHOLE_RADIUS, 0, Math.PI * 2);
@@ -709,7 +734,7 @@ export function drawPopup(
   now: number,
   drag?: DragContext
 ): void {
-  const popup = popupRect(graph, owner, drag);
+  const popup = popupRect(graph, owner, drag, entity);
   const left = popup.x - popup.width / 2;
   const top = popup.y - popup.height / 2;
 

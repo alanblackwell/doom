@@ -93,6 +93,41 @@ Placeholders for larger features to elaborate on when we get to each one.
    firing rate (adaptively tracked, not fixed), decaying toward a dim
    floor between pulses rather than sitting fully dark.
 
+6. **Grind** (`audio/grindPlayer.ts`, `ui/grindTuner.ts`) — doom/industrial
+   palette item 1. NOT the bowed-string-driven-into-chaos approach
+   originally planned below: an early attempt reusing `bow`'s own WASM
+   voice past its stated-unplayable range just settled into a steady tone
+   instead of true chaos. Built instead as a granular noise texture — a
+   dense, randomized stream of short bandpass-filtered noise grains,
+   chaotic by construction — entirely native Web Audio, no WASM.
+
+7. **By-ear tuning organelle pattern** (`ui/tuningOrganelle.ts`, a shared
+   factory; `ui/grindTuner.ts`/`ui/bassTuner.ts`/`ui/metalTuner.ts` are thin
+   per-voice configs). A porthole/popup on a source itself, listing every
+   constant its algorithm uses — including ones previously hardcoded in
+   `dsp/rust/src/lib.rs` with no live control at all — as a slider with a
+   hover tooltip explaining what it does, a checkbox marking whether it
+   should also become a permanent control-dot, and draggable min/max
+   carets. A Copy button turns the current tuning into ready-to-paste
+   source text for the (up to three) files that need it. Reuse this
+   pattern rather than rebuilding it for any future voice worth tuning by
+   ear this way.
+
+8. **Growl filter** (`audio/graph.ts`'s `growl` case) — doom/industrial
+   palette item 9 below, brought forward: a resonant bandpass in a genuine
+   positive-feedback loop, native Web Audio (`BiquadFilterNode` +
+   `WaveShaperNode` soft-clip + a 1ms `DelayNode` to break the cycle,
+   mirroring `flanger`'s own feedback-loop wiring). A port of the exact
+   feedback/soft-clip mechanism `metal`'s WASM voice already used
+   (`pluck_render`'s feedback branch) — `metal` itself turned out not to
+   work as an instrument (the squeal dominates regardless of tuning; no
+   discernible pitch or gesture once feedback engages, "a realistic amp
+   feedback sound" that isn't playable as one), so the mechanism was
+   pulled out as a routable pedal instead: drag any source into it. Unlike
+   the original TODO wording below, there's no built-in cutoff automation
+   — `frequency` is a plain control-dot, wireable from a knob/clock the
+   same as any other if a sweep is wanted.
+
 ## Next: a doom/industrial/drone sound palette
 
 The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,
@@ -104,61 +139,52 @@ moment before it erupts), scale (Godzilla dropping a boulder on an
 airport), catastrophe (a nuclear plant hit by a tsunami). New sources and
 filters to add, roughly in order:
 
-1. **Grind** — a new WASM voice (`dsp/rust`, worklet shim alongside
-   `dsp/worklets/bow-processor.js`), reusing `bow`'s stick-slip friction
-   model but deliberately driven into the chaotic-scraping region that
-   `bow-processor.js`'s own comment warns is normally *unplayable*
-   (bowVelocity outside ~0.03–0.25) — that chaos is the point here: a
-   chainsaw/angle-grinder/dungeon-drill texture rather than a clean pitch.
-
-2. **Rumble** — extend `bass`'s twin-detuned-saw approach (`dsp/rust`) an
+1. **Rumble** — extend `bass`'s twin-detuned-saw approach (`dsp/rust`) an
    octave or two lower into sub-audio range, plus a slow 1–4Hz
    infrasonic AM or filter-cutoff wobble — earthquake/volcano-tension
    drone, the low end everything else in a scene sits on top of.
 
-3. **Impact/boulder** — reuses `kick`'s trigger pipeline
+2. **Impact/boulder** — reuses `kick`'s trigger pipeline
    (`audio/graph.ts`'s `case 'kick'`) but replaces the single
    pitch-sweeping sine with a small bank of inharmonic resonant bandpass
    filters excited by one impulse (modal synthesis) — a rock/boulder
    doesn't ring like a drum head, it rings like several detuned masses at
    once. This is the "Godzilla drops a boulder on an airport" hit.
 
-4. **Clang/gong** — standalone inharmonic modal voice: 4-6 partials at
+3. **Clang/gong** — standalone inharmonic modal voice: 4-6 partials at
    non-integer frequency ratios, each with its own decay — dungeon bell,
    warning klaxon, distant structure groaning under load.
 
-5. **Drone/servo** — pulse oscillator(s) with slow PWM plus ring
+4. **Drone/servo** — pulse oscillator(s) with slow PWM plus ring
    modulation between two closely-tuned low oscillators, for a
    distinctly mechanical beating/grinding texture, as a machine-not-organism
    counterpart to `bow`/`pluck`.
 
-6. **Bitcrusher** (filter) — sample-rate/bit-depth reduction. Small
+5. **Bitcrusher** (filter) — sample-rate/bit-depth reduction. Small
    JS-only `AudioWorkletProcessor` (no WASM needed, simpler than
    `noise-processor.js`) — cheap harsh digital grit layer on any source.
 
-7. **Ring modulator** (filter) — an audio-rate carrier oscillator driving
+6. **Ring modulator** (filter) — an audio-rate carrier oscillator driving
    a `GainNode`'s `.gain`, the same audio-rate-modulation trick
    `chorus`/`flanger` already use for their LFO (see around
    `audio/graph.ts:1062`), just at audio rate instead of sub-audio —
    robotic/possessed/metallic tone.
 
-8. **Resonator bank** (filter) — parallel *fixed* (not swept, unlike
+7. **Resonator bank** (filter) — parallel *fixed* (not swept, unlike
    flanger's comb) `BiquadFilterNode` bandpasses tuned to inharmonic
    ratios — routes plain noise or `bass` into a gong/metal-clang timbre.
+   Distinct from the now-built growl filter (multiple fixed peaks at once,
+   rather than one swept/fed-back resonance).
 
-9. **Growl filter** — a `BiquadFilterNode` pushed to near-self-oscillating
-   Q with a slow rising cutoff automation — the "volcano about to erupt"
-   tension riser, or a monster-growl sweep under a drone note.
+8. **Sub-octave** (filter) — zero-crossing pitch divider adding an
+   octave-down copy underneath any existing source's signal — the
+   cheapest way to make an already-built instrument (`pluck`, `bow`,
+   `bass`) read as earthquake-heavy without a new voice.
 
-10. **Sub-octave** (filter) — zero-crossing pitch divider adding an
-    octave-down copy underneath any existing source's signal — the
-    cheapest way to make an already-built instrument (`pluck`, `bow`,
-    `bass`) read as earthquake-heavy without a new voice.
-
-11. **Pumping compressor** (filter) — `DynamicsCompressorNode` at an
-    extreme ratio, gated by the clock/sequencer's own trigger rate — a
-    "machinery breathing" / tidal-surge pulse to put under a sustained
-    drone.
+9. **Pumping compressor** (filter) — `DynamicsCompressorNode` at an
+   extreme ratio, gated by the clock/sequencer's own trigger rate — a
+   "machinery breathing" / tidal-surge pulse to put under a sustained
+   drone.
 
 ## Maybe someday
 

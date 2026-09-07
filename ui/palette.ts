@@ -13,6 +13,7 @@ export const KIND_COLORS: Record<string, string> = {
   reverb: '#2f4a52',
   chorus: '#2c4a3c',
   flanger: '#3a3a52',
+  growl: '#5a3020', // a duller, browner red than fuzz's — "threat/growl" rather than "hot clip"
   kick: '#5a2020',
   pluck: '#4a3428',
   metal: '#3f464e', // cold steel, distinct from the warm wood/brown strings above

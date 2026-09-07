@@ -18,6 +18,7 @@ import { activateSequencerControl, registerSequencerForPlayback } from './sequen
 import { activateBeatMatcherControl, registerBeatMatcherForPlayback } from './beatMatcherPlayer';
 import { GRIND_TUNING, GRIND_TUNING_KEYS, startGrindVoice } from './grindPlayer';
 import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
+import { METAL_TUNING, METAL_TUNING_KEYS } from './metalTuning';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -315,7 +316,7 @@ export async function initAudioEngine(): Promise<void> {
   const ctx = getAudioContext();
 
   const wasmUrl = new URL('../dsp/rust/pkg/doom_dsp.wasm', import.meta.url);
-  const [, , , , , wasmModule] = await Promise.all([
+  const [, , , , , , wasmModule] = await Promise.all([
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/noise-processor.js', import.meta.url)
     ),
@@ -327,6 +328,9 @@ export async function initAudioEngine(): Promise<void> {
     ),
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/pluck-processor.js', import.meta.url)
+    ),
+    ctx.audioWorklet.addModule(
+      new URL('../dsp/worklets/growl-processor.js', import.meta.url)
     ),
     // Plain JS, no WASM — see dsp/worklets/capture-processor.js's own header
     // comment on why the sampler organelle (ui/sampler.ts) records raw PCM
@@ -343,6 +347,12 @@ export async function initAudioEngine(): Promise<void> {
 }
 
 const WASM_KINDS = new Set(['noise', 'bass', 'bow', 'pluck', 'metal']);
+// Checked separately by createProcessor below — a sink+source kind
+// (currently only 'growl') needs the same "don't touch dspModule before
+// it's ready" guard createGenerator's own WASM_KINDS check already has,
+// just kept as its own set since a processor and a generator are built by
+// two different functions.
+const WASM_PROCESSOR_KINDS = new Set(['growl']);
 
 // Creates the node(s) that make an entity's own sound, if it has any.
 // A plain group/mixer entity (no matching case) returns undefined — it
@@ -806,6 +816,9 @@ interface PluckVoiceDefaults {
 function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoiceDefaults): AudioNode {
   const ctx = getAudioContext();
 
+  // The three METAL_TUNING extras only matter once feedback is actually
+  // nonzero ('metal', not 'pluck' — see PluckVoiceDefaults.exposeFeedback's
+  // own comment), so they're only seeded/exposed at all for that case.
   const pluck = new AudioWorkletNode(ctx, 'pluck-processor', {
     processorOptions: {
       wasmModule: dspModule,
@@ -814,6 +827,13 @@ function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoi
       response: entity.params.response ?? defaults.response,
       feedback: entity.params.feedback ?? defaults.feedback,
       feedbackFreq: entity.params.feedbackFreq ?? defaults.feedbackFreq,
+      ...(defaults.exposeFeedback
+        ? {
+            feedbackQ: entity.params.feedbackQ ?? METAL_TUNING.feedbackQ.value,
+            feedbackInjectGain: entity.params.feedbackInjectGain ?? METAL_TUNING.feedbackInjectGain.value,
+            feedbackDriveScale: entity.params.feedbackDriveScale ?? METAL_TUNING.feedbackDriveScale.value,
+          }
+        : {}),
     },
   });
   const level = ctx.createGain();
@@ -864,6 +884,17 @@ function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoi
   if (defaults.exposeFeedback) {
     controls.feedback = (value) => pluck.port.postMessage({ type: 'setFeedback', value });
     controls.feedbackFreq = (value) => pluck.port.postMessage({ type: 'setFeedbackFreq', value });
+    // Registered for every METAL_TUNING key regardless of its own `exposed`
+    // flag — same "always live, exposed only decides the control-dot"
+    // reasoning as the 'grind'/'bass' cases above.
+    const METAL_TUNING_MESSAGE_TYPE: Record<string, string> = {
+      feedbackQ: 'setFeedbackQ',
+      feedbackInjectGain: 'setFeedbackInjectGain',
+      feedbackDriveScale: 'setFeedbackDriveScale',
+    };
+    for (const key of METAL_TUNING_KEYS) {
+      controls[key] = (value) => pluck.port.postMessage({ type: METAL_TUNING_MESSAGE_TYPE[key], value });
+    }
   }
   registerControls(entity.id, controls);
 
@@ -925,7 +956,7 @@ function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
 // Kinds that process `input` into `output` rather than just mixing it
 // through — exported so the renderer can mark these visually as sink+source
 // ("pedal") entities rather than plain sources/containers.
-export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz']);
+export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl']);
 
 // Classic WaveShaperNode distortion curve (the one widely cited from
 // Kevin Ennis's WebAudio overdrive example) — soft-to-hard clipping
@@ -990,6 +1021,10 @@ function makeReverbImpulseResponse(ctx: AudioContext, decaySeconds: number): Aud
 // to a plain passthrough (mixer) connection instead.
 function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
   const ctx = getAudioContext();
+
+  if (!dspModule && WASM_PROCESSOR_KINDS.has(entity.kind)) {
+    throw new Error('initAudioEngine() must complete before building the graph');
+  }
 
   switch (entity.kind) {
     case 'overdrive': {
@@ -1133,9 +1168,133 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
         baseDelaySeconds: 0.008, // ~8ms — much shorter than chorus, strong comb filtering
         feedback: true, // the resonant "jet swoosh" comes from this regeneration loop
       });
+    // TODO.md's "growl filter" (doom/industrial palette item 9) — a
+    // resonant bandpass pushed into a genuine positive-feedback loop, so it
+    // picks out and reinforces whatever's near `frequency` in the INPUT
+    // signal rather than exciting its own delay line. WASM (growl_render,
+    // dsp/rust/src/lib.rs), reusing the same svf_bandpass/soft_clip building
+    // blocks 'metal's own feedback branch (pluck_render) already uses —
+    // that voice turned out unusable as an instrument (the squeal
+    // dominates, no discernible pitch/gesture), but the mechanism itself is
+    // general enough to route ANY source through instead: same "amp/room
+    // resonance" idea, just as a routable pedal now. A first native-nodes
+    // port of this same idea worked but sounded thinner and could diverge
+    // into a runaway self-oscillation with no per-sample bound on the
+    // resonator's own state; this WASM version avoids that by construction
+    // (see createGrowlFilter's own comment). `kill` is kept anyway as an
+    // explicit "make it stop" for a loud resonance that's just musically
+    // unwanted mid-performance.
+    case 'growl':
+      return createGrowlFilter(entity, input);
     default:
       return null;
   }
+}
+
+// Q of the resonant filter — capped well above what's musically useful,
+// but high enough to get genuinely close to self-oscillating (same
+// reasoning as dsp/rust/src/lib.rs's own FEEDBACK_Q comment).
+const GROWL_MAX_Q = 40;
+// Loop gain is hard-capped below 1 regardless of what a control setter is
+// asked to set — same "genuine feedback loop, unity gain means unbounded
+// buildup" reasoning as createModulatedDelay's own flanger feedback cap.
+const GROWL_MAX_FEEDBACK = 0.95;
+
+// Fixed shaping constants for growl_render's own internal soft-clip drive
+// (dsp/rust/src/lib.rs's GROWL_INJECT_GAIN/GROWL_DRIVE_SCALE) — not exposed
+// as control-dots (controlSpecs.ts's `growl` entry only lists the four
+// musically-relevant params), just passed once at growl_init time. If these
+// ever want to be by-ear tunable, they're exactly the kind of thing
+// ui/tuningOrganelle.ts was built for.
+const GROWL_INJECT_GAIN = 3.0;
+const GROWL_DRIVE_SCALE = 4.0;
+
+function createGrowlFilter(entity: Entity, input: GainNode): AudioNode {
+  const ctx = getAudioContext();
+
+  const frequency = entity.params.frequency ?? 1200;
+  const q = Math.min(GROWL_MAX_Q, Math.max(0.1, entity.params.q ?? 15));
+  const initialFeedback = Math.min(GROWL_MAX_FEEDBACK, Math.max(0, entity.params.feedback ?? 0.5));
+
+  // The actual resonant feedback loop, entirely inside WASM (growl_render,
+  // dsp/rust/src/lib.rs) — see that function's own comment for why this
+  // avoids the native version's "never stops" failure mode: every sample
+  // reinjected into the loop has already passed through soft_clip, so the
+  // filter's own driving input is bounded every single sample rather than
+  // only once the OUTPUT is tapped. `input` connects straight in;
+  // growl-processor.js stages each quantum into WASM memory itself.
+  const growlNode = new AudioWorkletNode(ctx, 'growl-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+    processorOptions: {
+      wasmModule: dspModule,
+      frequency,
+      q,
+      feedback: initialFeedback,
+      injectGain: GROWL_INJECT_GAIN,
+      driveScale: GROWL_DRIVE_SCALE,
+    },
+  });
+  input.connect(growlNode);
+
+  // growl_render() has no dry-signal passthrough built into it — it's a
+  // pure wet processor — so dry/wet mixing has to happen out here in JS,
+  // same nodes/roles as the native version's own dry/wet/mixBus.
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const mix = Math.min(1, Math.max(0, entity.params.mix ?? 0.7));
+  dry.gain.value = 1 - mix;
+  wet.gain.value = mix;
+
+  const mixBus = ctx.createGain();
+  // A dedicated mute stage, separate from `level`/`mix` — see `kill`'s own
+  // comment below for why this needs to be its own node rather than reusing
+  // either of those.
+  const killMute = ctx.createGain();
+  const outLevel = ctx.createGain();
+  outLevel.gain.value = entity.params.level ?? 0.8;
+
+  input.connect(dry);
+  dry.connect(mixBus);
+  growlNode.connect(wet);
+  wet.connect(mixBus);
+  mixBus.connect(killMute);
+  killMute.connect(outLevel);
+
+  // Unlike the native version, the WASM loop is bounded by construction
+  // (see growlNode's own comment above) and can't actually diverge on its
+  // own — but `kill` is kept anyway, both for controlSpecs.ts UI parity and
+  // as a genuine "make it stop right now" for a loud resonance that's just
+  // musically unwanted mid-performance: it mutes the audible output
+  // immediately (killMute) and tells the WASM instance to drop its
+  // internal ringing state instantly (growl_reset) rather than waiting for
+  // it to decay under continued silence.
+  let currentKill = Math.min(1, Math.max(0, entity.params.kill ?? 0));
+  killMute.gain.value = 1 - currentKill;
+
+  registerControls(entity.id, {
+    level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    frequency: (value) => growlNode.port.postMessage({ type: 'setFrequency', value }),
+    q: (value) => growlNode.port.postMessage({ type: 'setQ', value: Math.min(GROWL_MAX_Q, Math.max(0.1, value)) }),
+    feedback: (value) => {
+      growlNode.port.postMessage({ type: 'setFeedback', value: Math.min(GROWL_MAX_FEEDBACK, Math.max(0, value)) });
+    },
+    kill: (value) => {
+      currentKill = Math.min(1, Math.max(0, value));
+      killMute.gain.setTargetAtTime(1 - currentKill, ctx.currentTime, 0.01);
+      if (currentKill >= 1) {
+        growlNode.port.postMessage({ type: 'reset' });
+      }
+    },
+    mix: (value) => {
+      const m = Math.min(1, Math.max(0, value));
+      dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
+      wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
+    },
+  });
+
+  return outLevel;
 }
 
 // Shared DSP for chorus and flanger: both are an LFO-modulated delay mixed

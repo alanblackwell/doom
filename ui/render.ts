@@ -41,6 +41,7 @@ import { beatMatcherNoteSnapHoldFraction, drawBeatMatcherBody, drawBeatMatcherPo
 import type { BeatMatcherNoteSnapIndicator } from './beatMatcher';
 import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
+import { drawMetalTunerPopup } from './metalTuner';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1184,6 +1185,14 @@ export function renderFrame(
             ? { key: interaction.bassTunerSliderDrag.key, target: interaction.bassTunerSliderDrag.target as 'min' | 'max' }
             : null;
         drawBassTunerPopup(ctx, graph, feature, owner, now, bassCaretDrag, interaction.lastPointerPoint, drag);
+      } else if (feature.kind === 'metalTuning') {
+        const metalCaretDrag =
+          interaction.metalTunerSliderDrag &&
+          interaction.metalTunerSliderDrag.entityId === feature.id &&
+          interaction.metalTunerSliderDrag.target !== 'value'
+            ? { key: interaction.metalTunerSliderDrag.key, target: interaction.metalTunerSliderDrag.target as 'min' | 'max' }
+            : null;
+        drawMetalTunerPopup(ctx, graph, feature, owner, now, metalCaretDrag, interaction.lastPointerPoint, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

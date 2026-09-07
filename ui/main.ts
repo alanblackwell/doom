@@ -230,6 +230,33 @@ graph.add({
   ownerId: 'metal-1',
   expanded: false,
 });
+// metal-1's own tuning organelle (EntityType 'feature', kind 'metalTuning' —
+// ui/metalTuner.ts): a by-ear tuning panel for every one of this voice's
+// existing control-dot params (pitch/damping/response/feedback/
+// feedbackFreq) plus three previously-fixed WASM constants shaping the
+// feedback/squeal character (audio/metalTuning.ts's METAL_TUNING —
+// feedbackQ/feedbackInjectGain/feedbackDriveScale, dsp/rust/src/lib.rs's
+// pluck_set_feedback_q/pluck_set_feedback_inject_gain/pluck_set_feedback_
+// drive_scale), with a Copy button that turns the current tuning into
+// ready-to-paste source text — same organelle pattern as grind-1-tuning/
+// bass-1-tuning. x/y/width/height/seed are unused for a feature entity,
+// same as every other feature in this file.
+graph.add({
+  id: 'metal-1-tuning',
+  type: 'feature',
+  kind: 'metalTuning',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 25,
+  docked: false,
+  ownerId: 'metal-1',
+  expanded: false,
+});
 // The doom/industrial palette's first new voice (TODO.md item 1): a
 // granular noise texture (audio/grindPlayer.ts, audio/graph.ts's 'grind'
 // case) — a dense, randomized stream of short filtered-noise grains for a
@@ -361,6 +388,29 @@ graph.add({
   width: 64,
   height: 44,
   seed: 15,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// A resonant bandpass in a genuine positive-feedback loop (audio/graph.ts's
+// 'growl' case) — TODO.md's "growl filter" item, and a native-Web-Audio
+// port of 'metal's own WASM feedback mechanism (dsp/rust/src/lib.rs's
+// pluck_render), routable as a pedal instead of baked into one string
+// voice: drag any source in here for a resonant scream/howl tuned to
+// `frequency`, growing more intense (and more soft-clipped) as `feedback`
+// rises toward its own 0.95 cap.
+graph.add({
+  id: 'growl-1',
+  type: 'source',
+  kind: 'growl',
+  parentId: null,
+  children: [],
+  params: { level: 0.8, frequency: 1200, q: 15, feedback: 0.5, mix: 0.7, kill: 0 },
+  x: 1060,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 26,
   docked: true,
   ownerId: null,
   expanded: false,

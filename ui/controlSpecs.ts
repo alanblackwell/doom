@@ -83,6 +83,29 @@ overdrive: [
     { param: 'feedback', label: 'feedback', min: 0, max: 0.95, color: '#c85a5a' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
+  // A resonant bandpass in a genuine positive-feedback loop (audio/graph.ts's
+  // 'growl' case) — TODO.md's "growl filter" item, and a native-Web-Audio
+  // port of the same feedback/soft-clip mechanism 'metal's own WASM voice
+  // uses (dsp/rust/src/lib.rs's pluck_render), just as a routable pedal
+  // instead of baked into one string voice. frequency/feedback reuse
+  // feedbackFreq/feedback's own colors from 'metal' for the same concepts;
+  // mix/level match every other pedal's own convention.
+  growl: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'frequency', label: 'frequency', min: 100, max: 5000, color: '#5ac8a0' },
+    { param: 'q', label: 'resonance', min: 0.1, max: 40, color: '#c85ac8' },
+    // Capped at 0.95 in audio/graph.ts regardless of what this slider is
+    // dragged to — see createGrowlFilter's own comment.
+    { param: 'feedback', label: 'feedback', min: 0, max: 0.95, color: '#c85a5a' },
+    { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
+    // A real "make it stop" control, not just another tone knob — high
+    // enough Q*feedback is a genuinely unstable loop that keeps ringing off
+    // nothing but its own resonance once it gets going, and neither
+    // removing the input nor a plain dock/undock reliably stops that (see
+    // createGrowlFilter's own comment). Alarm red, distinct from feedback's
+    // own muted red, so it doesn't read as just another tone/character dial.
+    { param: 'kill', label: 'kill', min: 0, max: 1, color: '#e04a3c' },
+  ],
   kick: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
     // Same blue as bass/bow's pitch — same concept, deliberately consistent.

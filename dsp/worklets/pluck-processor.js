@@ -21,7 +21,17 @@ class PluckProcessor extends AudioWorkletProcessor {
     super();
     this.ready = false;
 
-    const { wasmModule, frequency, damping, response, feedback, feedbackFreq } = options.processorOptions;
+    const {
+      wasmModule,
+      frequency,
+      damping,
+      response,
+      feedback,
+      feedbackFreq,
+      feedbackQ,
+      feedbackInjectGain,
+      feedbackDriveScale,
+    } = options.processorOptions;
     WebAssembly.instantiate(wasmModule).then((instance) => {
       this.exports = instance.exports;
       // Seeded per-instance, same reasoning as noise-processor.js — without
@@ -35,6 +45,14 @@ class PluckProcessor extends AudioWorkletProcessor {
         feedback ?? 0,
         feedbackFreq ?? 1200
       );
+      // Not part of pluck_init's own signature — these three only matter at
+      // all once feedback is actually nonzero ('metal', not 'pluck'), and
+      // pluck_init has no other reason to reset them, so they're just set
+      // once here instead (ui/metalTuner.ts's organelle, audio/graph.ts's
+      // 'metal' case).
+      if (feedbackQ !== undefined) this.exports.pluck_set_feedback_q(feedbackQ);
+      if (feedbackInjectGain !== undefined) this.exports.pluck_set_feedback_inject_gain(feedbackInjectGain);
+      if (feedbackDriveScale !== undefined) this.exports.pluck_set_feedback_drive_scale(feedbackDriveScale);
       this.ready = true;
     });
 
@@ -55,6 +73,12 @@ class PluckProcessor extends AudioWorkletProcessor {
         this.exports.pluck_set_feedback(value);
       } else if (type === 'setFeedbackFreq') {
         this.exports.pluck_set_feedback_freq(value);
+      } else if (type === 'setFeedbackQ') {
+        this.exports.pluck_set_feedback_q(value);
+      } else if (type === 'setFeedbackInjectGain') {
+        this.exports.pluck_set_feedback_inject_gain(value);
+      } else if (type === 'setFeedbackDriveScale') {
+        this.exports.pluck_set_feedback_drive_scale(value);
       } else if (type === 'excite') {
         this.exports.pluck_excite();
       }

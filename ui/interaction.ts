@@ -113,6 +113,16 @@ import {
   toggleBassTunerExposed,
 } from './bassTuner';
 import {
+  beginMetalTunerMaxDrag,
+  copyMetalTuning,
+  hitTestMetalTunerPopup,
+  metalTunerRawValueAtPoint,
+  setMetalTunerMax,
+  setMetalTunerMin,
+  setMetalTunerValue,
+  toggleMetalTunerExposed,
+} from './metalTuner';
+import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
@@ -373,6 +383,8 @@ export interface InteractionState {
   // Same shape as grindTunerSliderDrag above, for an open bass-tuning
   // popup (ui/bassTuner.ts) instead.
   bassTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
+  // Same shape again, for an open metal-tuning popup (ui/metalTuner.ts).
+  metalTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -545,6 +557,7 @@ export function createInteractionState(): InteractionState {
     draggingSamplerMarker: null,
     grindTunerSliderDrag: null,
     bassTunerSliderDrag: null,
+    metalTunerSliderDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -1023,6 +1036,44 @@ export function attachInteraction(
           break;
         case 'copy':
           copyBassTuning(graph, bassTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open metal-tuning popup (ui/metalTuner.ts) — same shape as the
+    // grind/bass-tuning popups just above.
+    const metalTunerHit = hitTestMetalTunerPopup(graph, point);
+    if (metalTunerHit) {
+      switch (metalTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(metalTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'checkbox':
+          toggleMetalTunerExposed(metalTunerHit.entityId, metalTunerHit.key);
+          break;
+        case 'slider':
+          canvas.setPointerCapture(e.pointerId);
+          setMetalTunerValue(graph, metalTunerHit.entityId, metalTunerHit.key, metalTunerHit.value);
+          state.metalTunerSliderDrag = { entityId: metalTunerHit.entityId, key: metalTunerHit.key, target: 'value' };
+          break;
+        case 'minCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setMetalTunerMin(graph, metalTunerHit.entityId, metalTunerHit.key, metalTunerHit.value);
+          state.metalTunerSliderDrag = { entityId: metalTunerHit.entityId, key: metalTunerHit.key, target: 'min' };
+          break;
+        case 'maxCaret':
+          canvas.setPointerCapture(e.pointerId);
+          beginMetalTunerMaxDrag(metalTunerHit.entityId, metalTunerHit.key);
+          setMetalTunerMax(graph, metalTunerHit.entityId, metalTunerHit.key, metalTunerHit.value);
+          state.metalTunerSliderDrag = { entityId: metalTunerHit.entityId, key: metalTunerHit.key, target: 'max' };
+          break;
+        case 'copy':
+          copyMetalTuning(graph, metalTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
@@ -1955,6 +2006,17 @@ export function attachInteraction(
       return;
     }
 
+    if (state.metalTunerSliderDrag) {
+      const { entityId, key, target } = state.metalTunerSliderDrag;
+      const value = metalTunerRawValueAtPoint(graph, entityId, key, point);
+      if (value !== null) {
+        if (target === 'value') setMetalTunerValue(graph, entityId, key, value);
+        else if (target === 'min') setMetalTunerMin(graph, entityId, key, value);
+        else setMetalTunerMax(graph, entityId, key, value);
+      }
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2302,6 +2364,12 @@ export function attachInteraction(
     if (state.bassTunerSliderDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.bassTunerSliderDrag = null;
+      return;
+    }
+
+    if (state.metalTunerSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.metalTunerSliderDrag = null;
       return;
     }
 

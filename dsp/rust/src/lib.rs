@@ -457,17 +457,30 @@ static mut PLUCK_FILTER_STATE: f32 = 0.0;
 
 // Q of the feedback resonance below — narrow enough to genuinely pick out
 // one partial rather than reinforcing a broad swath of the spectrum, but
-// not so narrow it needs an exact frequency match to excite.
-const FEEDBACK_Q: f32 = 4.0;
+// not so narrow it needs an exact frequency match to excite. Was a plain
+// const; now live-tunable (pluck_set_feedback_q) via ui/metalTuner.ts's
+// organelle, same "read fresh every render() call" shape as every other
+// live control here.
+static mut PLUCK_FEEDBACK_Q: f32 = 4.0;
+// The two fixed multipliers pluck_render's own feedback branch used to hard-
+// code (see that function's own comment on the feedback formula) — how
+// strongly the picked-out partial gets reinjected, and how much extra drive/
+// clipping feedback amount adds on top. Also now live-tunable
+// (pluck_set_feedback_inject_gain/pluck_set_feedback_drive_scale).
+static mut PLUCK_FEEDBACK_INJECT_GAIN: f32 = 3.0;
+static mut PLUCK_FEEDBACK_DRIVE_SCALE: f32 = 4.0;
 
 // Chamberlin state-variable filter, band-pass output. Standard/stable
 // direct-form design (not derived from anything else in this file) — `f`
 // is the usual `2*sin(pi*freq/sampleRate)` coefficient, clamped so it stays
-// well-behaved even at this voice's highest playable pitches.
-fn svf_bandpass(input: f32, freq: f32, sample_rate: f32, low: &mut f32, band: &mut f32) -> f32 {
+// well-behaved even at this voice's highest playable pitches. `q` is read
+// by the caller (pluck_render) from PLUCK_FEEDBACK_Q and passed in, rather
+// than read directly here, so this function itself stays a plain (non-
+// unsafe) helper.
+fn svf_bandpass(input: f32, freq: f32, sample_rate: f32, q: f32, low: &mut f32, band: &mut f32) -> f32 {
     let f = (2.0 * (std::f32::consts::PI * freq / sample_rate).sin()).clamp(0.0, 1.0);
     *low += f * *band;
-    let high = input - *low - *band / FEEDBACK_Q;
+    let high = input - *low - *band / q;
     *band += f * high;
     *band
 }
@@ -539,6 +552,27 @@ pub extern "C" fn pluck_set_feedback_freq(value: f32) {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn pluck_set_feedback_q(value: f32) {
+    unsafe {
+        PLUCK_FEEDBACK_Q = value.max(0.1);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_feedback_inject_gain(value: f32) {
+    unsafe {
+        PLUCK_FEEDBACK_INJECT_GAIN = value;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pluck_set_feedback_drive_scale(value: f32) {
+    unsafe {
+        PLUCK_FEEDBACK_DRIVE_SCALE = value;
+    }
+}
+
 // Re-excites the string: refills the active delay line with lowpass-shaped
 // noise (see PLUCK_RESPONSE above) and resets the feedback filter and write
 // pointer, so every trigger gets a clean, identically-shaped attack rather
@@ -586,6 +620,9 @@ pub extern "C" fn pluck_render() {
         let damping = PLUCK_DAMPING;
         let feedback = PLUCK_FEEDBACK;
         let feedback_freq = PLUCK_FEEDBACK_FREQ;
+        let feedback_q = PLUCK_FEEDBACK_Q;
+        let feedback_inject_gain = PLUCK_FEEDBACK_INJECT_GAIN;
+        let feedback_drive_scale = PLUCK_FEEDBACK_DRIVE_SCALE;
         let sample_rate = PLUCK_SAMPLE_RATE;
         let pole = 0.1 + 0.85 * damping;
         let loop_gain = 0.999 - 0.03 * damping;
@@ -615,9 +652,9 @@ pub extern "C" fn pluck_render() {
                 // real amp. soft_clip on the combined result is what keeps
                 // this genuine positive-feedback loop bounded rather than
                 // diverging once the targeted partial starts to run away.
-                let injected = svf_bandpass(filter_state, feedback_freq, sample_rate, &mut svf_low, &mut svf_band);
-                let driven = filter_state * loop_gain + injected * feedback * 3.0;
-                let drive = 1.0 + feedback * 4.0;
+                let injected = svf_bandpass(filter_state, feedback_freq, sample_rate, feedback_q, &mut svf_low, &mut svf_band);
+                let driven = filter_state * loop_gain + injected * feedback * feedback_inject_gain;
+                let drive = 1.0 + feedback * feedback_drive_scale;
                 *buf.add(idx) = soft_clip(driven * drive) / drive;
             } else {
                 *buf.add(idx) = filter_state * loop_gain;
@@ -631,5 +668,154 @@ pub extern "C" fn pluck_render() {
         PLUCK_SVF_LOW = svf_low;
         PLUCK_SVF_BAND = svf_band;
         PLUCK_WRITE_IDX = idx;
+    }
+}
+
+// --- Growl filter (resonant feedback, applied to an external input) ---
+//
+// audio/graph.ts's 'growl' case (TODO.md's "growl filter" item) — the SAME
+// svf_bandpass/soft_clip building blocks pluck_render's own feedback branch
+// uses above, reused here for a genuinely different purpose: instead of
+// exciting a Karplus-Strong string's own delay line, this processes
+// whatever audio signal is actually connected in, real-time, as a routable
+// pedal (drag any source into it). A native-Web-Audio port of this same
+// idea was tried first (audio/graph.ts's earlier createGrowlFilter,
+// BiquadFilterNode + WaveShaperNode) and worked, but didn't sound the same
+// and turned out genuinely hard to stop once it built up — a resonant
+// BiquadFilterNode's own internal state isn't bounded by anything until
+// its output is tapped, so a hot enough Q could diverge freely with no
+// per-sample ceiling. This avoids that by construction: exactly like
+// pluck_render, EVERY sample written back into the loop (`tap` below) has
+// already been through soft_clip, so svf_bandpass's own input is bounded
+// every single sample, not just "eventually," which is what keeps this
+// genuinely stable rather than merely damped.
+//
+// Unlike every other WASM voice in this file, this one actually reads an
+// INPUT buffer (GROWL_INPUT, filled by dsp/worklets/growl-processor.js
+// from its own process()'s `inputs[0]` before calling growl_render()) —
+// every other render() function here only ever generates.
+
+static mut GROWL_INPUT: [f32; QUANTUM] = [0.0; QUANTUM];
+static mut GROWL_SAMPLE_RATE: f32 = 48000.0;
+static mut GROWL_FREQUENCY: f32 = 1200.0;
+static mut GROWL_Q: f32 = 15.0;
+// Same 0.98 safety cap as createModulatedDelay's own flanger feedback in
+// audio/graph.ts — a genuine feedback loop, so unity gain would mean
+// unbounded buildup rather than just "more resonance."
+static mut GROWL_FEEDBACK: f32 = 0.5;
+static mut GROWL_INJECT_GAIN: f32 = 3.0;
+static mut GROWL_DRIVE_SCALE: f32 = 4.0;
+static mut GROWL_SVF_LOW: f32 = 0.0;
+static mut GROWL_SVF_BAND: f32 = 0.0;
+static mut GROWL_TAP: f32 = 0.0; // last output sample, reinjected into the next sample's input
+
+#[no_mangle]
+pub extern "C" fn growl_input_ptr() -> *mut f32 {
+    (&raw mut GROWL_INPUT) as *mut f32
+}
+
+#[no_mangle]
+pub extern "C" fn growl_input_len() -> usize {
+    QUANTUM
+}
+
+#[no_mangle]
+pub extern "C" fn growl_init(sample_rate: f32, frequency: f32, q: f32, feedback: f32, inject_gain: f32, drive_scale: f32) {
+    unsafe {
+        GROWL_SAMPLE_RATE = sample_rate;
+        GROWL_FREQUENCY = frequency.max(20.0);
+        GROWL_Q = q.max(0.1);
+        GROWL_FEEDBACK = feedback.clamp(0.0, 0.98);
+        GROWL_INJECT_GAIN = inject_gain;
+        GROWL_DRIVE_SCALE = drive_scale;
+        GROWL_SVF_LOW = 0.0;
+        GROWL_SVF_BAND = 0.0;
+        GROWL_TAP = 0.0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn growl_set_frequency(value: f32) {
+    unsafe {
+        GROWL_FREQUENCY = value.max(20.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn growl_set_q(value: f32) {
+    unsafe {
+        GROWL_Q = value.max(0.1);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn growl_set_feedback(value: f32) {
+    unsafe {
+        GROWL_FEEDBACK = value.clamp(0.0, 0.98);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn growl_set_inject_gain(value: f32) {
+    unsafe {
+        GROWL_INJECT_GAIN = value;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn growl_set_drive_scale(value: f32) {
+    unsafe {
+        GROWL_DRIVE_SCALE = value;
+    }
+}
+
+// An explicit panic-button reset — instantly zeros the filter's own
+// internal ringing state and the feedback tap, rather than waiting for it
+// to decay on its own. audio/graph.ts's 'growl' case calls this from its
+// own `kill` control (alongside forcing GROWL_FEEDBACK toward 0 and muting
+// the node's own output downstream), so a loud resonance can be forced
+// silent immediately instead of ringing down over however many cycles its
+// own Q implies.
+#[no_mangle]
+pub extern "C" fn growl_reset() {
+    unsafe {
+        GROWL_SVF_LOW = 0.0;
+        GROWL_SVF_BAND = 0.0;
+        GROWL_TAP = 0.0;
+    }
+}
+
+// Fills BUFFER with one render quantum's worth of GROWL_INPUT run through
+// the resonant feedback loop. Call growl_init() once first, and refill
+// GROWL_INPUT (via growl_input_ptr()) before every call — see this
+// section's own header for why every sample fed into svf_bandpass has
+// already been through soft_clip on some previous pass, which is what
+// keeps this bounded.
+#[no_mangle]
+pub extern "C" fn growl_render() {
+    let input = (&raw const GROWL_INPUT) as *const f32;
+    let out = (&raw mut BUFFER) as *mut f32;
+    unsafe {
+        let freq = GROWL_FREQUENCY;
+        let q = GROWL_Q;
+        let feedback = GROWL_FEEDBACK;
+        let inject_gain = GROWL_INJECT_GAIN;
+        let drive = 1.0 + feedback * GROWL_DRIVE_SCALE;
+        let sample_rate = GROWL_SAMPLE_RATE;
+        let mut svf_low = GROWL_SVF_LOW;
+        let mut svf_band = GROWL_SVF_BAND;
+        let mut tap = GROWL_TAP;
+
+        for i in 0..QUANTUM {
+            let x = *input.add(i) + tap * feedback * inject_gain;
+            let injected = svf_bandpass(x, freq, sample_rate, q, &mut svf_low, &mut svf_band);
+            let clipped = soft_clip(injected * drive) / drive;
+            tap = clipped;
+            *out.add(i) = clipped;
+        }
+
+        GROWL_SVF_LOW = svf_low;
+        GROWL_SVF_BAND = svf_band;
+        GROWL_TAP = tap;
     }
 }

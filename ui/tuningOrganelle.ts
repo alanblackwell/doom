@@ -213,8 +213,13 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     return TITLE_HEIGHT + ALL_ROW_KEYS.length * ROW_HEIGHT + COPY_BUTTON_HEIGHT + PADDING * 2;
   }
 
-  function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext): Rect {
-    return popupRectFor(graph, owner, POPUP_WIDTH, popupHeight(), drag);
+  // `feature` (this organelle's own feature entity) is optional and only
+  // matters when its owner has more than one feature (e.g. metal-1's
+  // envelope plus this tuning organelle) — see portholePosition's own
+  // comment for why passing it keeps a second feature's porthole/popup
+  // from landing exactly on top of the first one's.
+  function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext, feature?: Entity): Rect {
+    return popupRectFor(graph, owner, POPUP_WIDTH, popupHeight(), drag, feature);
   }
 
   function rowY(popup: Rect, index: number): number {
@@ -451,7 +456,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     if (!owner) return null;
     const range = rangeStateFor(featureEntityId)[key];
     if (!range) return null;
-    const popup = popupRect(graph, owner, drag);
+    const popup = popupRect(graph, owner, drag, feature);
     const { left: trackLeft, right: trackRight } = sliderTrackX(popup);
     return valueFromX(trackLeft, trackRight, range.ceiling, point.x);
   }
@@ -538,7 +543,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
       if (entity.type !== 'feature' || entity.kind !== config.featureKind || !entity.expanded) continue;
       const owner = ownerOf(graph, entity);
       if (!owner) continue;
-      const popup = popupRect(graph, owner, drag);
+      const popup = popupRect(graph, owner, drag, entity);
 
       if (dist(point, closeButtonPosition(popup)) <= CLOSE_BUTTON_RADIUS + 4) {
         return { entityId: entity.id, kind: 'close' };
@@ -607,7 +612,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     pointer: Point | null,
     drag?: DragContext
   ): void {
-    const popup = popupRect(graph, owner, drag);
+    const popup = popupRect(graph, owner, drag, entity);
     const left = popup.x - popup.width / 2;
     const top = popup.y - popup.height / 2;
 
