@@ -40,6 +40,7 @@ import type { NoteSnapIndicator } from './sequencer';
 import { beatMatcherNoteSnapHoldFraction, drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
 import type { BeatMatcherNoteSnapIndicator } from './beatMatcher';
 import { drawGrindTunerPopup } from './grindTuner';
+import { drawBassTunerPopup } from './bassTuner';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1175,6 +1176,14 @@ export function renderFrame(
             ? { key: interaction.grindTunerSliderDrag.key, target: interaction.grindTunerSliderDrag.target as 'min' | 'max' }
             : null;
         drawGrindTunerPopup(ctx, graph, feature, owner, now, grindCaretDrag, interaction.lastPointerPoint, drag);
+      } else if (feature.kind === 'bassTuning') {
+        const bassCaretDrag =
+          interaction.bassTunerSliderDrag &&
+          interaction.bassTunerSliderDrag.entityId === feature.id &&
+          interaction.bassTunerSliderDrag.target !== 'value'
+            ? { key: interaction.bassTunerSliderDrag.key, target: interaction.bassTunerSliderDrag.target as 'min' | 'max' }
+            : null;
+        drawBassTunerPopup(ctx, graph, feature, owner, now, bassCaretDrag, interaction.lastPointerPoint, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

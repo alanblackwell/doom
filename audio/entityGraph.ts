@@ -82,15 +82,32 @@ export interface Entity {
 
 export class EntityGraph {
   private entities = new Map<string, Entity>();
+  // The params an entity was FIRST added with, snapshotted once and never
+  // touched again — the one thing a "reset to defaults" (audio/graph.ts's
+  // resetEntityToDefaults, triggered whenever an entity is dragged off the
+  // canvas into the dock and back on — see ui/interaction.ts's finalizeDrop)
+  // needs that entity.params itself can't provide once tuning has
+  // overwritten it. A recovery path for a voice a bad tuning value left
+  // crashed/stuck, at the cost of also discarding any deliberate tuning if
+  // the entity was only docked to declutter the canvas, not to recover from
+  // anything — a real trade-off, not a free safety net.
+  private defaultParams = new Map<string, Record<string, number>>();
 
   add(entity: Entity): void {
     this.entities.set(entity.id, entity);
+    if (!this.defaultParams.has(entity.id)) {
+      this.defaultParams.set(entity.id, { ...entity.params });
+    }
     if (entity.parentId) {
       const parent = this.entities.get(entity.parentId);
       if (parent && !parent.children.includes(entity.id)) {
         parent.children.push(entity.id);
       }
     }
+  }
+
+  defaultParamsFor(id: string): Record<string, number> | undefined {
+    return this.defaultParams.get(id);
   }
 
   get(id: string): Entity | undefined {

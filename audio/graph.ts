@@ -17,6 +17,7 @@ import { pulseMelody } from './melodyPlayer';
 import { activateSequencerControl, registerSequencerForPlayback } from './sequencerPlayer';
 import { activateBeatMatcherControl, registerBeatMatcherForPlayback } from './beatMatcherPlayer';
 import { GRIND_TUNING, GRIND_TUNING_KEYS, startGrindVoice } from './grindPlayer';
+import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -367,10 +368,22 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       return level;
     }
     case 'bass': {
+      // Every BASS_TUNING key seeds this instance's own WASM init state,
+      // whether or not it currently has a control-dot (same "tunable
+      // regardless of exposed" model as the 'grind' case's GRIND_TUNING
+      // below) — entity.params carries a value for it once either the
+      // tuning organelle (ui/bassTuner.ts) or a real control-dot has
+      // touched it, BASS_TUNING's own factory default otherwise.
+      const bassInitial: Record<string, number> = {};
+      for (const key of BASS_TUNING_KEYS) {
+        bassInitial[key] = entity.params[key] ?? BASS_TUNING[key].value;
+      }
       const bass = new AudioWorkletNode(ctx, 'bass-processor', {
         processorOptions: {
           wasmModule: dspModule,
           frequency: entity.params.frequency ?? 41.2, // low E
+          detune: bassInitial.detune,
+          drive: bassInitial.drive,
         },
       });
       const level = ctx.createGain();
@@ -394,13 +407,25 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       const melody = graph.featuresOf(entity.id).find((f) => f.kind === 'melody');
       if (melody) melodyOwnersByEntity.set(entity.id, melody.id);
 
-      registerControls(entity.id, {
+      // 'setDetune'/'setDrive' forward straight to bass_set_detune/
+      // bass_set_drive (dsp/rust/src/lib.rs) — same "read fresh every
+      // render() call" click-free shape as frequency's own setter.
+      const BASS_TUNING_MESSAGE_TYPE: Record<string, string> = { detune: 'setDetune', drive: 'setDrive' };
+      const bassControls: Record<string, (value: number) => void> = {
         level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
         // Genuinely click-free, unlike the bow's frequency control — see
         // bass_set_frequency's comment in dsp/rust/src/lib.rs.
         frequency: (value) => bass.port.postMessage({ type: 'setFrequency', value }),
         melodyGate: (value) => melodyGate.gain.setTargetAtTime(value, ctx.currentTime, 0.008),
-      });
+      };
+      // Registered for EVERY tuning key regardless of its own `exposed`
+      // flag — see the 'grind' case's own comment on why (same reasoning,
+      // just forwarding through the worklet's message port instead of
+      // mutating a JS object directly).
+      for (const key of BASS_TUNING_KEYS) {
+        bassControls[key] = (value) => bass.port.postMessage({ type: BASS_TUNING_MESSAGE_TYPE[key], value });
+      }
+      registerControls(entity.id, bassControls);
 
       return melodyGate;
     }
@@ -1354,4 +1379,42 @@ export function deactivateEntity(id: string): void {
   const nodes = nodesByEntity.get(id);
   if (!nodes) return;
   nodes.pan.disconnect();
+}
+
+// Restores entity.params to whatever it was FIRST added to the graph with
+// (EntityGraph's own defaultParams snapshot) — a recovery path for a voice
+// left in a bad state by an extreme tuning value, per ui/interaction.ts's
+// finalizeDrop (dragging an entity into the dock and back out). A no-op if
+// this entity was never actually added through EntityGraph.add() (shouldn't
+// happen for anything reachable from the canvas).
+export function resetEntityToDefaults(entity: Entity, graph: EntityGraph): void {
+  const defaults = graph.defaultParamsFor(entity.id);
+  if (defaults) entity.params = { ...defaults };
+}
+
+// Discards this entity's audio nodes entirely — unlike deactivateEntity's
+// own "keep nodes around, just disconnect" convention (its own comment
+// above), nothing here is reused: every per-entity cache this file keeps
+// (nodesByEntity and friends) is cleared for this id first, so the
+// activateEntity() call at the end takes the "nothing found, build fresh"
+// path instead of reconnecting whatever was there. That's the actual
+// recovery a "turn it off and on again" gesture needs — a crashed/stuck
+// WASM instance or JS closure won't fix itself by merely being
+// reconnected. Nothing else in the app relies on node IDENTITY surviving a
+// rebuild, only on these maps pointing at SOMETHING live for this id, so
+// this is safe to call any time the entity is off-canvas (disconnected
+// already) — see ui/interaction.ts's finalizeDrop for the one call site.
+export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
+  const old = nodesByEntity.get(entity.id);
+  if (old) old.pan.disconnect();
+  nodesByEntity.delete(entity.id);
+  controlsByEntity.delete(entity.id);
+  triggersByEntity.delete(entity.id);
+  releasesByEntity.delete(entity.id);
+  stopsByEntity.delete(entity.id);
+  pauseGatesByEntity.delete(entity.id);
+  pausedEntities.delete(entity.id);
+  playingEntities.delete(entity.id);
+  melodyOwnersByEntity.delete(entity.id);
+  activateEntity(entity, graph);
 }

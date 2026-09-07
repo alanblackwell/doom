@@ -7,10 +7,11 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import {
   reparentEntity as reparentAudio,
-  activateEntity,
   activateEventTarget,
   getControlSetter,
+  rebuildEntity,
   releaseEntity,
+  resetEntityToDefaults,
   triggerEntity,
   isEntityPlaying,
   stopEntity,
@@ -92,6 +93,7 @@ import {
   updateMarkerDrag,
 } from './sampler';
 import {
+  beginGrindTunerMaxDrag,
   copyGrindTuning,
   grindTunerRawValueAtPoint,
   hitTestGrindTunerPopup,
@@ -100,6 +102,16 @@ import {
   setGrindTunerValue,
   toggleGrindTunerExposed,
 } from './grindTuner';
+import {
+  bassTunerRawValueAtPoint,
+  beginBassTunerMaxDrag,
+  copyBassTuning,
+  hitTestBassTunerPopup,
+  setBassTunerMax,
+  setBassTunerMin,
+  setBassTunerValue,
+  toggleBassTunerExposed,
+} from './bassTuner';
 import {
   applySequencerNoteSnap,
   applySequencerResize,
@@ -358,6 +370,9 @@ export interface InteractionState {
   // key one of ui/grindTuner.ts's ALL_ROW_KEYS, target which of the row's
   // three draggable handles this is.
   grindTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
+  // Same shape as grindTunerSliderDrag above, for an open bass-tuning
+  // popup (ui/bassTuner.ts) instead.
+  bassTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -529,6 +544,7 @@ export function createInteractionState(): InteractionState {
     melodyScrollDrag: null,
     draggingSamplerMarker: null,
     grindTunerSliderDrag: null,
+    bassTunerSliderDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -963,11 +979,50 @@ export function attachInteraction(
           break;
         case 'maxCaret':
           canvas.setPointerCapture(e.pointerId);
+          beginGrindTunerMaxDrag(grindTunerHit.entityId, grindTunerHit.key);
           setGrindTunerMax(graph, grindTunerHit.entityId, grindTunerHit.key, grindTunerHit.value);
           state.grindTunerSliderDrag = { entityId: grindTunerHit.entityId, key: grindTunerHit.key, target: 'max' };
           break;
         case 'copy':
           copyGrindTuning(graph, grindTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open bass-tuning popup (ui/bassTuner.ts) — same shape as the
+    // grind-tuning popup just above.
+    const bassTunerHit = hitTestBassTunerPopup(graph, point);
+    if (bassTunerHit) {
+      switch (bassTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(bassTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'checkbox':
+          toggleBassTunerExposed(bassTunerHit.entityId, bassTunerHit.key);
+          break;
+        case 'slider':
+          canvas.setPointerCapture(e.pointerId);
+          setBassTunerValue(graph, bassTunerHit.entityId, bassTunerHit.key, bassTunerHit.value);
+          state.bassTunerSliderDrag = { entityId: bassTunerHit.entityId, key: bassTunerHit.key, target: 'value' };
+          break;
+        case 'minCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setBassTunerMin(graph, bassTunerHit.entityId, bassTunerHit.key, bassTunerHit.value);
+          state.bassTunerSliderDrag = { entityId: bassTunerHit.entityId, key: bassTunerHit.key, target: 'min' };
+          break;
+        case 'maxCaret':
+          canvas.setPointerCapture(e.pointerId);
+          beginBassTunerMaxDrag(bassTunerHit.entityId, bassTunerHit.key);
+          setBassTunerMax(graph, bassTunerHit.entityId, bassTunerHit.key, bassTunerHit.value);
+          state.bassTunerSliderDrag = { entityId: bassTunerHit.entityId, key: bassTunerHit.key, target: 'max' };
+          break;
+        case 'copy':
+          copyBassTuning(graph, bassTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
@@ -1889,6 +1944,17 @@ export function attachInteraction(
       return;
     }
 
+    if (state.bassTunerSliderDrag) {
+      const { entityId, key, target } = state.bassTunerSliderDrag;
+      const value = bassTunerRawValueAtPoint(graph, entityId, key, point);
+      if (value !== null) {
+        if (target === 'value') setBassTunerValue(graph, entityId, key, value);
+        else if (target === 'min') setBassTunerMin(graph, entityId, key, value);
+        else setBassTunerMax(graph, entityId, key, value);
+      }
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2230,6 +2296,12 @@ export function attachInteraction(
     if (state.grindTunerSliderDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.grindTunerSliderDrag = null;
+      return;
+    }
+
+    if (state.bassTunerSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.bassTunerSliderDrag = null;
       return;
     }
 
@@ -2722,12 +2794,17 @@ function finalizeDrop(
     reparentAudio(entityId, newParentId);
   }
 
-  // Dragged out of the dock: build (first time) or reconnect (it was docked
-  // before, so its nodes — if any already existed — are currently
-  // disconnected) its audio, now that it has a resolved parent (possibly
-  // just set above) to connect into.
+  // Dragged out of the dock: reset to factory params and rebuild its audio
+  // from scratch (first time, or every time — see resetEntityToDefaults/
+  // rebuildEntity's own comments in audio/graph.ts) rather than just
+  // reconnecting whatever was there, now that it has a resolved parent
+  // (possibly just set above) to connect into. This is the "drag off the
+  // canvas and back on" recovery path for an entity a bad tuning value left
+  // crashed/stuck — at the real cost that any deliberate tuning is ALSO
+  // discarded by docking, not just a genuine crash.
   if (wasDocked) {
-    activateEntity(entity, graph);
+    resetEntityToDefaults(entity, graph);
+    rebuildEntity(entity, graph);
   }
 
   // Independent of whether reparenting happened — dropping one instrument

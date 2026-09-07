@@ -56,6 +56,29 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// bass-1's own tuning organelle (EntityType 'feature', kind 'bassTuning' —
+// ui/bassTuner.ts): a by-ear tuning panel for the WASM voice's own detune/
+// drive constants (audio/bassTuning.ts's BASS_TUNING, dsp/rust/src/lib.rs's
+// bass_set_detune/bass_set_drive), with a Copy button that turns the
+// current tuning into ready-to-paste source text — same organelle pattern
+// as grind-1-tuning below. x/y/width/height/seed are unused for a feature
+// entity, same as every other feature in this file.
+graph.add({
+  id: 'bass-1-tuning',
+  type: 'feature',
+  kind: 'bassTuning',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 24,
+  docked: false,
+  ownerId: 'bass-1',
+  expanded: false,
+});
 graph.add({
   id: 'bow-1',
   type: 'source',

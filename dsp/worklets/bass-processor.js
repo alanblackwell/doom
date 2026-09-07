@@ -7,19 +7,25 @@ class BassProcessor extends AudioWorkletProcessor {
     super();
     this.ready = false;
 
-    const { wasmModule, frequency } = options.processorOptions;
+    const { wasmModule, frequency, detune, drive } = options.processorOptions;
     WebAssembly.instantiate(wasmModule).then((instance) => {
       this.exports = instance.exports;
-      this.exports.bass_init(sampleRate, frequency);
+      this.exports.bass_init(sampleRate, frequency, detune, drive);
       this.ready = true;
     });
 
-    // Live pitch changes from the UI (audio/graph.ts's 'frequency' control
-    // setter) — not a native AudioParam, same reasoning as bow-processor.js.
+    // Live pitch/detune/drive changes from the UI (audio/graph.ts's 'bass'
+    // case, ui/bassTuner.ts's tuning organelle) — none of these are native
+    // AudioParams, same reasoning as bow-processor.js.
     this.port.onmessage = (event) => {
       if (!this.ready) return;
-      if (event.data?.type === 'setFrequency') {
-        this.exports.bass_set_frequency(event.data.value);
+      const { type, value } = event.data ?? {};
+      if (type === 'setFrequency') {
+        this.exports.bass_set_frequency(value);
+      } else if (type === 'setDetune') {
+        this.exports.bass_set_detune(value);
+      } else if (type === 'setDrive') {
+        this.exports.bass_set_drive(value);
       }
     };
   }

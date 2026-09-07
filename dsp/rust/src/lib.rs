@@ -31,10 +31,14 @@ static mut SAMPLE_RATE: f32 = 48000.0;
 static mut FREQUENCY: f32 = 41.2; // low E — standard doom/drop-tuned guitar territory
 
 // Two detuned saws beat against each other for width/"fatness" (the classic
-// unison-detune trick) rather than a single naive saw. Precomputed constant
-// ratio instead of calling powf() at runtime — this module has no reason to
-// pull in libm for a fixed detune amount. 1.0040516 ≈ +7 cents.
-const DETUNE_RATIO: f32 = 1.0040516;
+// unison-detune trick) rather than a single naive saw. 1.0040516 ≈ +7 cents
+// — the factory default (see audio/bassTuning.ts's BASS_TUNING.detune),
+// live-tunable via bass_set_detune rather than a plain compile-time const
+// now that ui/bassTuner.ts's organelle can drag it.
+static mut BASS_DETUNE_RATIO: f32 = 1.0040516;
+// Drive into soft_clip below — also a BASS_TUNING entry now
+// (BASS_TUNING.drive), live-tunable via bass_set_drive.
+static mut BASS_DRIVE: f32 = 1.6;
 
 fn soft_clip(x: f32) -> f32 {
     x / (1.0 + x.abs())
@@ -85,10 +89,12 @@ pub extern "C" fn render() {
 }
 
 #[no_mangle]
-pub extern "C" fn bass_init(sample_rate: f32, freq: f32) {
+pub extern "C" fn bass_init(sample_rate: f32, freq: f32, detune: f32, drive: f32) {
     unsafe {
         SAMPLE_RATE = sample_rate;
         FREQUENCY = freq;
+        BASS_DETUNE_RATIO = detune;
+        BASS_DRIVE = drive;
         PHASE_A = 0.0;
         PHASE_B = 0.0;
     }
@@ -106,6 +112,23 @@ pub extern "C" fn bass_set_frequency(freq: f32) {
     }
 }
 
+// Live detune/drive changes — same "read fresh every render() call" shape
+// as bass_set_frequency, so these are also click-free coefficient updates
+// (ui/bassTuner.ts's tuning organelle, audio/graph.ts's 'bass' case).
+#[no_mangle]
+pub extern "C" fn bass_set_detune(value: f32) {
+    unsafe {
+        BASS_DETUNE_RATIO = value;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bass_set_drive(value: f32) {
+    unsafe {
+        BASS_DRIVE = value;
+    }
+}
+
 // Fills BUFFER with one render quantum of a detuned-unison sawtooth drone,
 // driven into soft clipping for harmonic warmth — the "fat and bassy"
 // contrast to render()'s hiss. Call bass_init() once first.
@@ -114,8 +137,10 @@ pub extern "C" fn bass_render() {
     let base = (&raw mut BUFFER) as *mut f32;
     unsafe {
         let sr = SAMPLE_RATE;
-        let freq_a = FREQUENCY / DETUNE_RATIO;
-        let freq_b = FREQUENCY * DETUNE_RATIO;
+        let detune = BASS_DETUNE_RATIO;
+        let drive = BASS_DRIVE;
+        let freq_a = FREQUENCY / detune;
+        let freq_b = FREQUENCY * detune;
         let mut phase_a = PHASE_A;
         let mut phase_b = PHASE_B;
 
@@ -123,7 +148,7 @@ pub extern "C" fn bass_render() {
             let saw_a = 2.0 * phase_a - 1.0;
             let saw_b = 2.0 * phase_b - 1.0;
             let mixed = (saw_a + saw_b) * 0.5;
-            *base.add(i) = soft_clip(mixed * 1.6);
+            *base.add(i) = soft_clip(mixed * drive);
 
             phase_a += freq_a / sr;
             if phase_a >= 1.0 {
