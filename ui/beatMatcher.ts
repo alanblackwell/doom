@@ -253,14 +253,22 @@ export interface BeatMatcherState {
   playStartCtxTime: number | null; // AudioContext.currentTime playback last (re)started from
   pausedAtSeconds: number; // playhead position while stopped, or the base currentPlaybackSeconds adds elapsed time to while playing
 
-  // The stop/repeat end marker — where playback loops back to 0 or stops,
-  // draggable anywhere in (0, capturedBuffer.duration]. Defaults to the
-  // clip's own full duration (so playback just plays the whole thing once,
-  // unless the user narrows it down) — unlike ui/sequencer.ts's own
-  // trackEndSeconds, there's no "implicit end tracking the viewport" concept
-  // to worry about here: this clip already has a real, fixed, always-known
-  // length, so the marker is just a plain value from the start, always a
-  // real boundary. See advanceBeatMatcherPastEnd/setBeatMatcherEnd.
+  // The start marker — where playback (and a loop-at-end wrap) begins,
+  // draggable anywhere in [0, endSeconds). Defaults to 0 (so playback plays
+  // from the very beginning, unless the user narrows it down) — the
+  // beginning-side counterpart to endSeconds just below; see that field's
+  // own comment for why there's no "implicit" tracking to worry about here
+  // either. See setBeatMatcherStart.
+  startSeconds: number;
+  // The stop/repeat end marker — where playback loops back to startSeconds
+  // or stops, draggable anywhere in (startSeconds, capturedBuffer.duration].
+  // Defaults to the clip's own full duration (so playback just plays the
+  // whole thing once, unless the user narrows it down) — unlike
+  // ui/sequencer.ts's own trackEndSeconds, there's no "implicit end tracking
+  // the viewport" concept to worry about here: this clip already has a real,
+  // fixed, always-known length, so the marker is just a plain value from the
+  // start, always a real boundary. See advanceBeatMatcherPastEnd/
+  // setBeatMatcherEnd.
   endSeconds: number;
   loopAtEnd: boolean;
 
@@ -355,6 +363,7 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       playing: false,
       playStartCtxTime: null,
       pausedAtSeconds: 0,
+      startSeconds: 0,
       endSeconds: 0,
       loopAtEnd: false,
       autoScrollSuspended: false,
@@ -454,6 +463,7 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.playing = false;
     state.playStartCtxTime = null;
     state.pausedAtSeconds = 0;
+    state.startSeconds = 0;
     state.endSeconds = buffer.duration;
     state.loopAtEnd = false;
     state.autoScrollSuspended = false;
@@ -1935,27 +1945,44 @@ export function beatMatcherZoomStep(featureEntityId: string, direction: 'in' | '
   clampBeatMatcherScroll(state);
 }
 
-// The clip's own duration, PLUS enough extra to scroll the end marker (and
-// its loop/stop toggle, sitting just past it) comfortably into view even
-// when endSeconds sits at the very end of the clip (the default) — without
-// this margin, the viewport's right edge could never scroll past exactly
-// `duration`, and the marker's own drawn width means it'd sit right at (or
-// just past) that edge, failing endMarkerVisible's strict `x < grid.right`
-// check no matter how far scrolled. Same "the boundary needs scrollable
-// room past it" reasoning as ui/sequencer.ts's own scrollableTotalSeconds.
+// Extra scroll room, in seconds, past each end of the clip proper — enough
+// to comfortably fit one marker handle (END_MARKER_WIDTH, reused for both)
+// plus a little breathing room. Shared by scrollableBeatMatcherSeconds/
+// minScrollSeconds below.
+function beatMatcherScrollMarginSeconds(state: BeatMatcherState): number {
+  const pxPerSec = pxPerSecondForZoom(state.zoomSeconds);
+  return pxPerSec > 0 ? (END_MARKER_WIDTH + 24) / pxPerSec : 0;
+}
+
+// The clip's own duration, PLUS this margin on BOTH sides — right, so the
+// end marker (and its loop/stop toggle, sitting just past it) can be
+// scrolled comfortably into view even when endSeconds sits at the very end
+// of the clip (the default); left, symmetrically, so the start marker can
+// be scrolled into view even when startSeconds sits at the very beginning
+// (also the default). Without the right margin, the viewport's right edge
+// could never scroll past exactly `duration`, and the end marker's own
+// drawn width means it'd sit right at (or just past) that edge, failing
+// endMarkerVisible's strict `x < grid.right` check no matter how far
+// scrolled — same "the boundary needs scrollable room past it" reasoning
+// as ui/sequencer.ts's own scrollableTotalSeconds, just mirrored onto the
+// start side too now that there's a boundary there as well.
 function scrollableBeatMatcherSeconds(state: BeatMatcherState): number {
   const duration = state.capturedBuffer?.duration ?? 0;
-  const pxPerSec = pxPerSecondForZoom(state.zoomSeconds);
-  const marginSeconds = pxPerSec > 0 ? (END_MARKER_WIDTH + 24) / pxPerSec : 0;
-  return duration + marginSeconds;
+  return duration + 2 * beatMatcherScrollMarginSeconds(state);
+}
+
+// Negative — the world-time at the plot's left edge once scrolled as far
+// left as it goes, into the margin reserved for the start marker.
+function minScrollSeconds(state: BeatMatcherState): number {
+  return -beatMatcherScrollMarginSeconds(state);
 }
 
 function maxScrollSeconds(state: BeatMatcherState): number {
-  return Math.max(0, scrollableBeatMatcherSeconds(state) - state.zoomSeconds);
+  return minScrollSeconds(state) + Math.max(0, scrollableBeatMatcherSeconds(state) - state.zoomSeconds);
 }
 
 function clampBeatMatcherScroll(state: BeatMatcherState): void {
-  state.scrollSeconds = Math.max(0, Math.min(maxScrollSeconds(state), state.scrollSeconds));
+  state.scrollSeconds = Math.max(minScrollSeconds(state), Math.min(maxScrollSeconds(state), state.scrollSeconds));
 }
 
 // Keeps a small gap from the view's own left/right edges so a point marker
@@ -2146,12 +2173,15 @@ export function startBeatMatcherPlayback(featureEntityId: string): void {
     // selection region exists, playback always starts at its own start,
     // not wherever the playhead happened to be parked.
     state.pausedAtSeconds = state.selectionStartSeconds;
-  } else if (state.pausedAtSeconds >= state.endSeconds) {
-    // Restart from the top if it's already run off the end (or sitting
-    // exactly at the end marker, having just stopped there) — pressing play
-    // again should replay from 0, not immediately re-trigger
-    // advanceBeatMatcherPastEnd on the very next frame and stop again.
-    state.pausedAtSeconds = 0;
+  } else if (state.pausedAtSeconds >= state.endSeconds || state.pausedAtSeconds < state.startSeconds) {
+    // Restart from the (marked) top if it's already run off the end (or
+    // sitting exactly at the end marker, having just stopped there), or if
+    // it's sitting before the start marker (e.g. the marker was just
+    // dragged forward past wherever the playhead was parked) — pressing
+    // play again should replay from startSeconds, not immediately
+    // re-trigger advanceBeatMatcherPastEnd on the very next frame and stop
+    // again, or begin outside the marked region altogether.
+    state.pausedAtSeconds = state.startSeconds;
   }
   state.playing = true;
   state.playStartCtxTime = getAudioContext().currentTime;
@@ -2180,11 +2210,11 @@ export function toggleBeatMatcherPlayback(featureEntityId: string): void {
 // Zeroes both the playhead and the view's scroll position, same as
 // ui/sequencer.ts's own rewindSequencer — brings a panned-away view back
 // to the start along with the playhead. While a selection region exists,
-// "the start" means the selection's own start instead of absolute zero —
+// "the start" means the selection's own start instead of the start marker —
 // same reasoning as startBeatMatcherPlayback.
 export function rewindBeatMatcherPlayback(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
-  state.pausedAtSeconds = state.selectionStartSeconds ?? 0;
+  state.pausedAtSeconds = state.selectionStartSeconds ?? state.startSeconds;
   state.scrollSeconds = 0;
   if (state.playing) state.playStartCtxTime = getAudioContext().currentTime;
   state.autoScrollSuspended = false;
@@ -2233,22 +2263,23 @@ function advanceBeatMatcherPastEnd(state: BeatMatcherState): void {
 
   if (playhead < state.endSeconds) return;
   if (state.loopAtEnd) {
-    // Shifts the ctx-time reference forward by exactly one loop length
-    // (divided by playbackSpeed — currentBeatMatcherPlaybackSeconds scales
-    // real elapsed ctx-time BY playbackSpeed, so undoing endSeconds'-worth
-    // of clip-time takes endSeconds/playbackSpeed of real ctx-time) rather
-    // than resetting pausedAtSeconds/playStartCtxTime outright —
-    // currentBeatMatcherPlaybackSeconds reads back as exactly (playhead -
-    // endSeconds) afterward, preserving whatever fraction of a frame it
-    // overshot by instead of snapping to a slightly-early 0, same
-    // reasoning as ui/sequencer.ts's own advancePastTrackEnd.
-    state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + state.endSeconds / state.playbackSpeed;
+    // Shifts the ctx-time reference forward by exactly one loop length —
+    // (endSeconds - startSeconds), divided by playbackSpeed
+    // (currentBeatMatcherPlaybackSeconds scales real elapsed ctx-time BY
+    // playbackSpeed, so undoing one loop's worth of clip-time takes
+    // loopLength/playbackSpeed of real ctx-time) — rather than resetting
+    // pausedAtSeconds/playStartCtxTime outright — currentBeatMatcherPlaybackSeconds
+    // reads back as exactly (startSeconds + (playhead - endSeconds))
+    // afterward, preserving whatever fraction of a frame it overshot by
+    // instead of snapping to a slightly-early startSeconds, same reasoning
+    // as ui/sequencer.ts's own advancePastTrackEnd.
+    state.playStartCtxTime = (state.playStartCtxTime ?? getAudioContext().currentTime) + (state.endSeconds - state.startSeconds) / state.playbackSpeed;
   } else {
     state.pausedAtSeconds = state.endSeconds;
     state.playing = false;
     state.playStartCtxTime = null;
-    // Only in stop mode — looping resets the cursor back to 0, where the
-    // marker was never the thing to look at. Nudges the view a little
+    // Only in stop mode — looping resets the cursor back to startSeconds,
+    // where the marker was never the thing to look at. Nudges the view a little
     // further right, past where followBeatMatcherPlayhead's own 80%-lookahead
     // would otherwise have left it, so the marker (and its toggle, sitting
     // just past it) ends up comfortably visible rather than right at the
@@ -2302,10 +2333,29 @@ function followBeatMatcherPlayhead(state: BeatMatcherState): void {
 // boundary behind the cursor would otherwise leave it stranded past a point
 // it's about to immediately loop/stop against on the very next frame —
 // same reasoning as ui/sequencer.ts's own setTrackEnd.
+// Drag the start marker to a new absolute position (ui/interaction.ts's
+// beatMatcherStartDrag) — same "jump to wherever the pointer is" shape as
+// setBeatMatcherEnd just below, mirrored onto the beginning side. Clamped
+// so it can never cross endSeconds, leaving at least MIN_ZOOM_SECONDS
+// between them (same minimum gap setBeatMatcherEnd enforces from the other
+// side) rather than pushing the end marker along with it. Pulls the
+// playhead forward with it if dragging the boundary past the cursor would
+// otherwise leave it stranded before a point it's about to immediately
+// treat as "before the start" on the very next frame — same reasoning as
+// setBeatMatcherEnd's own playhead pull.
+export function setBeatMatcherStart(featureEntityId: string, seconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (!state.capturedBuffer) return;
+  state.startSeconds = Math.max(0, Math.min(state.endSeconds - MIN_ZOOM_SECONDS, seconds));
+  if (currentBeatMatcherPlaybackSeconds(state) < state.startSeconds) {
+    scrubBeatMatcherPlayback(featureEntityId, state.startSeconds);
+  }
+}
+
 export function setBeatMatcherEnd(featureEntityId: string, seconds: number): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (!state.capturedBuffer) return;
-  state.endSeconds = Math.max(MIN_ZOOM_SECONDS, Math.min(state.capturedBuffer.duration, seconds));
+  state.endSeconds = Math.max(state.startSeconds + MIN_ZOOM_SECONDS, Math.min(state.capturedBuffer.duration, seconds));
   if (currentBeatMatcherPlaybackSeconds(state) > state.endSeconds) {
     scrubBeatMatcherPlayback(featureEntityId, state.endSeconds);
   }
@@ -2350,13 +2400,14 @@ export function updateBeatMatcherScrollFromTrackX(graph: EntityGraph, featureEnt
   const state = beatMatcherStateFor(featureEntityId);
   const grid = gridFor(beatMatcherPopupRect(graph, owner, drag));
   const track = hScrollbarTrack(grid);
+  const minScroll = minScrollSeconds(state);
   const maxScroll = maxScrollSeconds(state);
-  if (maxScroll <= 0) return;
+  if (maxScroll <= minScroll) return;
   const thumbWidth = hThumbWidth(track.width, state);
   const trackLeft = track.x - track.width / 2;
   const usable = track.width - thumbWidth;
   const t = usable > 0 ? (pointerX - trackLeft - thumbWidth / 2) / usable : 0;
-  state.scrollSeconds = Math.min(1, Math.max(0, t)) * maxScroll;
+  state.scrollSeconds = minScroll + Math.min(1, Math.max(0, t)) * (maxScroll - minScroll);
   // A manual scrollbar drag overrides auto-follow until the playhead
   // reaches the right edge of wherever this lands — see
   // followBeatMatcherPlayhead's own comment. Harmless to set unconditionally
@@ -2572,10 +2623,11 @@ function hThumbWidth(trackWidth: number, state: BeatMatcherState): number {
 
 function hThumbX(track: Rect, state: BeatMatcherState): number {
   const trackLeft = track.x - track.width / 2;
+  const minScroll = minScrollSeconds(state);
   const maxScroll = maxScrollSeconds(state);
-  if (maxScroll <= 0) return trackLeft;
+  if (maxScroll <= minScroll) return trackLeft;
   const thumbWidth = hThumbWidth(track.width, state);
-  return trackLeft + (track.width - thumbWidth) * (state.scrollSeconds / maxScroll);
+  return trackLeft + (track.width - thumbWidth) * ((state.scrollSeconds - minScroll) / (maxScroll - minScroll));
 }
 
 // --- Stop/repeat end marker -----------------------------------------------
@@ -2611,6 +2663,47 @@ function hitTestEndMarkerBand(grid: Grid, pxPerSec: number, state: BeatMatcherSt
   return point.x >= x && point.x <= x + END_MARKER_WIDTH && point.y >= grid.trackTop && point.y <= grid.rulerBottom;
 }
 
+// --- Start marker ----------------------------------------------------------
+// A draggable band marking where playback (and a loop-at-end wrap) begins
+// (state.startSeconds) — the beginning-side counterpart to the end marker
+// just above. Same span/height, and its own toggle drawn the same way —
+// but there's only ONE underlying loop/stop choice (state.loopAtEnd):
+// this toggle and the end marker's own both read and write that same
+// field, so clicking either one flips both instances at once, same
+// "single state, drawn twice" idiom the two boundary lines already use to
+// look symmetric. Its band sits on the OPPOSITE side of its boundary line
+// from the end marker's — [x - START_MARKER_WIDTH, x] rather than
+// [x, x + WIDTH] — so the two markers' highlighted edges face each other
+// across the playable region: the end marker's highlighted LEFT edge at
+// endSeconds, this one's highlighted RIGHT edge at startSeconds. Its
+// toggle mirrors this too, centered within ITS band — [x - WIDTH, x] —
+// the same way the end marker's toggle centers within [x, x + WIDTH].
+
+const START_MARKER_WIDTH = END_MARKER_WIDTH;
+
+function startMarkerX(grid: Grid, pxPerSec: number, state: BeatMatcherState): number {
+  return secondsToX(grid, pxPerSec, state.scrollSeconds, state.startSeconds);
+}
+
+function startMarkerTogglePosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point {
+  return { x: startMarkerX(grid, pxPerSec, state) - START_MARKER_WIDTH / 2, y: (grid.trackTop + grid.rulerBottom) / 2 };
+}
+
+function startMarkerVisible(grid: Grid, pxPerSec: number, state: BeatMatcherState): boolean {
+  const x = startMarkerX(grid, pxPerSec, state);
+  return x > grid.left && x <= grid.right;
+}
+
+function hitTestStartMarkerToggle(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  return startMarkerVisible(grid, pxPerSec, state) && dist(point, startMarkerTogglePosition(grid, pxPerSec, state)) <= TRANSPORT_BUTTON_RADIUS + 4;
+}
+
+function hitTestStartMarkerBand(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
+  if (!startMarkerVisible(grid, pxPerSec, state)) return false;
+  const x = startMarkerX(grid, pxPerSec, state);
+  return point.x >= x - START_MARKER_WIDTH && point.x <= x && point.y >= grid.trackTop && point.y <= grid.rulerBottom;
+}
+
 export type BeatMatcherHit =
   | { entityId: string; kind: 'close' }
   | { entityId: string; kind: 'captureButton' }
@@ -2641,6 +2734,8 @@ export type BeatMatcherHit =
   | { entityId: string; kind: 'hScroll' }
   | { entityId: string; kind: 'endMarkerToggle' }
   | { entityId: string; kind: 'endMarkerDrag'; seconds: number }
+  | { entityId: string; kind: 'startMarkerToggle' }
+  | { entityId: string; kind: 'startMarkerDrag'; seconds: number }
   | { entityId: string; kind: 'background' };
 
 // Checked early in ui/interaction.ts's pointerdown, same priority as
@@ -2682,16 +2777,25 @@ export function hitTestBeatMatcherPopup(graph: EntityGraph, point: Point, drag?:
       const grid = gridFor(popup);
       const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
 
-      // The end marker's own toggle (a precise click) takes priority over
-      // dragging the band itself, which in turn takes priority over
-      // everything below — same order ui/sequencer.ts's own popup uses, so
-      // a click near both (the marker parked right on the playhead, say)
-      // unambiguously grabs the marker.
+      // Each marker's own toggle (a precise click) takes priority over
+      // dragging its band, which in turn takes priority over everything
+      // below — same order ui/sequencer.ts's own popup uses, so a click
+      // near both (a marker parked right on the playhead, say) unambiguously
+      // grabs the marker. Both toggles read/write the very same
+      // state.loopAtEnd (see the start marker's own header comment), so
+      // either one is checked and handled identically — there's no
+      // "which one is the real toggle" distinction to preserve here.
       if (hitTestEndMarkerToggle(grid, pxPerSec, state, point)) {
         return { entityId: entity.id, kind: 'endMarkerToggle' };
       }
+      if (hitTestStartMarkerToggle(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'startMarkerToggle' };
+      }
       if (hitTestEndMarkerBand(grid, pxPerSec, state, point)) {
         return { entityId: entity.id, kind: 'endMarkerDrag', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
+      }
+      if (hitTestStartMarkerBand(grid, pxPerSec, state, point)) {
+        return { entityId: entity.id, kind: 'startMarkerDrag', seconds: xToSeconds(grid, pxPerSec, state.scrollSeconds, point.x) };
       }
 
       // Every check below is only ever reachable for the CURRENT selection
@@ -3505,10 +3609,23 @@ function drawSpectrogramBand(ctx: CanvasRenderingContext2D, grid: Grid, state: B
     // The image spans the WHOLE clip (one column per STFT hop) — sample
     // just the currently-visible zoomSeconds/scrollSeconds window out of
     // it via drawImage's source rect, so zoom/scroll never need to
-    // recompute the spectrogram itself.
-    const sx = duration > 0 ? (state.scrollSeconds / duration) * image.width : 0;
-    const sWidth = duration > 0 ? Math.max(1, (state.zoomSeconds / duration) * image.width) : image.width;
-    ctx.drawImage(image, sx, 0, sWidth, image.height, grid.left, bandTop, width, SPECTROGRAM_HEIGHT);
+    // recompute the spectrogram itself. Explicitly intersected with
+    // [0, duration] rather than handing drawImage a source rect that
+    // reaches outside the image and trusting it to clip: scrolled into the
+    // marker margins before 0 or past duration (beatMatcherScrollMarginSeconds),
+    // that produced real spectrogram content bleeding into the margin
+    // instead of leaving it blank — the image's own edge column stretched
+    // to fill the out-of-range destination area rather than being clipped.
+    const visStart = Math.max(0, state.scrollSeconds);
+    const visEnd = Math.min(duration, state.scrollSeconds + state.zoomSeconds);
+    if (duration > 0 && state.zoomSeconds > 0 && visEnd > visStart) {
+      const pxPerSec = width / state.zoomSeconds;
+      const sx = (visStart / duration) * image.width;
+      const sWidth = Math.max(1, ((visEnd - visStart) / duration) * image.width);
+      const dx = grid.left + (visStart - state.scrollSeconds) * pxPerSec;
+      const dWidth = (visEnd - visStart) * pxPerSec;
+      ctx.drawImage(image, sx, 0, sWidth, image.height, dx, bandTop, dWidth, SPECTROGRAM_HEIGHT);
+    }
   } else if (state.liveSpectrogram && state.liveSpectrogram.columnCount > 0) {
     // A capture in progress — the clip's own final length isn't known yet,
     // so (unlike the finished-capture case above) this doesn't map through
@@ -3768,6 +3885,34 @@ function drawEndMarker(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: numb
   drawLoopStopIcon(ctx, toggle, state.loopAtEnd);
 }
 
+// The start marker — same soft-filled-band-plus-solid-edge-plus-toggle
+// treatment as the end marker, just mirrored: the band sits to the LEFT of
+// its boundary line rather than the right, so the highlighted edge (the
+// one that actually marks startSeconds) is on the band's RIGHT, facing the
+// end marker's own highlighted LEFT edge across the playable region. The
+// toggle draws state.loopAtEnd exactly like the end marker's own does —
+// see this section's own header comment for why there are two drawn
+// instances of one underlying value.
+function drawStartMarker(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+  if (!startMarkerVisible(grid, pxPerSec, state)) return;
+  const x = startMarkerX(grid, pxPerSec, state);
+
+  ctx.save();
+  ctx.fillStyle = END_MARKER_FILL;
+  ctx.fillRect(x - START_MARKER_WIDTH, grid.trackTop, START_MARKER_WIDTH, grid.rulerBottom - grid.trackTop);
+  ctx.strokeStyle = END_MARKER_EDGE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, grid.trackTop);
+  ctx.lineTo(x, grid.rulerBottom);
+  ctx.stroke();
+  ctx.restore();
+
+  const toggle = startMarkerTogglePosition(grid, pxPerSec, state);
+  drawTransportButtonRing(ctx, toggle);
+  drawLoopStopIcon(ctx, toggle, state.loopAtEnd);
+}
+
 // A vertical grip strip flush against the plot's own right edge — dragging
 // it rescales zoomSeconds (ui/interaction.ts's draggingTimeAxis, branched by
 // feature kind). `active` while actually being dragged.
@@ -3933,6 +4078,7 @@ export function drawBeatMatcherPopup(
     drawBeatMatcherTimeGrid(ctx, grid, pxPerSec, state);
     drawBeatMatcherSuggestions(ctx, grid, pxPerSec, state);
     drawEndMarker(ctx, grid, pxPerSec, state);
+    drawStartMarker(ctx, grid, pxPerSec, state);
     drawSelectionRulerMarkers(ctx, grid, pxPerSec, state, beatMatcherSelectionFocusFor(entity.id));
     if (noteSnap) {
       drawBeatMatcherNoteSnapIndicator(ctx, grid, pxPerSec, state, noteSnap);

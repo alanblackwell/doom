@@ -188,6 +188,7 @@ import {
   setBeatMatcherSelectionRange,
   setBeatMatcherSelectionStart,
   setBeatMatcherSource,
+  setBeatMatcherStart,
   setSelectedBeatMatcherNoteEdgeFocus,
   setSelectedBeatMatcherNotePitchClass,
   setSelectedBeatMatcherNotePitchOctave,
@@ -451,6 +452,9 @@ export interface InteractionState {
   // The beat-matcher end marker currently being dragged (ui/beatMatcher.ts's
   // setBeatMatcherEnd) — same shape as beatMatcherHScrollDrag above.
   beatMatcherEndDrag: { entityId: string } | null;
+  // The beat-matcher start marker currently being dragged (ui/beatMatcher.ts's
+  // setBeatMatcherStart) — same shape as beatMatcherEndDrag above.
+  beatMatcherStartDrag: { entityId: string } | null;
 
   // The selected beat-matcher note's own velocity slider being dragged —
   // same shape as sequencerVelocityDrag above (see
@@ -522,6 +526,7 @@ export function createInteractionState(): InteractionState {
     scrubbingBeatMatcherId: null,
     beatMatcherHScrollDrag: null,
     beatMatcherEndDrag: null,
+    beatMatcherStartDrag: null,
     beatMatcherVelocityDrag: null,
     beatMatcherEnvelopeDrag: null,
     beatMatcherSelectionDrag: null,
@@ -1381,12 +1386,19 @@ export function attachInteraction(
         canvas.setPointerCapture(e.pointerId);
         updateBeatMatcherScrollFromTrackX(graph, beatMatcherHit.entityId, point.x); // jump to the click, then keep tracking on move
         state.beatMatcherHScrollDrag = { entityId: beatMatcherHit.entityId };
-      } else if (beatMatcherHit.kind === 'endMarkerToggle') {
+      } else if (beatMatcherHit.kind === 'endMarkerToggle' || beatMatcherHit.kind === 'startMarkerToggle') {
+        // Same underlying state.loopAtEnd either way — see ui/beatMatcher.ts's
+        // start marker header comment for why there are two clickable
+        // instances of one toggle.
         toggleBeatMatcherLoopAtEnd(beatMatcherHit.entityId);
       } else if (beatMatcherHit.kind === 'endMarkerDrag') {
         canvas.setPointerCapture(e.pointerId);
         setBeatMatcherEnd(beatMatcherHit.entityId, beatMatcherHit.seconds); // jump to the click, then keep tracking on move
         state.beatMatcherEndDrag = { entityId: beatMatcherHit.entityId };
+      } else if (beatMatcherHit.kind === 'startMarkerDrag') {
+        canvas.setPointerCapture(e.pointerId);
+        setBeatMatcherStart(beatMatcherHit.entityId, beatMatcherHit.seconds); // jump to the click, then keep tracking on move
+        state.beatMatcherStartDrag = { entityId: beatMatcherHit.entityId };
       }
       // 'background' is absorbed with no further action, same as every
       // other feature popup's own catch-all.
@@ -1731,6 +1743,13 @@ export function attachInteraction(
       const { entityId } = state.beatMatcherEndDrag;
       const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
       if (seconds !== null) setBeatMatcherEnd(entityId, seconds);
+      return;
+    }
+
+    if (state.beatMatcherStartDrag) {
+      const { entityId } = state.beatMatcherStartDrag;
+      const seconds = beatMatcherSecondsAtPoint(graph, entityId, point);
+      if (seconds !== null) setBeatMatcherStart(entityId, seconds);
       return;
     }
 
@@ -2111,6 +2130,12 @@ export function attachInteraction(
     if (state.beatMatcherEndDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.beatMatcherEndDrag = null;
+      return;
+    }
+
+    if (state.beatMatcherStartDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.beatMatcherStartDrag = null;
       return;
     }
 

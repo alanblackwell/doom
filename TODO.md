@@ -59,11 +59,34 @@ Placeholders for larger features to elaborate on when we get to each one.
    (sound-triggered, from any connected source or live input) and lets
    notes be laid down against its spectrogram — same paint/pitch/velocity/
    envelope/drag-over note editing as the sequencer, plus onset-similarity
-   suggestions (Tab/Shift-Tab through the clip's own best-ranked matches to
-   a confirmed reference point) and a selection ruler for auditioning a
-   specific point. Once its popup is closed, it behaves like a closed
-   sequencer: silent itself, still dispatching notes to whatever it's
-   wired to.
+   suggestions and a selection ruler for auditioning a specific point. Once
+   its popup is closed, it behaves like a closed sequencer: silent itself,
+   still dispatching notes to whatever it's wired to. Now feature-complete:
+
+   - **Candidate walk:** Tab/Shift-Tab step through the top-ranked
+     onset-similarity matches in TIME order (not rank order, which made
+     consecutive presses jump around the clip) with wraparound at both
+     ends. The set of candidates is fixed for the walk — it only changes
+     when the user defines a new reference (a placed note, or a
+     click/drag/nudge of the current point) — never as a side effect of
+     Tab itself.
+   - **Audition region:** the selection window recomputes on every Tab
+     step to tightly bracket the manual anchor and the current candidate,
+     using the user's own last manually-chosen margins on each side — so
+     it shrinks as well as grows, rather than only ever creeping outward.
+     The view scrolls (never rezooms) to keep both points on screen.
+   - **Two markers, not one:** the manually-clicked point and the
+     Tab-walked candidate both stay visible as their own dashed lines
+     (same weight/style, so neither reads as "disappearing"), and both are
+     valid note-drag snap targets.
+   - **Start/end markers:** a draggable start marker (`state.startSeconds`,
+     defaulting to 0) alongside the existing end marker
+     (`state.endSeconds`), bounding where playback/loop-at-end begins and
+     ends. Each has its own loop/stop toggle, but both toggles read/write
+     the single shared `state.loopAtEnd` — clicking either flips both. The
+     scrollable region extends a little past both ends of the clip so
+     each marker's handle stays reachable when parked at its default
+     position right at the boundary.
 
 5. **Event connection line animation** (`ui/eventPulse.ts`). Each event
    wire glows along its whole curve in sync with its source's actual
