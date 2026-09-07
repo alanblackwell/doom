@@ -506,6 +506,65 @@ export function drawPorthole(ctx: CanvasRenderingContext2D, graph: EntityGraph, 
   ctx.restore();
 }
 
+// --- Hover tooltips ----------------------------------------------------
+// A small reusable multi-line tooltip — first used by ui/grindTuner.ts to
+// explain, on hovering a tuning row's own label, how that parameter relates
+// to the algorithm it tunes (text meant to read like the source comment
+// next to the constant it describes). Kept here, not duplicated per
+// organelle module, since any future by-ear tuning organelle (this file's
+// own header: "an ADSR envelope is the first one" — grind's granular
+// tuning panel is the second, of what's meant to be a repeatable pattern)
+// will want the exact same look.
+
+const TOOLTIP_BG = 'rgba(10, 10, 10, 0.95)';
+const TOOLTIP_PADDING = 6;
+const TOOLTIP_LINE_HEIGHT = 12;
+const TOOLTIP_FONT = '9px monospace';
+
+export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (line && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// Drawn with its own top-left AT `anchor` — callers pick that (typically
+// just past whatever was hovered) and are responsible for keeping it a
+// reasonable on-canvas position; this only draws, it doesn't clamp to the
+// viewport itself, same "v1 gap, not a design ceiling" as popupRectFor's
+// own anchoring.
+export function drawTooltip(ctx: CanvasRenderingContext2D, anchor: Point, text: string, maxWidth: number): void {
+  ctx.save();
+  ctx.font = TOOLTIP_FONT;
+  const lines = wrapText(ctx, text, maxWidth - TOOLTIP_PADDING * 2);
+  const height = lines.length * TOOLTIP_LINE_HEIGHT + TOOLTIP_PADDING * 2;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = TOOLTIP_BG;
+  ctx.fillRect(anchor.x, anchor.y, maxWidth, height);
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(anchor.x, anchor.y, maxWidth, height);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  lines.forEach((line, i) => {
+    ctx.fillText(line, anchor.x + TOOLTIP_PADDING, anchor.y + TOOLTIP_PADDING + i * TOOLTIP_LINE_HEIGHT);
+  });
+  ctx.restore();
+}
+
 function drawHandle(ctx: CanvasRenderingContext2D, p: Point, label: string, active: boolean): void {
   ctx.save();
   ctx.beginPath();

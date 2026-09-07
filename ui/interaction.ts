@@ -92,6 +92,15 @@ import {
   updateMarkerDrag,
 } from './sampler';
 import {
+  copyGrindTuning,
+  grindTunerRawValueAtPoint,
+  hitTestGrindTunerPopup,
+  setGrindTunerMax,
+  setGrindTunerMin,
+  setGrindTunerValue,
+  toggleGrindTunerExposed,
+} from './grindTuner';
+import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
@@ -344,6 +353,11 @@ export interface InteractionState {
   // the buffer only gets re-registered and re-auditioned once on release
   // (see endPress below), so a fast drag doesn't fire overlapping previews.
   draggingSamplerMarker: { entityId: string; ownerId: string; edge: 'start' | 'end' } | null;
+  // A row handle currently being dragged in an open grind-tuning popup
+  // (ui/grindTuner.ts) — entityId is the FEATURE entity (the popup itself),
+  // key one of ui/grindTuner.ts's ALL_ROW_KEYS, target which of the row's
+  // three draggable handles this is.
+  grindTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -514,6 +528,7 @@ export function createInteractionState(): InteractionState {
     melodyPress: null,
     melodyScrollDrag: null,
     draggingSamplerMarker: null,
+    grindTunerSliderDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -534,7 +549,7 @@ export function createInteractionState(): InteractionState {
   };
 }
 
-function applyControlValue(graph: EntityGraph, entityId: string, param: string, value: number): void {
+export function applyControlValue(graph: EntityGraph, entityId: string, param: string, value: number): void {
   const entity = graph.get(entityId);
   if (!entity) return;
   entity.params[param] = value;
@@ -918,6 +933,44 @@ export function attachInteraction(
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/envelope popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open grind-tuning popup (ui/grindTuner.ts) sits visually on top of
+    // everything else too, same reasoning as the melody/sampler popups
+    // above.
+    const grindTunerHit = hitTestGrindTunerPopup(graph, point);
+    if (grindTunerHit) {
+      switch (grindTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(grindTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'checkbox':
+          toggleGrindTunerExposed(grindTunerHit.entityId, grindTunerHit.key);
+          break;
+        case 'slider':
+          canvas.setPointerCapture(e.pointerId);
+          setGrindTunerValue(graph, grindTunerHit.entityId, grindTunerHit.key, grindTunerHit.value);
+          state.grindTunerSliderDrag = { entityId: grindTunerHit.entityId, key: grindTunerHit.key, target: 'value' };
+          break;
+        case 'minCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setGrindTunerMin(graph, grindTunerHit.entityId, grindTunerHit.key, grindTunerHit.value);
+          state.grindTunerSliderDrag = { entityId: grindTunerHit.entityId, key: grindTunerHit.key, target: 'min' };
+          break;
+        case 'maxCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setGrindTunerMax(graph, grindTunerHit.entityId, grindTunerHit.key, grindTunerHit.value);
+          state.grindTunerSliderDrag = { entityId: grindTunerHit.entityId, key: grindTunerHit.key, target: 'max' };
+          break;
+        case 'copy':
+          copyGrindTuning(graph, grindTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
       }
       return;
     }
@@ -1825,6 +1878,17 @@ export function attachInteraction(
       return;
     }
 
+    if (state.grindTunerSliderDrag) {
+      const { entityId, key, target } = state.grindTunerSliderDrag;
+      const value = grindTunerRawValueAtPoint(graph, entityId, key, point);
+      if (value !== null) {
+        if (target === 'value') setGrindTunerValue(graph, entityId, key, value);
+        else if (target === 'min') setGrindTunerMin(graph, entityId, key, value);
+        else setGrindTunerMax(graph, entityId, key, value);
+      }
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2160,6 +2224,12 @@ export function attachInteraction(
     if (state.sequencerEnvelopeDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.sequencerEnvelopeDrag = null;
+      return;
+    }
+
+    if (state.grindTunerSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.grindTunerSliderDrag = null;
       return;
     }
 

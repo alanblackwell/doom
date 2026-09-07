@@ -207,6 +207,50 @@ graph.add({
   ownerId: 'metal-1',
   expanded: false,
 });
+// The doom/industrial palette's first new voice (TODO.md item 1): a
+// granular noise texture (audio/grindPlayer.ts, audio/graph.ts's 'grind'
+// case) — a dense, randomized stream of short filtered-noise grains for a
+// chainsaw/angle-grinder/dungeon-drill texture, chaotic by construction
+// rather than an attempted-and-abandoned physical-model approach (see that
+// file's own header for why).
+graph.add({
+  id: 'grind-1',
+  type: 'source',
+  kind: 'grind',
+  parentId: null,
+  children: [],
+  params: { level: 0.82, frequency: 35, grind: 0.9 },
+  x: 1980,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 22,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// grind-1's own tuning organelle (EntityType 'feature', kind 'grindTuning' —
+// ui/grindTuner.ts): a by-ear tuning panel for every constant
+// audio/grindPlayer.ts's granular engine uses (GRIND_TUNING), with a Copy
+// button that turns the current tuning into ready-to-paste source text. Same
+// porthole/popup mechanism as bow-1-melody above. x/y/width/height/seed are
+// unused for a feature entity, same as every other feature in this file.
+graph.add({
+  id: 'grind-1-tuning',
+  type: 'feature',
+  kind: 'grindTuning',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 23,
+  docked: false,
+  ownerId: 'grind-1',
+  expanded: false,
+});
 // Pedals default smaller than instruments — compact until something's
 // actually routed through them, so more can be placed without crowding the
 // canvas (they grow to fit on drop, and live-preview that growth while a

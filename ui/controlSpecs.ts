@@ -32,7 +32,20 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
     // STK's normalized [0,1] pressure convention.
     { param: 'bowPressure', label: 'bow pressure', min: 0, max: 1, color: '#c85a5a' },
   ],
-  overdrive: [
+  // A granular noise voice (audio/grindPlayer.ts, audio/graph.ts's 'grind'
+  // case) — NOT the bow_* WASM voice despite sharing 'pitch's blue below
+  // for the same "same concept" reason bass/bow share it. 'grind' is the
+  // one knob unique to this voice: grain density/pitch-jitter amount, 0
+  // (sparse individual scrapes) to 1 (a dense, chaotic roar) — reuses bow
+  // pressure's red "intensity/risk" convention, since turning it up is
+  // literally "how far into the chaos." Frequency range shifted up into
+  // buzzier chainsaw/grinder territory rather than a cello's.
+grind: [
+  { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
+  { param: 'frequency', label: 'pitch', min: 20, max: 80, color: '#5aa0c8' },
+  { param: 'grind', label: 'grind', min: 0, max: 1, color: '#c85a5a' },
+],
+overdrive: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
     { param: 'tone', label: 'tone', min: 200, max: 8000, color: '#c85ac8' },
     { param: 'drive', label: 'drive', min: 0, max: 20, color: '#e0883c' },

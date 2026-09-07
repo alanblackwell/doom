@@ -16,6 +16,7 @@ import { getTempo, setTempo } from './transport';
 import { pulseMelody } from './melodyPlayer';
 import { activateSequencerControl, registerSequencerForPlayback } from './sequencerPlayer';
 import { activateBeatMatcherControl, registerBeatMatcherForPlayback } from './beatMatcherPlayer';
+import { GRIND_TUNING, GRIND_TUNING_KEYS, startGrindVoice } from './grindPlayer';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -82,7 +83,7 @@ export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample']);
 // ui/interaction.ts's pad-press/event-wire handling) in the same style as
 // a TRIGGERED_KINDS entity's own trigger pad, wired the same way too (see
 // activateEventTarget below).
-export const CONTINUOUS_KINDS = new Set(['bass', 'bow']);
+export const CONTINUOUS_KINDS = new Set(['bass', 'bow', 'grind']);
 
 // Below this actual playback time (buffer duration / current speed — see
 // the 'sample' case's registerTrigger), a pad hit layers a fresh voice on
@@ -449,6 +450,61 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         bowPressure: (value) => bow.port.postMessage({ type: 'setPressure', value }),
         melodyGate: (value) => melodyGate.gain.setTargetAtTime(value, ctx.currentTime, 0.008),
       });
+
+      return melodyGate;
+    }
+    // A granular noise texture (audio/grindPlayer.ts), not a physical model —
+    // an earlier bowed-string-driven-into-chaos attempt (reusing 'bow's own
+    // WASM voice) just settled into a steady tone instead of true chaos, so
+    // this is a different approach entirely: a dense, randomized stream of
+    // short filtered-noise grains, irregular BY CONSTRUCTION rather than
+    // hoping a nonlinear feedback system stumbles into chaos — the same
+    // "many small irregular scrapes" structure a real grinding wheel/
+    // chainsaw actually has. Native Web Audio nodes only, no WASM. Otherwise
+    // the same level/pauseGate/melodyGate chain every other CONTINUOUS_KINDS
+    // voice uses.
+    case 'grind': {
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.5;
+
+      const pauseGate = ctx.createGain();
+      level.connect(pauseGate);
+      registerPauseGate(entity.id, pauseGate);
+
+      const melodyGate = ctx.createGain();
+      pauseGate.connect(melodyGate);
+      const grindMelody = graph.featuresOf(entity.id).find((f) => f.kind === 'melody');
+      if (grindMelody) melodyOwnersByEntity.set(entity.id, grindMelody.id);
+
+      // Every GRIND_TUNING key seeds this instance's own live state, whether
+      // or not it currently has a control-dot (see audio/grindPlayer.ts's
+      // own header) — entity.params carries a value for it once either the
+      // tuning organelle (ui/grindTuner.ts) or a real control-dot has
+      // touched it, GRIND_TUNING's own factory default otherwise.
+      const grindInitialParams: Record<string, number> = {
+        frequency: entity.params.frequency ?? 320,
+        grind: entity.params.grind ?? 0.5,
+      };
+      for (const key of GRIND_TUNING_KEYS) {
+        grindInitialParams[key] = entity.params[key] ?? GRIND_TUNING[key].value;
+      }
+      const grindVoice = startGrindVoice(level, grindInitialParams);
+
+      const grindControls: Record<string, (value: number) => void> = {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+        frequency: (value) => grindVoice.set('frequency', value),
+        grind: (value) => grindVoice.set('grind', value),
+        melodyGate: (value) => melodyGate.gain.setTargetAtTime(value, ctx.currentTime, 0.008),
+      };
+      // Registered for EVERY tuning key regardless of its own `exposed` flag
+      // — that flag only governs whether ui/controlSpecs.ts's static entry
+      // also shows a control-dot for it; the live setter exists unconditionally
+      // so the tuning organelle's sliders always take immediate audible
+      // effect, exposed or not.
+      for (const key of GRIND_TUNING_KEYS) {
+        grindControls[key] = (value) => grindVoice.set(key, value);
+      }
+      registerControls(entity.id, grindControls);
 
       return melodyGate;
     }

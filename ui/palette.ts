@@ -7,6 +7,7 @@ export const KIND_COLORS: Record<string, string> = {
   noise: '#4a4a4a',
   bass: '#5b3a24',
   bow: '#6b4630',
+  grind: '#7a3a1c', // rust/industrial — distinct from bow's warm wood brown despite sharing its voice
   overdrive: '#8a5a1c',
   fuzz: '#7a2e1c', // hotter/redder than overdrive's amber-brown — a harder-clipping cousin
   reverb: '#2f4a52',
