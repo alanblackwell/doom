@@ -1107,6 +1107,12 @@ export function renderFrame(
         const envelopeDrag = interaction.sequencerEnvelopeDrag;
         const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
         const cursorDragging = interaction.scrubbingSequencerId === feature.id;
+        // The note currently being drag-moved, if any — dragSequencerNoteAcross
+        // (ui/sequencer.ts) lets it travel over other notes in transit, so
+        // drawSequencerNote shrinks its rendered height slightly to keep its
+        // own edges visually distinct from whatever it's passing over.
+        const movingNoteId =
+          noteDrag && noteDrag.entityId === feature.id && noteDrag.mode === 'move' ? noteDrag.noteId : null;
         drawSequencerPopup(
           ctx,
           graph,
@@ -1118,6 +1124,7 @@ export function renderFrame(
           noteSnap,
           activeEnvelopeHandle,
           cursorDragging,
+          movingNoteId,
           drag
         );
       } else if (feature.kind === 'beatMatcher') {
@@ -1137,6 +1144,15 @@ export function renderFrame(
             holdFraction: beatMatcherNoteSnapHoldFraction(beatMatcherNoteDrag.snap, now),
           };
         }
+        // The note currently being drag-moved, if any — dragBeatMatcherNoteAcross
+        // (ui/beatMatcher.ts) lets it travel over other notes in transit, so
+        // drawBeatMatcherNote shrinks its rendered height slightly to keep its
+        // own edges visually distinct from whatever it's passing over. Same
+        // idea as ui/sequencer.ts's own movingNoteId just above.
+        const beatMatcherMovingNoteId =
+          beatMatcherNoteDrag && beatMatcherNoteDrag.entityId === feature.id && beatMatcherNoteDrag.mode === 'move'
+            ? beatMatcherNoteDrag.noteId
+            : null;
         drawBeatMatcherPopup(
           ctx,
           graph,
@@ -1146,6 +1162,7 @@ export function renderFrame(
           interaction.draggingTimeAxis?.entityId === feature.id,
           activeBeatMatcherEnvelopeHandle,
           beatMatcherNoteSnap,
+          beatMatcherMovingNoteId,
           now,
           drag
         );

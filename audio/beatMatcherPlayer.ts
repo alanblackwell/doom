@@ -3,10 +3,16 @@
 // own play/pause/scrub/rewind/loop state and playbackSpeed, and — at each
 // note's own onset (left edge) as playback crosses it — fires a
 // synthesized metronome-style tick (audio feedback for where the note
-// track's events actually fall) AND activates whatever's wired from the
-// beat-matcher control's own porthole (its single, port-less event output —
-// see ui/interaction.ts's wire-drag-from-porthole handling), releasing it
-// again at the note's own end. Same lookahead-scheduling idiom as
+// track's events actually fall). Both of those are reference/authoring aids
+// only meaningful while the popup's actually open for you to compare them
+// against — see isBeatMatcherPopupOpen below — so they're suppressed once
+// it's closed. What's NOT suppressed, regardless of popup state: activating
+// whatever's wired from the beat-matcher control's own porthole (its
+// single, port-less event output — see ui/interaction.ts's
+// wire-drag-from-porthole handling), releasing it again at the note's own
+// end — once notes are placed, a closed beat-matcher behaves exactly like a
+// closed sequencer popup (audio/sequencerPlayer.ts): silent itself, still
+// driving whatever it's wired to. Same lookahead-scheduling idiom as
 // ui/organelle.ts's own sequencer note dispatch (dispatchedUpTo, a
 // schedule-ahead horizon, deferToCtxTime), just against this control's one
 // port-less wire set instead of a per-channel one.
@@ -28,6 +34,7 @@ import { getAudioContext } from './context';
 import { getMasterChain } from './master';
 import { activateEventTarget, releaseEntity } from './graph';
 import type { TriggerOverrides } from './graph';
+import type { EntityGraph } from './entityGraph';
 import { getEventWiresFrom } from '../ui/eventWiring';
 import { recordSourcePulse } from '../ui/eventPulse';
 import type { InteractionState } from '../ui/interaction';
@@ -54,8 +61,29 @@ const LOOKAHEAD_INTERVAL_MS = 25;
 // every beat-matcher regardless of how many exist.
 let interactionState: InteractionState | null = null;
 
+// Same reasoning/lifecycle as interactionState just above, attached
+// alongside it — the one live EntityGraph instance (ui/main.ts creates
+// exactly one and mutates it in place, never rebuilds it, so a reference
+// captured once at startup stays valid and current for the app's whole
+// lifetime). Used only to read a feature entity's own `expanded` (ui/
+// organelle.ts: whether its popup is currently open) — see
+// isBeatMatcherPopupOpen below.
+let entityGraph: EntityGraph | null = null;
+
 export function attachBeatMatcherInteraction(state: InteractionState): void {
   interactionState = state;
+}
+
+export function attachBeatMatcherGraph(graph: EntityGraph): void {
+  entityGraph = graph;
+}
+
+// False (not just "unknown") if the graph isn't attached yet or the feature
+// entity is somehow gone — the safer default here is "treat as closed and
+// stay silent" rather than accidentally leaving the reference sample/tick
+// playing when nothing should be.
+function isBeatMatcherPopupOpen(featureEntityId: string): boolean {
+  return entityGraph?.get(featureEntityId)?.expanded === true;
 }
 
 interface Voice {
@@ -221,7 +249,7 @@ function overridesForNote(note: BeatMatcherNote): TriggerOverrides {
   return overrides;
 }
 
-function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
+function dispatchNoteEvents(entry: Registered, state: BeatMatcherState, isOpen: boolean): void {
   if (!state.playing || !state.capturedBuffer) {
     entry.dispatchedUpTo = state.pausedAtSeconds;
     return;
@@ -258,7 +286,11 @@ function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
         : note.onsetSeconds + note.durationSeconds;
       const releaseCtxTime = ctxTimeForClipSeconds(state, releaseSeconds);
 
-      playBeatMatcherTick(onsetCtxTime, note.velocity);
+      // The tick is reference audio (see this file's own header) — only
+      // worth sounding while the popup's actually open to compare it
+      // against; the wire dispatch below is the real "acts as a sequencer"
+      // output and fires regardless.
+      if (isOpen) playBeatMatcherTick(onsetCtxTime, note.velocity);
       deferToCtxTime(onsetCtxTime, () => {
         flashBeatMatcherCursor(entry.featureEntityId);
         const firedAt = performance.now();
@@ -282,9 +314,11 @@ function dispatchNoteEvents(entry: Registered, state: BeatMatcherState): void {
   // user's own ear, not a note), so auditioning a selection loop lets you
   // hear exactly where the point falls against the audio. Works whether or
   // not a selection region is currently bounding playback — the point is
-  // its own independent marker.
+  // its own independent marker. Entirely a reference/authoring aid (no wire
+  // dispatch happens here at all), so skipped outright once the popup's
+  // closed rather than just muting the tick.
   const point = state.currentPointSeconds;
-  if (point !== null && point >= entry.dispatchedUpTo && point < horizon) {
+  if (isOpen && point !== null && point >= entry.dispatchedUpTo && point < horizon) {
     const pointCtxTime = ctxTimeForClipSeconds(state, point);
     playBeatMatcherTick(pointCtxTime, 1);
     // Same cursor flash a note's own onset gets, deferred to land at the
@@ -348,9 +382,14 @@ function startVoice(entry: Registered, state: BeatMatcherState): void {
 function tick(): void {
   for (const entry of registered.values()) {
     const state = beatMatcherStateFor(entry.featureEntityId);
-    dispatchNoteEvents(entry, state);
+    const isOpen = isBeatMatcherPopupOpen(entry.featureEntityId);
+    dispatchNoteEvents(entry, state, isOpen);
 
-    if (!state.playing || !state.capturedBuffer) {
+    // The reference-sample voice is the other half of this file's own
+    // "authoring aid, not final output" split (see this file's own header)
+    // — closing the popup stops it just like it stops the tick, leaving
+    // dispatchNoteEvents' wire dispatch as the only thing still running.
+    if (!state.playing || !state.capturedBuffer || !isOpen) {
       stopVoice(entry);
       continue;
     }

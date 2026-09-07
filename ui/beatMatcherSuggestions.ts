@@ -28,10 +28,20 @@ const NUM_BANDS = 6;
 const MIN_BAND_FREQUENCY_HZ = 20;
 
 // Every frame's feature vector is [bandEnergy x NUM_BANDS, firstDerivative x
-// NUM_BANDS, secondDerivative x NUM_BANDS] — energy shape plus how fast it's
-// rising/falling, the classic spectral-flux onset signature — z-score
-// normalized per dimension across the whole clip so no one dimension
-// dominates distance purely from having larger raw magnitude.
+// NUM_BANDS, secondDerivative x NUM_BANDS, spectralFlatness, spectralCentroid,
+// attackTime] — energy shape plus how fast it's rising/falling (the classic
+// spectral-flux onset signature), plus three cheap descriptors the classic
+// drum-classification literature (distinguishing kick/snare/hihat by timbre,
+// not pitch) treats as its strongest signals: flatness separates noisy/
+// broadband hits from tonal ones, centroid captures brightness, and attack
+// time (here a causal proxy: consecutive frames of rising overall energy)
+// captures how percussive vs. sustained the onset is. Band energy itself is
+// PCEN (per-channel energy normalization — Wang et al.) rather than plain log
+// power: PCEN's adaptive gain control suppresses slow loudness drift and
+// emphasizes transients, which is exactly the onset-vs-ring-out distinction
+// this module cares about. Every dimension is z-score normalized across the
+// whole clip so no one dimension dominates distance purely from having
+// larger raw magnitude.
 export interface OnsetFeature {
   seconds: number;
   vector: number[];
@@ -49,47 +59,137 @@ function bandEdgeBins(data: SpectrogramData): number[] {
   return edges;
 }
 
-// Frames are already in dB (ui/spectrogram.ts's computeSpectrogram) — averaged
-// as power (not dB) within the band so a band's value reflects mean energy,
-// not a dB-averaging artifact, then converted back to dB for the same scale
-// the rest of this module works in.
-function bandEnergyDb(frame: Float32Array, loBin: number, hiBin: number): number {
+// Frames are already in dB (ui/spectrogram.ts's computeSpectrogram) — mean
+// power (not dB) within the band so a band's value reflects mean energy, not
+// a dB-averaging artifact. Left in linear power (not converted back to dB)
+// because PCEN below needs linear power for its gain-control division.
+function bandPower(frame: Float32Array, loBin: number, hiBin: number): number {
   let sum = 0;
   let count = 0;
   for (let bin = loBin; bin < hiBin; bin++) {
     sum += Math.pow(10, frame[bin] / 10);
     count++;
   }
-  const mean = count > 0 ? sum / count : 1e-10;
-  return 10 * Math.log10(Math.max(mean, 1e-10));
+  return count > 0 ? sum / count : 1e-10;
+}
+
+// Power-weighted mean frequency across the same band range used above — a
+// cheap "brightness" descriptor: a hihat and a kick can have similar overall
+// energy but very different centroids.
+function spectralCentroidHz(frame: Float32Array, loBin: number, hiBin: number, data: SpectrogramData): number {
+  let weightedSum = 0;
+  let powerSum = 0;
+  for (let bin = loBin; bin < hiBin; bin++) {
+    const power = Math.pow(10, frame[bin] / 10);
+    weightedSum += ((bin * data.sampleRate) / data.fftSize) * power;
+    powerSum += power;
+  }
+  return powerSum > 0 ? weightedSum / powerSum : 0;
+}
+
+// Ratio of geometric to arithmetic mean of the power spectrum, in dB (the
+// standard spectral flatness measure): near 0 for a noise-like/broadband
+// spectrum (hihat, snare buzz), very negative for a tonal/peaky one (kick,
+// a melodic onset) — a distinction nothing else in this feature set makes.
+function spectralFlatnessDb(frame: Float32Array, loBin: number, hiBin: number): number {
+  let logSum = 0;
+  let powerSum = 0;
+  let count = 0;
+  for (let bin = loBin; bin < hiBin; bin++) {
+    const power = Math.max(Math.pow(10, frame[bin] / 10), 1e-10);
+    logSum += Math.log(power);
+    powerSum += power;
+    count++;
+  }
+  if (count === 0) return 0;
+  const geometricMean = Math.exp(logSum / count);
+  const arithmeticMean = powerSum / count;
+  return 10 * Math.log10(Math.max(geometricMean / arithmeticMean, 1e-10));
+}
+
+// Standard PCEN (Wang et al., "Trainable Frontend for Robust and
+// Far-Field Keyword Spotting"): an adaptive-gain-control front end that
+// divides each band's energy by a smoothed running estimate of its own
+// recent level, so a transient stands out relative to whatever came just
+// before it rather than relative to the whole clip's fixed mean/stdev (which
+// is all the z-scoring below the clip level otherwise provides). Defaults
+// (alpha/delta/r/eps) are librosa's standard PCEN constants; the time
+// constant is shorter than typical PCEN uses (~0.4s, tuned for long
+// recordings) because these clips are a single short measure, not a long
+// stream with slow background drift to track.
+const PCEN_ALPHA = 0.98;
+const PCEN_DELTA = 2;
+const PCEN_R = 0.5;
+const PCEN_EPS = 1e-6;
+const PCEN_TIME_CONSTANT_SECONDS = 0.2;
+
+function pcenSeries(bandPowerSeries: number[][], frameDurationSeconds: number): number[][] {
+  const smoothing = 1 - Math.exp(-frameDurationSeconds / PCEN_TIME_CONSTANT_SECONDS);
+  const numBands = bandPowerSeries[0]?.length ?? 0;
+  const runningMean = new Array(numBands).fill(0);
+  return bandPowerSeries.map((bands, i) => {
+    const pcen = new Array(numBands);
+    for (let b = 0; b < numBands; b++) {
+      runningMean[b] = i === 0 ? bands[b] : (1 - smoothing) * runningMean[b] + smoothing * bands[b];
+      const agc = bands[b] / Math.pow(PCEN_EPS + runningMean[b], PCEN_ALPHA);
+      pcen[b] = Math.pow(agc + PCEN_DELTA, PCEN_R) - Math.pow(PCEN_DELTA, PCEN_R);
+    }
+    return pcen;
+  });
+}
+
+// Consecutive frames of non-decreasing overall band energy, as of this
+// frame — a causal (no look-ahead needed) proxy for "how far into an attack
+// are we": short for a sharp percussive hit, long for a slow swell. Not as
+// precise as measuring true rise-time from a detected trough to a detected
+// peak, but that needs the very onset-detection pass this feature set feeds
+// into, so a streaming approximation is used instead.
+function attackFrameCounts(bandPowerSeries: number[][]): number[] {
+  let streak = 0;
+  let prevTotal = -Infinity;
+  return bandPowerSeries.map((bands) => {
+    const total = bands.reduce((sum, v) => sum + v, 0);
+    streak = total >= prevTotal ? streak + 1 : 0;
+    prevTotal = total;
+    return streak;
+  });
 }
 
 export function computeOnsetFeatures(data: SpectrogramData): OnsetFeature[] {
   if (data.frames.length === 0) return [];
   const edgeBins = bandEdgeBins(data);
+  const loBin = edgeBins[0];
+  const hiBin = edgeBins[NUM_BANDS];
 
-  const bandSeries: number[][] = data.frames.map((frame) => {
+  const bandPowerSeries: number[][] = data.frames.map((frame) => {
     const bands: number[] = new Array(NUM_BANDS);
     for (let b = 0; b < NUM_BANDS; b++) {
       const lo = edgeBins[b];
       const hi = Math.max(lo + 1, edgeBins[b + 1]);
-      bands[b] = bandEnergyDb(frame, lo, hi);
+      bands[b] = bandPower(frame, lo, hi);
     }
     return bands;
   });
+  const bandSeries = pcenSeries(bandPowerSeries, data.hopSize / data.sampleRate);
+  const attackFrames = attackFrameCounts(bandPowerSeries);
+  const frameDurationSeconds = data.hopSize / data.sampleRate;
 
   const raw: number[][] = [];
   let prevBands: number[] | null = null;
   let prevDelta: number[] | null = null;
-  for (const bands of bandSeries) {
+  data.frames.forEach((frame, i) => {
+    const bands = bandSeries[i];
     const delta = prevBands ? bands.map((v, b) => v - prevBands![b]) : bands.map(() => 0);
     const accel = prevDelta ? delta.map((v, b) => v - prevDelta![b]) : delta.map(() => 0);
-    raw.push([...bands, ...delta, ...accel]);
+    const flatness = spectralFlatnessDb(frame, loBin, hiBin);
+    const centroid = spectralCentroidHz(frame, loBin, hiBin, data);
+    const attackSeconds = attackFrames[i] * frameDurationSeconds;
+    raw.push([...bands, ...delta, ...accel, flatness, centroid, attackSeconds]);
     prevBands = bands;
     prevDelta = delta;
-  }
+  });
 
-  const dims = NUM_BANDS * 3;
+  const dims = NUM_BANDS * 3 + 3;
   const means = new Array(dims).fill(0);
   const stdevs = new Array(dims).fill(0);
   for (const vec of raw) for (let d = 0; d < dims; d++) means[d] += vec[d];
@@ -236,6 +336,14 @@ const TEMPORAL_SPREAD_CAP_SECONDS = 1; // separation beyond this earns no furthe
 // feature vectors are averaged into a single centroid — with only one
 // reference point that's just that point's own vector, so this covers both
 // cases without a separate code path.
+//
+// Returned in RANK order — best match first — not chronological order:
+// ui/beatMatcher.ts's drawBeatMatcherSuggestions/hitTestSuggestionLine don't
+// care about order (every entry is drawn/tested identically), but
+// stepBeatMatcherCandidate's Tab/Shift-Tab walk does, and needs "next" to
+// mean "next-best match," not "next in time" — the two aren't the same
+// thing, and treating them as if they were is what made Shift-Tab look like
+// it could find something "more similar" than the best match.
 export function rankSuggestedOnsets(
   features: OnsetFeature[],
   candidateSeconds: number[],
@@ -257,6 +365,5 @@ export function rankSuggestedOnsets(
     })
     .sort((a, b) => a.score - b.score)
     .slice(0, count)
-    .map((c) => c.seconds)
-    .sort((a, b) => a - b);
+    .map((c) => c.seconds);
 }

@@ -987,9 +987,9 @@ export function createSequencerNoteAt(
 
   // Clamp the starting onset itself against whatever's already there —
   // painting a new note doesn't get to start on top of (or past) an
-  // existing one; see resizeSequencerNoteRight's own comment for why a
-  // fresh note is otherwise handled as "immediately resize its own right
-  // edge" rather than as a separate code path.
+  // existing one; see resizeSequencerNoteSpan's own comment for what a
+  // fresh note is otherwise handled as once the create-drag actually
+  // starts moving.
   let onset = Math.max(0, onsetSeconds);
   for (const existing of channel.notes) {
     const end = existing.onsetSeconds + existing.durationSeconds;
@@ -1058,11 +1058,10 @@ export function resizeSequencerNoteLeft(
 }
 
 // Moves the note's end, keeping its START fixed — clamped so it can never
-// cross the next note's own start, nor shrink past the minimum width.
-// Also what a fresh 'create' drag turns into the moment it crosses
-// DRAG_START_THRESHOLD (see ui/interaction.ts) — painting a note IS
-// resizing its own just-created right edge, so there's no separate
-// "grow a note while painting it" code path to keep in sync with this one.
+// cross the next note's own start, nor shrink past the minimum width. Used
+// for a direct grab of an existing note's right edge — a fresh 'create'
+// drag instead turns into resizeSequencerNoteSpan below the moment it
+// crosses DRAG_START_THRESHOLD, so painting backward works too.
 export function resizeSequencerNoteRight(
   graph: EntityGraph,
   entityId: string,
@@ -1084,9 +1083,51 @@ export function resizeSequencerNoteRight(
   note.durationSeconds = end - note.onsetSeconds;
 }
 
+// Sets both edges from `anchorSeconds` (the original press position that
+// created the note) and wherever the pointer is now — whichever of the two
+// ends up earlier becomes the onset and whichever ends up later becomes the
+// end, so dragging backward (right-to-left) from the press point works
+// exactly like dragging forward, only resolving "which side is start and
+// which is end" once both points are known. What a fresh 'create' drag
+// turns into the moment it crosses DRAG_START_THRESHOLD (ui/interaction.ts's
+// own 'createSpan' mode). Once released, further drags on the note go
+// through the plain resizeLeft/Right/move above, which each keep one edge
+// fixed.
+export function resizeSequencerNoteSpan(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  anchorSeconds: number,
+  currentSeconds: number,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const { channel, index } = found;
+  const minDuration = minNoteDurationSeconds(grid, state);
+  const lowerBound = index > 0 ? channel.notes[index - 1].onsetSeconds + channel.notes[index - 1].durationSeconds : 0;
+  const upperBound = index < channel.notes.length - 1 ? channel.notes[index + 1].onsetSeconds : Infinity;
+  const rawOnset = Math.min(anchorSeconds, currentSeconds);
+  const rawEnd = Math.max(anchorSeconds, currentSeconds);
+  const onset = clamp(rawOnset, Math.max(0, lowerBound), upperBound - minDuration);
+  const end = clamp(rawEnd, onset + minDuration, upperBound);
+  const note = channel.notes[index];
+  note.onsetSeconds = onset;
+  note.durationSeconds = end - onset;
+}
+
 // Moves the whole note (both onset and end shift together, duration
 // unchanged) to `newOnsetSeconds`, clamped between the previous note's own
-// end and the next note's own start minus this note's own length.
+// end and the next note's own start minus this note's own length — it can
+// never cross past its immediate neighbor. Used for the keyboard nudge
+// (nudgeSelectedNoteTime) and as the one-time "settle" step
+// settleSequencerNoteAfterDrag below applies once a pointer-drag actually
+// ends; the live pointer-drag itself uses dragSequencerNoteAcross instead,
+// which allows exactly the neighbor-crossing this function forbids.
 export function moveSequencerNote(
   graph: EntityGraph,
   entityId: string,
@@ -1106,6 +1147,57 @@ export function moveSequencerNote(
   const upperBound =
     index < channel.notes.length - 1 ? channel.notes[index + 1].onsetSeconds - note.durationSeconds : Infinity;
   note.onsetSeconds = clamp(newOnsetSeconds, Math.max(0, lowerBound), upperBound);
+}
+
+// Moves the whole note freely — including past/through other notes in the
+// same channel, unlike moveSequencerNote above — only clamped so it can't
+// go negative. `channel.notes` is kept re-sorted by onset after every call
+// so every OTHER note's own prev/next-neighbor lookups (moveSequencerNote,
+// resizeSequencerNoteLeft/Right/Span, snapCandidatesFor, drawing/hit-test
+// iteration order) stay correct even though this note's own position in
+// that array may now have changed. This is what makes "drag a note over
+// another one" possible: the live pointer-drag (ui/interaction.ts's 'move'
+// mode) calls this on every pointermove, so the note can freely overlap
+// whatever it passes over in transit — settleSequencerNoteAfterDrag below
+// is what then resolves that back to a genuinely free gap once the pointer
+// is actually released, so the note never PERMANENTLY overlaps another.
+export function dragSequencerNoteAcross(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  newOnsetSeconds: number,
+  drag?: DragContext
+): void {
+  const grid = resolveSequencerGrid(graph, entityId, drag);
+  if (!grid) return;
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  const { channel, index } = found;
+  channel.notes[index].onsetSeconds = Math.max(0, newOnsetSeconds);
+  channel.notes.sort((a, b) => a.onsetSeconds - b.onsetSeconds);
+}
+
+// Called once, right when a 'move' drag actually ends (ui/interaction.ts) —
+// dragSequencerNoteAcross above lets the note travel freely past/through
+// others while the pointer's still down, so by release it may be sitting
+// on top of (or straddling) whichever note it landed near. Reuses
+// moveSequencerNote's own neighbor clamp by simply asking it to move to
+// wherever the note already is: a no-op if that's already clear, or a snap
+// to the nearest valid edge (against its now-current, post-drag neighbors)
+// if not.
+export function settleSequencerNoteAfterDrag(
+  graph: EntityGraph,
+  entityId: string,
+  channelIndex: number,
+  noteId: string,
+  drag?: DragContext
+): void {
+  const state = sequencerStateFor(entityId);
+  const found = findNote(state, channelIndex, noteId);
+  if (!found) return;
+  moveSequencerNote(graph, entityId, channelIndex, noteId, found.channel.notes[found.index].onsetSeconds, drag);
 }
 
 // Mid-'move'-drag channel switch (ui/interaction.ts's own sequencerNoteDrag
@@ -2595,6 +2687,12 @@ function drawEndMarker(ctx: CanvasRenderingContext2D, grid: GridArea, state: Seq
 const NOTE_FILL = 'rgba(90, 160, 200, 0.55)';
 const NOTE_EDGE_HILITE = 'rgba(200, 230, 245, 0.8)';
 const NOTE_VERTICAL_INSET = 3; // keeps a note visually clear of its own lane's dividers
+// Extra height trimmed off (on top of NOTE_VERTICAL_INSET) while a note is
+// actively being drag-moved — since dragSequencerNoteAcross now lets it
+// travel over/through other notes in transit, this keeps its own top/bottom
+// edges visually distinct from whatever it's currently passing over, rather
+// than the two boxes' edges coinciding and reading as one ambiguous shape.
+const DRAGGED_NOTE_EXTRA_INSET = 3;
 const NOTE_DIMMED_ALPHA = 0.25; // how far a non-selected note fades once something else is selected
 
 // Velocity 0 fades a note almost (not quite — it would otherwise be
@@ -2783,7 +2881,8 @@ function drawSequencerGrid(
   noteSnap: NoteSnapIndicator | null,
   selectedNote: { channelIndex: number; noteId: string } | null,
   activeEnvelopeHandle: HandleKind | null,
-  cursorDragging: boolean
+  cursorDragging: boolean,
+  movingNoteId: string | null
 ): void {
   updateSequencerPlayback(grid, state);
   const pxPerSec = pxPerSecond(grid, state.zoomSeconds);
@@ -2864,12 +2963,13 @@ function drawSequencerGrid(
         (state.playing || cursorDragging) && playhead >= note.onsetSeconds && playhead < note.onsetSeconds + note.durationSeconds
           ? (playhead - note.onsetSeconds) / note.durationSeconds
           : null;
+      const extraInset = note.id === movingNoteId ? DRAGGED_NOTE_EXTRA_INSET : 0;
       drawSequencerNote(
         ctx,
         noteLeft,
         noteRight,
-        laneTop + NOTE_VERTICAL_INSET,
-        laneTop + LANE_HEIGHT - NOTE_VERTICAL_INSET,
+        laneTop + NOTE_VERTICAL_INSET + extraInset,
+        laneTop + LANE_HEIGHT - NOTE_VERTICAL_INSET - extraInset,
         note,
         selected,
         dimmed,
@@ -2936,6 +3036,7 @@ export function drawSequencerPopup(
   noteSnap: NoteSnapIndicator | null,
   activeEnvelopeHandle: HandleKind | null,
   cursorDragging: boolean,
+  movingNoteId: string | null,
   drag?: DragContext
 ): void {
   const popup = sequencerPopupRect(graph, entity.id, owner, drag);
@@ -2992,7 +3093,7 @@ export function drawSequencerPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
-  drawSequencerGrid(ctx, popup, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle, cursorDragging);
+  drawSequencerGrid(ctx, popup, grid, entity.id, state, now, noteSnap, selectedNoteFor(entity.id), activeEnvelopeHandle, cursorDragging, movingNoteId);
   ctx.restore();
 
   drawVScrollbar(ctx, popup, grid, state);

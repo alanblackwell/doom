@@ -99,6 +99,7 @@ import {
   createSequencerNoteAt,
   deleteSelectedNote,
   deselectNote,
+  dragSequencerNoteAcross,
   duplicateSelectedNote,
   hasSelectedNote,
   hitTestChannelConnector,
@@ -109,6 +110,7 @@ import {
   nudgeSelectedNoteTime,
   resizeSequencerNoteLeft,
   resizeSequencerNoteRight,
+  resizeSequencerNoteSpan,
   rewindSequencer,
   scrubSequencer,
   secondsAtPopupX,
@@ -116,6 +118,7 @@ import {
   selectNote,
   sequencerResizeStart,
   sequencerStateFor,
+  settleSequencerNoteAfterDrag,
   setNoteEnvelopeFromHandle,
   setNoteVelocityFromTrack,
   setSelectedNoteEdgeFocus,
@@ -157,6 +160,7 @@ import {
   deleteBeatMatcherNote,
   deleteSelectedBeatMatcherNote,
   deselectBeatMatcherNote,
+  dragBeatMatcherNoteAcross,
   duplicateSelectedBeatMatcherNote,
   focusBeatMatcherSelection,
   hasBeatMatcherSelectionFocus,
@@ -170,9 +174,11 @@ import {
   pressBeatMatcherRecordButton,
   resizeBeatMatcherNoteLeft,
   resizeBeatMatcherNoteRight,
+  resizeBeatMatcherNoteSpan,
   rewindBeatMatcherPlayback,
   scrubBeatMatcherPlayback,
   selectBeatMatcherNote,
+  settleBeatMatcherNoteAfterDrag,
   setBeatMatcherCurrentPoint,
   setBeatMatcherEnd,
   setBeatMatcherNoteEnvelopeFromHandle,
@@ -366,18 +372,21 @@ export interface InteractionState {
   // A note being painted, moved, or resized in a sequencer's lanes — same
   // press/threshold shape as melodyPress above: a fresh 'create' drag
   // starts with noteId: null (nothing inserted yet) and only actually
-  // creates the note once DRAG_START_THRESHOLD is crossed, at which point
-  // it behaves exactly like 'resizeRight' on the newly-created note (see
-  // ui/sequencer.ts's resizeSequencerNoteRight's own comment on why that's
-  // not a separate code path). `snap` is mutated in place every
-  // pointermove by ui/sequencer.ts's applySequencerNoteSnap.
+  // creates the note once DRAG_START_THRESHOLD is crossed, at which point it
+  // switches to 'createSpan' — both edges set from the press position
+  // (anchorSeconds) and the current pointer, whichever ends up earlier
+  // becoming the onset (ui/sequencer.ts's resizeSequencerNoteSpan) — so
+  // painting backward (right-to-left) works the same as painting forward.
+  // `snap` is mutated in place every pointermove by ui/sequencer.ts's
+  // applySequencerNoteSnap.
   sequencerNoteDrag: {
     entityId: string;
     channelIndex: number;
     noteId: string | null;
-    mode: 'create' | 'move' | 'resizeLeft' | 'resizeRight';
+    mode: 'create' | 'move' | 'resizeLeft' | 'resizeRight' | 'createSpan';
     startPointer: Point;
     grabOffsetSeconds: number; // 'move' only — preserves where within the note you grabbed it
+    anchorSeconds: number | null; // 'createSpan' only — the press position the span is measured from
     snap: NoteSnapState;
   } | null;
 
@@ -411,17 +420,22 @@ export interface InteractionState {
   } | null;
 
   // A beat-matcher note being moved or resized (ui/beatMatcher.ts) — no
-  // 'create' mode/threshold the way sequencerNoteDrag has: a press on empty
-  // track space creates a minimum-duration note immediately and starts
-  // dragging its right edge, so a plain click still leaves a short, visible
-  // note rather than requiring a drag to produce anything at all. `snap` is
-  // mutated in place every pointermove by ui/beatMatcher.ts's own
+  // separate press/threshold stage the way sequencerNoteDrag has: a press on
+  // empty track space creates a minimum-duration note immediately, so a
+  // plain click still leaves a short, visible note rather than requiring a
+  // drag to produce anything at all. That immediate note then starts a
+  // 'createSpan' drag — both edges set from the press position (anchorSeconds)
+  // and the current pointer, whichever ends up earlier becoming the onset
+  // (ui/beatMatcher.ts's resizeBeatMatcherNoteSpan) — so painting backward
+  // (right-to-left) works the same as painting forward. `snap` is mutated in
+  // place every pointermove by ui/beatMatcher.ts's own
   // applyBeatMatcherNoteSnap, same shape as sequencerNoteDrag's own snap.
   beatMatcherNoteDrag: {
     entityId: string;
     noteId: string;
-    mode: 'move' | 'resizeLeft' | 'resizeRight';
+    mode: 'move' | 'resizeLeft' | 'resizeRight' | 'createSpan';
     grabOffsetSeconds: number; // 'move' only — preserves where within the note you grabbed it
+    anchorSeconds: number | null; // 'createSpan' only — the press position the span is measured from
     snap: BeatMatcherNoteSnapState;
   } | null;
 
@@ -622,18 +636,19 @@ function applySequencerNoteDrag(
     const dy = point.y - noteDrag.startPointer.y;
     if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
     // Crossing the threshold inserts the note anchored at the original
-    // press location, then behaves exactly like resizeRight on it from
-    // here on — see createSequencerNoteAt's own comment on why "painting"
-    // a note is just resizing its own just-created right edge, not a
-    // separate code path.
+    // press location, then switches to 'createSpan' — both edges set from
+    // that anchor and the current pointer (resizeSequencerNoteSpan) — so
+    // painting backward (right-to-left) from here works the same as
+    // painting forward.
     const onsetSeconds = secondsAtPopupX(graph, noteDrag.entityId, noteDrag.startPointer.x);
     if (onsetSeconds === null) return;
     const createdId = createSequencerNoteAt(graph, noteDrag.entityId, noteDrag.channelIndex, onsetSeconds);
     if (createdId === null) return;
     noteId = createdId;
-    mode = 'resizeRight';
+    mode = 'createSpan';
     noteDrag.noteId = noteId;
     noteDrag.mode = mode;
+    noteDrag.anchorSeconds = onsetSeconds;
     selectNote(noteDrag.entityId, noteDrag.channelIndex, noteId);
     setSelectedNoteEdgeFocus('right');
   }
@@ -664,7 +679,13 @@ function applySequencerNoteDrag(
   } else if (mode === 'resizeRight') {
     resizeSequencerNoteRight(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
   } else if (mode === 'move') {
-    moveSequencerNote(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+    // Free during the live drag — can travel over/through other notes — see
+    // dragSequencerNoteAcross's own comment; settleSequencerNoteAfterDrag
+    // (ui/interaction.ts's own pointerup handling) resolves it back into a
+    // free gap once the pointer's actually released.
+    dragSequencerNoteAcross(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, snappedSeconds);
+  } else if (mode === 'createSpan' && noteDrag.anchorSeconds !== null) {
+    resizeSequencerNoteSpan(graph, noteDrag.entityId, noteDrag.channelIndex, noteId, noteDrag.anchorSeconds, snappedSeconds);
   }
 }
 
@@ -1005,6 +1026,7 @@ export function attachInteraction(
             mode: 'create',
             startPointer: point,
             grabOffsetSeconds: 0,
+            anchorSeconds: null,
             snap: initialNoteSnapState(point, performance.now()),
           };
           break;
@@ -1021,6 +1043,7 @@ export function attachInteraction(
             mode: sequencerHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
             startPointer: point,
             grabOffsetSeconds: 0,
+            anchorSeconds: null,
             snap: initialNoteSnapState(point, performance.now()),
           };
           break;
@@ -1036,6 +1059,7 @@ export function attachInteraction(
             mode: 'move',
             startPointer: point,
             grabOffsetSeconds: sequencerHit.grabOffsetSeconds,
+            anchorSeconds: null,
             snap: initialNoteSnapState(point, performance.now()),
           };
           break;
@@ -1167,18 +1191,23 @@ export function attachInteraction(
       } else if (beatMatcherHit.kind === 'noteCreate') {
         // Immediate, unlike the sequencer's own create-drag threshold — see
         // InteractionState.beatMatcherNoteDrag's own comment for why a plain
-        // click still needs to leave something behind here.
+        // click still needs to leave something behind here. The drag that
+        // follows is 'createSpan', not 'resizeRight' — see that mode's own
+        // comment on InteractionState.beatMatcherNoteDrag for why: it lets
+        // dragging backward (right-to-left) from this press point work the
+        // same as dragging forward.
         const seconds = beatMatcherSecondsAtPoint(graph, beatMatcherHit.entityId, point);
         const noteId = seconds !== null ? createBeatMatcherNoteAt(beatMatcherHit.entityId, seconds) : null;
-        if (noteId) {
+        if (noteId && seconds !== null) {
           canvas.setPointerCapture(e.pointerId);
           selectBeatMatcherNote(beatMatcherHit.entityId, noteId);
           setSelectedBeatMatcherNoteEdgeFocus('right');
           state.beatMatcherNoteDrag = {
             entityId: beatMatcherHit.entityId,
             noteId,
-            mode: 'resizeRight',
+            mode: 'createSpan',
             grabOffsetSeconds: 0,
+            anchorSeconds: seconds,
             snap: initialBeatMatcherNoteSnapState(point, performance.now()),
           };
         }
@@ -1196,8 +1225,9 @@ export function attachInteraction(
           state.beatMatcherNoteDrag = {
             entityId: beatMatcherHit.entityId,
             noteId,
-            mode: 'resizeRight',
+            mode: 'createSpan',
             grabOffsetSeconds: 0,
+            anchorSeconds: beatMatcherHit.seconds,
             snap: initialBeatMatcherNoteSnapState(point, performance.now()),
           };
         }
@@ -1211,6 +1241,7 @@ export function attachInteraction(
           noteId: beatMatcherHit.noteId,
           mode: 'move',
           grabOffsetSeconds: beatMatcherHit.grabOffsetSeconds,
+          anchorSeconds: null,
           snap: initialBeatMatcherNoteSnapState(point, performance.now()),
         };
       } else if (beatMatcherHit.kind === 'noteResizeLeft' || beatMatcherHit.kind === 'noteResizeRight') {
@@ -1223,6 +1254,7 @@ export function attachInteraction(
           noteId: beatMatcherHit.noteId,
           mode: beatMatcherHit.kind === 'noteResizeLeft' ? 'resizeLeft' : 'resizeRight',
           grabOffsetSeconds: 0,
+          anchorSeconds: null,
           snap: initialBeatMatcherNoteSnapState(point, performance.now()),
         };
       } else if (beatMatcherHit.kind === 'currentPointMarkerDrag') {
@@ -1630,14 +1662,20 @@ export function attachInteraction(
 
     if (state.beatMatcherNoteDrag) {
       const noteDrag = state.beatMatcherNoteDrag;
-      const { entityId, noteId, mode, grabOffsetSeconds } = noteDrag;
+      const { entityId, noteId, mode, grabOffsetSeconds, anchorSeconds } = noteDrag;
       const rawSeconds = beatMatcherSecondsAtPoint(graph, entityId, point);
       if (rawSeconds !== null) {
         const targetSeconds = mode === 'move' ? rawSeconds - grabOffsetSeconds : rawSeconds;
         const snappedSeconds = applyBeatMatcherNoteSnap(graph, entityId, noteDrag.snap, noteId, targetSeconds, point, performance.now());
-        if (mode === 'move') moveBeatMatcherNote(entityId, noteId, snappedSeconds);
+        // Free during the live drag — can travel over/through other notes —
+        // see dragBeatMatcherNoteAcross's own comment;
+        // settleBeatMatcherNoteAfterDrag (this file's own pointerup
+        // handling) resolves it back into a free gap once the pointer's
+        // actually released.
+        if (mode === 'move') dragBeatMatcherNoteAcross(entityId, noteId, snappedSeconds);
         else if (mode === 'resizeLeft') resizeBeatMatcherNoteLeft(entityId, noteId, snappedSeconds);
-        else resizeBeatMatcherNoteRight(entityId, noteId, snappedSeconds);
+        else if (mode === 'resizeRight') resizeBeatMatcherNoteRight(entityId, noteId, snappedSeconds);
+        else if (anchorSeconds !== null) resizeBeatMatcherNoteSpan(entityId, noteId, anchorSeconds, snappedSeconds);
       }
       return;
     }
@@ -2003,14 +2041,30 @@ export function attachInteraction(
     if (state.sequencerNoteDrag) {
       // A plain click that never crossed the threshold (noteId still null)
       // creates nothing — the note's final state is otherwise already
-      // committed live by every pointermove above, so there's nothing else
-      // to do here besides releasing capture and clearing the drag.
+      // committed live by every pointermove above, EXCEPT a 'move' drag:
+      // dragSequencerNoteAcross tracks the pointer freely, including over
+      // other notes, so it may currently be overlapping one — this settle
+      // step snaps it back into a genuinely free gap now that the pointer's
+      // actually being released.
+      const drag = state.sequencerNoteDrag;
+      if (drag.mode === 'move' && drag.noteId !== null) {
+        settleSequencerNoteAfterDrag(graph, drag.entityId, drag.channelIndex, drag.noteId);
+      }
       canvas.releasePointerCapture(e.pointerId);
       state.sequencerNoteDrag = null;
       return;
     }
 
     if (state.beatMatcherNoteDrag) {
+      // dragBeatMatcherNoteAcross tracks the pointer freely during a 'move'
+      // drag, including over other notes, so it may currently be
+      // overlapping one — this settle step snaps it back into a genuinely
+      // free gap now that the pointer's actually being released. Same
+      // shape as this file's own sequencerNoteDrag handling just above.
+      const drag = state.beatMatcherNoteDrag;
+      if (drag.mode === 'move') {
+        settleBeatMatcherNoteAfterDrag(drag.entityId, drag.noteId);
+      }
       canvas.releasePointerCapture(e.pointerId);
       state.beatMatcherNoteDrag = null;
       return;

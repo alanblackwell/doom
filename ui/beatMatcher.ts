@@ -295,6 +295,20 @@ export interface BeatMatcherState {
   selectionStartSeconds: number | null;
   selectionEndSeconds: number | null;
   currentPointSeconds: number | null;
+  // The one-shot reference used by suggestedBeatMatcherOnsets (ui/
+  // beatMatcherSuggestions.ts) before any notes are placed — deliberately a
+  // separate field from currentPointSeconds rather than reusing it directly,
+  // because currentPointSeconds also moves during a Tab/Shift-Tab walk
+  // through suggestions (stepBeatMatcherCandidate) and, feature-selection
+  // work has since decided, a landed-on suggestion shouldn't feed straight
+  // back in as "this is what a good match looks like" — that would let the
+  // algorithm train on its own guesses. Set (replacing whatever was there
+  // before, per this feature's "the user's judgment of the exact location is
+  // the only one used" spec) by every OTHER way of moving the current point
+  // — a plain click, a drag of its own marker, or the arrow-key nudge — see
+  // setBeatMatcherCurrentPoint's own `confirm` parameter. Reset alongside
+  // currentPointSeconds.
+  confirmedPointSeconds: number | null;
   // While a selection region exists, playback is bounded to it (see
   // startBeatMatcherPlayback/rewindBeatMatcherPlayback/
   // advanceBeatMatcherPastEnd) — auditioning a specific point, per this
@@ -337,6 +351,7 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       selectionStartSeconds: null,
       selectionEndSeconds: null,
       currentPointSeconds: null,
+      confirmedPointSeconds: null,
       selectionLoop: false,
     };
     statesByEntity.set(entityId, state);
@@ -433,6 +448,7 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.selectionStartSeconds = null;
     state.selectionEndSeconds = null;
     state.currentPointSeconds = null;
+    state.confirmedPointSeconds = null;
     state.selectionLoop = false;
   });
   stopWatcher(state);
@@ -463,6 +479,7 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.selectionStartSeconds = null;
   state.selectionEndSeconds = null;
   state.currentPointSeconds = null;
+  state.confirmedPointSeconds = null;
   state.selectionLoop = false;
   armBeatMatcher(featureEntityId);
 }
@@ -601,8 +618,41 @@ export function resizeBeatMatcherNoteRight(featureEntityId: string, noteId: stri
   note.durationSeconds = end - note.onsetSeconds;
 }
 
+// Sets both edges from `anchorSeconds` (the original press position that
+// created the note) and wherever the pointer is now — whichever of the two
+// ends up earlier becomes the onset and whichever ends up later becomes the
+// end, so dragging backward (right-to-left) from the press point works
+// exactly like dragging forward, only resolving "which side is start and
+// which is end" once both points are known. Same "normalize whichever
+// order was actually dragged" idiom as setBeatMatcherSelectionRange. Used
+// only while painting a brand-new note (ui/interaction.ts's 'createSpan'
+// drag mode) — once released, further drags on that note go through the
+// plain resizeLeft/Right/move above, which each keep one edge fixed.
+export function resizeBeatMatcherNoteSpan(featureEntityId: string, noteId: string, anchorSeconds: number, currentSeconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found || !state.capturedBuffer) return;
+  const { note, index } = found;
+  const prev = state.notes[index - 1];
+  const next = state.notes[index + 1];
+  const minOnset = prev ? prev.onsetSeconds + prev.durationSeconds : 0;
+  const maxEnd = next ? next.onsetSeconds : state.capturedBuffer.duration;
+  const rawOnset = Math.min(anchorSeconds, currentSeconds);
+  const rawEnd = Math.max(anchorSeconds, currentSeconds);
+  const onset = Math.max(minOnset, Math.min(maxEnd - MIN_NOTE_DURATION_SECONDS, rawOnset));
+  const end = Math.min(maxEnd, Math.max(onset + MIN_NOTE_DURATION_SECONDS, rawEnd));
+  note.onsetSeconds = onset;
+  note.durationSeconds = end - onset;
+}
+
 // Moves the whole note, preserving its own duration — clamped between its
-// neighbors (or 0 / the clip's own end) same as the resize cases above.
+// neighbors (or 0 / the clip's own end) same as the resize cases above — it
+// can never cross past its immediate neighbor. Used for the keyboard nudge
+// and as the one-time "settle" step settleBeatMatcherNoteAfterDrag below
+// applies once a pointer-drag actually ends; the live pointer-drag itself
+// uses dragBeatMatcherNoteAcross instead, which allows exactly the
+// neighbor-crossing this function forbids. Same split as ui/sequencer.ts's
+// own moveSequencerNote/dragSequencerNoteAcross.
 export function moveBeatMatcherNote(featureEntityId: string, noteId: string, newOnsetSeconds: number): void {
   const state = beatMatcherStateFor(featureEntityId);
   const found = findBeatMatcherNote(state, noteId);
@@ -613,6 +663,43 @@ export function moveBeatMatcherNote(featureEntityId: string, noteId: string, new
   const minOnset = prev ? prev.onsetSeconds + prev.durationSeconds : 0;
   const maxOnset = (next ? next.onsetSeconds : state.capturedBuffer.duration) - note.durationSeconds;
   note.onsetSeconds = Math.max(minOnset, Math.min(maxOnset, newOnsetSeconds));
+}
+
+// Moves the whole note freely — including past/through other notes, unlike
+// moveBeatMatcherNote above — only clamped to the clip's own [0, duration]
+// bounds. state.notes is kept re-sorted by onset after every call so every
+// OTHER note's own prev/next-neighbor lookups (moveBeatMatcherNote,
+// resizeBeatMatcherNoteLeft/Right/Span, snapCandidatesFor, drawing/hit-test
+// iteration order) stay correct even though this note's own position in
+// that array may now have changed. This is what makes "drag a note over
+// another one" possible: the live pointer-drag (ui/interaction.ts's 'move'
+// mode) calls this on every pointermove, so the note can freely overlap
+// whatever it passes over in transit — settleBeatMatcherNoteAfterDrag below
+// is what then resolves that back to a genuinely free gap once the pointer
+// is actually released, so the note never PERMANENTLY overlaps another.
+// Same shape as ui/sequencer.ts's own dragSequencerNoteAcross.
+export function dragBeatMatcherNoteAcross(featureEntityId: string, noteId: string, newOnsetSeconds: number): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found || !state.capturedBuffer) return;
+  const maxOnset = state.capturedBuffer.duration - found.note.durationSeconds;
+  found.note.onsetSeconds = Math.max(0, Math.min(maxOnset, newOnsetSeconds));
+  state.notes.sort((a, b) => a.onsetSeconds - b.onsetSeconds);
+}
+
+// Called once, right when a 'move' drag actually ends (ui/interaction.ts) —
+// dragBeatMatcherNoteAcross above lets the note travel freely past/through
+// others while the pointer's still down, so by release it may be sitting
+// on top of (or straddling) whichever note it landed near. Reuses
+// moveBeatMatcherNote's own neighbor clamp by simply asking it to move to
+// wherever the note already is: a no-op if that's already clear, or a snap
+// to the nearest valid edge (against its now-current, post-drag neighbors)
+// if not. Same shape as ui/sequencer.ts's own settleSequencerNoteAfterDrag.
+export function settleBeatMatcherNoteAfterDrag(featureEntityId: string, noteId: string): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  const found = findBeatMatcherNote(state, noteId);
+  if (!found) return;
+  moveBeatMatcherNote(featureEntityId, noteId, found.note.onsetSeconds);
 }
 
 export function deleteBeatMatcherNote(featureEntityId: string, noteId: string): void {
@@ -1011,12 +1098,18 @@ function drawDuplicateButton(ctx: CanvasRenderingContext2D, center: Point): void
 // extend past the clip itself. Same shape as ui/sequencer.ts's own note
 // envelope, independent code (see this file's own header).
 
-const NOTE_CURVE_COLOR = 'rgba(255, 235, 205, 0.9)'; // warm, matching NOTE_COLOR's own family
+const NOTE_CURVE_COLOR = 'rgba(232, 220, 192, 0.9)'; // matches ui/sequencer.ts's own NOTE_CURVE_COLOR
 const NOTE_HANDLE_RADIUS = 3.5;
 const NOTE_HANDLE_HIT_RADIUS = 7;
 const NOTE_SEED_HANDLE_RADIUS = 2;
 const NOTE_SEED_HANDLE_COLOR = 'rgba(255, 255, 255, 0.35)';
 const NOTE_VERTICAL_INSET = 6; // keeps a note visually clear of the track row's own top/bottom edge
+// Extra height trimmed off (on top of NOTE_VERTICAL_INSET) while a note is
+// actively being drag-moved — since dragBeatMatcherNoteAcross now lets it
+// travel over/through other notes in transit, this keeps its own top/bottom
+// edges visually distinct from whatever it's currently passing over. Same
+// idea/value as ui/sequencer.ts's own DRAGGED_NOTE_EXTRA_INSET.
+const DRAGGED_NOTE_EXTRA_INSET = 3;
 
 // The envelope every note starts as before its first edit — attack=0,
 // decay=0, release=0 and sustain=1 is a no-op shape, which conveniently
@@ -1107,7 +1200,7 @@ function drawNoteEnvelopeShape(
 ): void {
   if (!note.envelope) {
     ctx.save();
-    ctx.fillStyle = NOTE_COLOR;
+    ctx.fillStyle = NOTE_FILL;
     ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
     ctx.restore();
     if (showHandles) {
@@ -1129,7 +1222,7 @@ function drawNoteEnvelopeShape(
   ctx.lineTo(pts.end.x, pts.end.y);
   ctx.lineTo(pts.end.x, bottom);
   ctx.closePath();
-  ctx.fillStyle = NOTE_COLOR;
+  ctx.fillStyle = NOTE_FILL;
   ctx.fill();
 
   ctx.beginPath();
@@ -1273,11 +1366,19 @@ export function setBeatMatcherNoteEnvelopeFromHandle(
 // Moves the current point, clamped to the clip's own bounds, and selects
 // whatever note (if any) now sits under it — the one part of this feature
 // that reaches into note selection, per this feature's own spec.
-export function setBeatMatcherCurrentPoint(featureEntityId: string, seconds: number): void {
+//
+// `confirm` (default true) also updates confirmedPointSeconds — the
+// reference suggestedBeatMatcherOnsets trains on — replacing whatever
+// confirmed position was there before. Every caller except
+// stepBeatMatcherCandidate's Tab/Shift-Tab walk wants this: a click, a drag
+// of the marker, or an arrow-key nudge is the user saying "here, exactly,"
+// where landing on a suggestion mid-Tab-walk is not.
+export function setBeatMatcherCurrentPoint(featureEntityId: string, seconds: number, confirm = true): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (!state.capturedBuffer) return;
   const clamped = Math.max(0, Math.min(state.capturedBuffer.duration, seconds));
   state.currentPointSeconds = clamped;
+  if (confirm) state.confirmedPointSeconds = clamped;
   const note = state.notes.find((n) => clamped >= n.onsetSeconds && clamped < n.onsetSeconds + n.durationSeconds);
   if (note) selectBeatMatcherNote(featureEntityId, note.id);
 }
@@ -1309,17 +1410,26 @@ function clampedWindowStart(desiredStart: number, width: number, duration: numbe
 // (suggestedBeatMatcherOnsets — the same handful of faint lines actually
 // visible in the spectrogram), not the much larger raw pool of every
 // detected transient in the clip (onsetCandidateSeconds) — moving to a point
-// with no suggestion line under it would contradict "next candidate."
-// Clamps at either end rather than wrapping around.
+// with no suggestion line under it would contradict "next candidate." Walks
+// the list in RANK order (rankSuggestedOnsets' own return order — best
+// match first), not chronological order: Tab from a non-candidate position
+// (nothing picked yet, or sitting on the confirmed reference itself, which
+// is never among the candidates — see rankSuggestedOnsets) always lands on
+// the single best match first, and further Tab presses step to the 2nd-
+// best, 3rd-best, etc. Shift-Tab does the reverse, and clamps at rank 0
+// rather than wrapping — there's nothing "more similar than the best
+// match" to find, so it just stays there.
 //
-// Landing on a candidate moves the current point there, so — once there are
-// no placed notes yet to anchor the reference instead — the NEXT press
-// re-ranks around wherever you just landed rather than replaying a frozen
-// list from the original click. That's intentional: it turns Tab into a
-// similarity walk ("something like this... now something like THAT"),
-// which degrades gracefully rather than confusingly once one or more notes
-// exist and the reference is their own centroid instead (stable regardless
-// of where the current point wanders).
+// Landing on a candidate moves the current point there for audition/preview,
+// but deliberately does NOT confirm it as the new reference (see
+// setBeatMatcherCurrentPoint's `confirm` parameter) — otherwise Tab would
+// train the next ranking on its own guess ("that one looked similar, so
+// call it ground truth"), drifting away from whatever the user actually
+// meant rather than converging on it. Once there are no placed notes yet to
+// anchor the reference instead, repeated Tab presses re-rank around the
+// SAME confirmed point (whichever the user last clicked, dragged, or
+// nudged) until a manual refinement moves it — a stable list to walk,
+// rather than a moving target.
 //
 // If an audition selection window (selectionStartSeconds/selectionEndSeconds)
 // is already active, it moves along with the point per this feature's own
@@ -1331,24 +1441,17 @@ function clampedWindowStart(desiredStart: number, width: number, duration: numbe
 export function stepBeatMatcherCandidate(featureEntityId: string, direction: 1 | -1): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (!state.capturedBuffer) return;
-  const candidates = suggestedBeatMatcherOnsets(state); // ascending, per rankSuggestedOnsets
+  const candidates = suggestedBeatMatcherOnsets(state); // rank order, best match first — per rankSuggestedOnsets
   if (candidates.length === 0) return;
   const previousPoint = state.currentPointSeconds;
-
-  let target: number;
-  if (previousPoint === null) {
-    target = direction === 1 ? candidates[0] : candidates[candidates.length - 1];
-  } else if (direction === 1) {
-    const next = candidates.find((s) => s > previousPoint);
-    target = next !== undefined ? next : candidates[candidates.length - 1];
-  } else {
-    let prev: number | undefined;
-    for (const s of candidates) {
-      if (s < previousPoint) prev = s;
-      else break;
-    }
-    target = prev !== undefined ? prev : candidates[0];
-  }
+  // -1 both when nothing's picked yet AND when previousPoint is the
+  // confirmed reference itself (excluded from candidates by
+  // rankSuggestedOnsets) — either way there's no rank position to step
+  // from, so the natural entry point, in either direction, is the best
+  // match.
+  const previousIndex = previousPoint !== null ? candidates.indexOf(previousPoint) : -1;
+  const targetIndex = previousIndex === -1 ? 0 : Math.max(0, Math.min(candidates.length - 1, previousIndex + direction));
+  const target = candidates[targetIndex];
 
   const hadWindow = state.selectionStartSeconds !== null && state.selectionEndSeconds !== null;
   const oldStart = state.selectionStartSeconds;
@@ -1356,7 +1459,7 @@ export function stepBeatMatcherCandidate(featureEntityId: string, direction: 1 |
   const previousInWindow = hadWindow && previousPoint !== null && previousPoint >= oldStart! && previousPoint <= oldEnd!;
   const width = hadWindow ? oldEnd! - oldStart! : 0;
 
-  setBeatMatcherCurrentPoint(featureEntityId, target);
+  setBeatMatcherCurrentPoint(featureEntityId, target, false);
   focusBeatMatcherSelection(featureEntityId, 'point');
 
   if (hadWindow) {
@@ -1879,11 +1982,15 @@ export function beatMatcherTimelineIdAt(graph: EntityGraph, point: Point, drag?:
 // once, at capture time.
 export function suggestedBeatMatcherOnsets(state: BeatMatcherState): number[] {
   if (!state.onsetFeatures || !state.onsetCandidateSeconds || state.onsetCandidateSeconds.length === 0) return [];
+  // Before any notes exist, the reference is confirmedPointSeconds (not
+  // currentPointSeconds) — see that field's own comment on BeatMatcherState:
+  // a point merely landed on mid-Tab-walk hasn't been confirmed by the user
+  // as a good match yet, so it must not be trained on.
   const referenceSeconds =
     state.notes.length > 0
       ? state.notes.map((n) => n.onsetSeconds)
-      : state.currentPointSeconds !== null
-        ? [state.currentPointSeconds]
+      : state.confirmedPointSeconds !== null
+        ? [state.confirmedPointSeconds]
         : [];
   if (referenceSeconds.length === 0) return [];
   const existingOnsets = state.notes.map((n) => n.onsetSeconds);
@@ -2695,7 +2802,7 @@ const DROP_ZONE_BG_HOVER = 'rgba(255, 255, 255, 0.14)';
 const CAPTURE_BUTTON_RADIUS = 9;
 const CAPTURE_ARMED_COLOR = '#8a2f2f';
 const CAPTURE_ACTIVE_COLOR = '#e04a3c';
-const CAPTURE_PAUSED_COLOR = '#5a5a5a';
+const CAPTURE_PAUSED_COLOR = '#5a5a5a'; // grey housing, per the record-dot glyph drawn on top — the usual "record button" look
 
 // Lives right in the title bar, to the left of the title text — always,
 // regardless of status, so it never needs its own dedicated row once a
@@ -2707,10 +2814,14 @@ function captureButtonPosition(popup: Rect): Point {
 
 // The button's look tracks BeatMatcherStatus directly: dim/inert while
 // 'idle' (nothing connected), a hollow ring gently pulsing while 'armed'
-// (watching, nothing captured yet), a flat grey pause glyph while 'paused',
-// and a solid, strongly pulsing fill with a stop glyph while 'capturing' —
-// see this file's own header for what each status means and what pressing
-// the button does in it.
+// (watching, nothing captured yet), a grey housing with a red record dot
+// while 'paused' — the standard "record button" convention — and a bright,
+// strongly pulsing red fill with a stop glyph while actually 'capturing'.
+// 'paused' deliberately reuses the record-dot glyph rather than a pause icon
+// — pressing it re-arms and rescans from the sample
+// (pressBeatMatcherRecordButton), which a pause glyph reads as "resume
+// playback," not "record again." See this file's own header for what each
+// status means and what pressing the button does in it.
 function drawCaptureButton(ctx: CanvasRenderingContext2D, popup: Rect, status: BeatMatcherStatus, now: number): void {
   const p = captureButtonPosition(popup);
   const capturing = status === 'capturing';
@@ -2759,16 +2870,14 @@ function drawCaptureButton(ctx: CanvasRenderingContext2D, popup: Rect, status: B
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     const half = 3.5;
     ctx.fillRect(p.x - half, p.y - half, half * 2, half * 2);
-  } else if (status === 'paused') {
-    // Pause icon (two bars)
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.fillRect(p.x - 4, p.y - 3.5, 2.5, 7);
-    ctx.fillRect(p.x + 1.5, p.y - 3.5, 2.5, 7);
   } else {
-    // Record icon (dot) — dim once nothing's connected to capture from.
+    // Record icon (dot) — bright red against the grey 'paused' housing (the
+    // usual "record button" look, and what makes it read as "press to
+    // record"), dim red on the hollow 'armed' ring, dim white once 'idle'
+    // with nothing connected to capture from.
     ctx.beginPath();
     ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = armed ? CAPTURE_ARMED_COLOR : 'rgba(255, 255, 255, 0.3)';
+    ctx.fillStyle = status === 'paused' ? CAPTURE_ACTIVE_COLOR : armed ? CAPTURE_ARMED_COLOR : 'rgba(255, 255, 255, 0.3)';
     ctx.fill();
   }
   ctx.restore();
@@ -2873,8 +2982,8 @@ function drawInfoOverlay(ctx: CanvasRenderingContext2D, popup: Rect, state: Beat
   ctx.restore();
 }
 
-const NOTE_COLOR = '#c98a3c'; // matches ACCENT (ui/palette.ts) — this track's only kind of mark, no per-channel color needed
-const NOTE_EDGE_COLOR = 'rgba(0, 0, 0, 0.5)';
+const NOTE_FILL = 'rgba(90, 160, 200, 0.55)'; // matches ui/sequencer.ts's own NOTE_FILL — same note-body color regardless of track kind
+const NOTE_EDGE_HILITE = 'rgba(200, 230, 245, 0.8)'; // matches ui/sequencer.ts's own NOTE_EDGE_HILITE — the "grab here to resize" edge stripes
 const NOTE_DIMMED_ALPHA = 0.25; // how far a non-selected note fades once something else is selected — same as ui/sequencer.ts's own
 // Velocity 0 fades a note almost (not quite) out of view; velocity 1 leaves
 // it exactly as dimmed/selected would otherwise render it — same as
@@ -2909,12 +3018,14 @@ function drawBeatMatcherNote(
   if (selected || (playingFraction !== null && note.envelope)) {
     drawNoteEnvelopeShape(ctx, left, right, top, bottom, note, activeEnvelopeHandle, selected);
   } else {
-    ctx.fillStyle = NOTE_COLOR;
+    ctx.fillStyle = NOTE_FILL;
     ctx.fillRect(left, top, Math.max(1, right - left), bottom - top);
   }
-  ctx.strokeStyle = NOTE_EDGE_COLOR;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(left, top, Math.max(1, right - left), bottom - top);
+  // A brighter sliver at each edge hints "grab here to resize" — same as
+  // ui/sequencer.ts's own drawSequencerNote (the note's start/end markers).
+  ctx.fillStyle = NOTE_EDGE_HILITE;
+  ctx.fillRect(left, top, 2, bottom - top);
+  ctx.fillRect(right - 2, top, 2, bottom - top);
   ctx.restore();
 
   // A "pitch:velocity" readout, colon fixed at the note's own horizontal
@@ -2988,7 +3099,8 @@ function drawBeatMatcherNoteTrack(
   pxPerSec: number,
   state: BeatMatcherState,
   selected: { noteId: string } | null,
-  activeEnvelopeHandle: HandleKind | null
+  activeEnvelopeHandle: HandleKind | null,
+  movingNoteId: string | null
 ): void {
   const rowTop = grid.trackTop;
   ctx.save();
@@ -3015,12 +3127,13 @@ function drawBeatMatcherNoteTrack(
     const dimmed = selected !== null && !isSelected;
     const crossing = state.playing && playhead >= note.onsetSeconds && playhead < note.onsetSeconds + note.durationSeconds;
     const playingFraction = crossing ? (playhead - note.onsetSeconds) / note.durationSeconds : null;
+    const extraInset = note.id === movingNoteId ? DRAGGED_NOTE_EXTRA_INSET : 0;
     drawBeatMatcherNote(
       ctx,
       left,
       right,
-      noteTop,
-      noteBottom,
+      noteTop + extraInset,
+      noteBottom - extraInset,
       note,
       isSelected,
       dimmed,
@@ -3048,7 +3161,7 @@ function drawBeatMatcherNoteTrack(
 // (gated on hasCapture, same as the note track/end marker).
 
 const SELECTION_RULER_BG = 'rgba(0, 0, 0, 0.3)';
-const SELECTION_HIGHLIGHT = 'rgba(201, 138, 60, 0.22)'; // translucent NOTE_COLOR wash
+const SELECTION_HIGHLIGHT = 'rgba(201, 138, 60, 0.22)'; // translucent ACCENT wash
 const CARET_COLOR = 'rgba(255, 255, 255, 0.65)';
 const CARET_SIZE = 5;
 
@@ -3606,6 +3719,7 @@ export function drawBeatMatcherPopup(
   isAxisDragging: boolean,
   activeEnvelopeHandle: HandleKind | null,
   noteSnap: BeatMatcherNoteSnapIndicator | null,
+  movingNoteId: string | null,
   now: number,
   drag?: DragContext
 ): void {
@@ -3674,7 +3788,7 @@ export function drawBeatMatcherPopup(
   const selectedNote = hasCapture ? selectedBeatMatcherNoteFor(entity.id) : null;
 
   if (hasCapture) {
-    drawBeatMatcherNoteTrack(ctx, grid, pxPerSec, state, selectedNote, activeEnvelopeHandle);
+    drawBeatMatcherNoteTrack(ctx, grid, pxPerSec, state, selectedNote, activeEnvelopeHandle, movingNoteId);
   } else {
     drawInlineCaptureInfo(ctx, popup, bodyTop, source, state);
   }
