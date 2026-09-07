@@ -39,6 +39,7 @@ import { channelConnectorAbsolutePosition, drawSequencerBody, drawSequencerPopup
 import type { NoteSnapIndicator } from './sequencer';
 import { beatMatcherNoteSnapHoldFraction, drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
 import type { BeatMatcherNoteSnapIndicator } from './beatMatcher';
+import { drawGrainSamplerPopup } from './grainSampler';
 import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
@@ -1094,6 +1095,8 @@ export function renderFrame(
         drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
       } else if (feature.kind === 'sampler') {
         drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
+      } else if (feature.kind === 'grainEditor') {
+        drawGrainSamplerPopup(ctx, graph, feature, owner, drag);
       } else if (feature.kind === 'sequencer') {
         const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
         const resizing = interaction.resizingSequencer?.entityId === feature.id;

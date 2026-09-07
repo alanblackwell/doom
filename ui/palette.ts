@@ -18,6 +18,7 @@ export const KIND_COLORS: Record<string, string> = {
   pluck: '#4a3428',
   metal: '#3f464e', // cold steel, distinct from the warm wood/brown strings above
   sample: '#5a3a52', // dropped-in audio file — magenta-brown, distinct from every other kind's hue
+  grain: '#4a5a2e', // olive/moss — a granular voice like grind, but distinct from its rust/industrial hue since the character comes from captured material, not noise
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

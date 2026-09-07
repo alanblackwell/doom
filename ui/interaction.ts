@@ -93,6 +93,18 @@ import {
   updateMarkerDrag,
 } from './sampler';
 import {
+  addGrainPoint,
+  closeGrainInfoOverlay,
+  deleteGrainPoint,
+  grainSamplerClearDropPosition,
+  grainSamplerDropTargetAt,
+  hitTestGrainSamplerPopup,
+  pressGrainRecordButton,
+  setGrainSource,
+  stopGrainCapture,
+  updateGrainPointDrag,
+} from './grainSampler';
+import {
   beginGrindTunerMaxDrag,
   copyGrindTuning,
   grindTunerRawValueAtPoint,
@@ -256,6 +268,11 @@ export interface InteractionState {
   // tracked independently of hoverTargetId/hoverDock rather than reusing
   // either.
   hoverBeatMatcherId: string | null;
+  // Same idiom as hoverBeatMatcherId just above, for an open grain-editor
+  // popup (ui/grainSampler.ts) instead — a Source/liveInput entity dropped
+  // here is referenced as that grain voice's capture source, also not
+  // containment (a feature is never a container either).
+  hoverGrainId: string | null;
   settleAnim: { id: string; startedAt: number; durationMs: number } | null;
 
   // The tap entity the pointer is currently over (pure hover, nothing
@@ -375,6 +392,12 @@ export interface InteractionState {
   // the buffer only gets re-registered and re-auditioned once on release
   // (see endPress below), so a fast drag doesn't fire overlapping previews.
   draggingSamplerMarker: { entityId: string; ownerId: string; edge: 'start' | 'end' } | null;
+  // Set while directly dragging one of an open grain-editor popup's point
+  // markers (ui/grainSampler.ts) — live position updates happen continuously
+  // on move, same "no separate commit-on-release step needed" reasoning as
+  // moving a beat-matcher note (unlike draggingSamplerMarker above, there's
+  // no expensive re-audition to defer to release here).
+  draggingGrainPoint: { entityId: string; ownerId: string; pointId: string } | null;
   // A row handle currently being dragged in an open grind-tuning popup
   // (ui/grindTuner.ts) — entityId is the FEATURE entity (the popup itself),
   // key one of ui/grindTuner.ts's ALL_ROW_KEYS, target which of the row's
@@ -537,6 +560,7 @@ export function createInteractionState(): InteractionState {
     hoverTargetId: null,
     hoverDock: false,
     hoverBeatMatcherId: null,
+    hoverGrainId: null,
     settleAnim: null,
     hoveredTapId: null,
     hoveredBeatMatcherTimelineId: null,
@@ -555,6 +579,7 @@ export function createInteractionState(): InteractionState {
     melodyPress: null,
     melodyScrollDrag: null,
     draggingSamplerMarker: null,
+    draggingGrainPoint: null,
     grindTunerSliderDrag: null,
     bassTunerSliderDrag: null,
     metalTunerSliderDrag: null,
@@ -962,6 +987,43 @@ export function attachInteraction(
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/envelope popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open grain-editor popup (ui/grainSampler.ts) sits visually on top
+    // of everything else too, same reasoning as the melody/sampler popups
+    // above.
+    const grainHit = hitTestGrainSamplerPopup(graph, point);
+    if (grainHit) {
+      switch (grainHit.kind) {
+        case 'close': {
+          const feature = graph.get(grainHit.entityId);
+          if (feature) feature.expanded = false;
+          // Same "closing also releases whatever's live" reasoning as the
+          // sampler popup's own close case above.
+          stopGrainCapture(grainHit.entityId);
+          break;
+        }
+        case 'record':
+          pressGrainRecordButton(grainHit.entityId);
+          break;
+        case 'overlayClose':
+          closeGrainInfoOverlay(grainHit.entityId);
+          break;
+        case 'point':
+          canvas.setPointerCapture(e.pointerId);
+          state.draggingGrainPoint = {
+            entityId: grainHit.entityId,
+            ownerId: grainHit.ownerId,
+            pointId: grainHit.pointId,
+          };
+          break;
+        case 'band':
+          addGrainPoint(grainHit.entityId, grainHit.timeSeconds, grainHit.y);
+          break;
+        // 'background' is absorbed with no further action, same as every
+        // other popup's own catch-all.
       }
       return;
     }
@@ -1964,6 +2026,12 @@ export function attachInteraction(
       return;
     }
 
+    if (state.draggingGrainPoint) {
+      const { entityId, pointId } = state.draggingGrainPoint;
+      updateGrainPointDrag(entityId, pointId, point, graph);
+      return;
+    }
+
     if (state.melodyPress) {
       const press = state.melodyPress;
       press.currentPointer = point;
@@ -2132,6 +2200,7 @@ export function attachInteraction(
       state.hoverTargetId = null;
       state.hoverDock = false; // controls never dock — see ui/docking.ts's isDockable
       state.hoverBeatMatcherId = null;
+      state.hoverGrainId = null;
       return;
     }
 
@@ -2144,11 +2213,23 @@ export function attachInteraction(
     const beatMatcherId = beatMatcherDropTargetAt(graph, target) ?? beatMatcherDropTargetAt(graph, point);
     if (beatMatcherId) {
       state.hoverBeatMatcherId = beatMatcherId;
+      state.hoverGrainId = null;
       state.hoverTargetId = null;
       state.hoverDock = false;
       return;
     }
     state.hoverBeatMatcherId = null;
+
+    // Same idiom, for an open grain-editor popup (ui/grainSampler.ts)
+    // instead — see hoverGrainId's own comment.
+    const grainId = grainSamplerDropTargetAt(graph, target) ?? grainSamplerDropTargetAt(graph, point);
+    if (grainId) {
+      state.hoverGrainId = grainId;
+      state.hoverTargetId = null;
+      state.hoverDock = false;
+      return;
+    }
+    state.hoverGrainId = null;
 
     if (isDockable(entity) && isOverDock(canvas, target)) {
       state.hoverDock = true;
@@ -2384,6 +2465,12 @@ export function attachInteraction(
       return;
     }
 
+    if (state.draggingGrainPoint) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.draggingGrainPoint = null;
+      return;
+    }
+
     if (state.melodyPress) {
       canvas.releasePointerCapture(e.pointerId);
       const press = state.melodyPress;
@@ -2466,6 +2553,7 @@ export function attachInteraction(
     state.hoverTargetId = null;
     state.hoverDock = false;
     state.hoverBeatMatcherId = null;
+    state.hoverGrainId = null;
 
     // Gate-off for a held pad press (see pointerdown's matching gate-on) —
     // unconditional on release regardless of whether a repositioning drag
@@ -2511,6 +2599,17 @@ export function attachInteraction(
         beatMatcherHit.kind === 'noteResizeRight'
       ) {
         deleteBeatMatcherNote(beatMatcherHit.entityId, beatMatcherHit.noteId);
+      }
+      return;
+    }
+
+    // Right-click removes a grain point — same priority/reasoning as the
+    // melody/beat-matcher popups above.
+    const grainHit = hitTestGrainSamplerPopup(graph, point);
+    if (grainHit) {
+      e.preventDefault();
+      if (grainHit.kind === 'point') {
+        deleteGrainPoint(grainHit.entityId, grainHit.pointId);
       }
       return;
     }
@@ -2838,6 +2937,14 @@ function finalizeDrop(
     if (clearPosition) state.dragPointer = clearPosition;
   }
 
+  // Same idiom, for an open grain-editor popup (ui/grainSampler.ts) instead
+  // — see hoverBeatMatcherId's own comment just above.
+  if (state.hoverGrainId) {
+    setGrainSource(graph, state.hoverGrainId, entityId);
+    const clearPosition = grainSamplerClearDropPosition(graph, state.hoverGrainId, entity.height / 2);
+    if (clearPosition) state.dragPointer = clearPosition;
+  }
+
   // Trust hoverTargetId rather than re-deriving the drop target from
   // scratch here — it's already been maintained continuously (and stickily,
   // see pointermove above) throughout the drag, and is exactly what was
@@ -2891,6 +2998,13 @@ function finalizeDrop(
   // the pointerdown pad-press handling above). Placed after activateEntity
   // above so a just-undocked sample's audio nodes actually exist to trigger.
   if (state.hoverBeatMatcherId && entity.kind === 'sample' && !isEntityPlaying(entityId)) {
+    triggerEntity(entityId);
+    state.triggerFlashes.set(entityId, performance.now());
+  }
+
+  // Same reasoning, for a 'sample' dropped onto an open grain-editor popup
+  // (ui/grainSampler.ts) instead — its capture is sound-triggered too.
+  if (state.hoverGrainId && entity.kind === 'sample' && !isEntityPlaying(entityId)) {
     triggerEntity(entityId);
     state.triggerFlashes.set(entityId, performance.now());
   }

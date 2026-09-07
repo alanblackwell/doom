@@ -17,6 +17,8 @@ import { pulseMelody } from './melodyPlayer';
 import { activateSequencerControl, registerSequencerForPlayback } from './sequencerPlayer';
 import { activateBeatMatcherControl, registerBeatMatcherForPlayback } from './beatMatcherPlayer';
 import { GRIND_TUNING, GRIND_TUNING_KEYS, startGrindVoice } from './grindPlayer';
+import { GRAIN_TUNING, GRAIN_TUNING_KEYS, startGrainVoice } from './grainPlayer';
+import type { GrainVoiceControls } from './grainPlayer';
 import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
 import { METAL_TUNING, METAL_TUNING_KEYS } from './metalTuning';
 import type { Entity, EntityGraph } from './entityGraph';
@@ -85,7 +87,7 @@ export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample']);
 // ui/interaction.ts's pad-press/event-wire handling) in the same style as
 // a TRIGGERED_KINDS entity's own trigger pad, wired the same way too (see
 // activateEventTarget below).
-export const CONTINUOUS_KINDS = new Set(['bass', 'bow', 'grind']);
+export const CONTINUOUS_KINDS = new Set(['bass', 'bow', 'grind', 'grain']);
 
 // Below this actual playback time (buffer duration / current speed — see
 // the 'sample' case's registerTrigger), a pad hit layers a fresh voice on
@@ -108,6 +110,20 @@ const sampleBuffers = new Map<string, AudioBuffer>();
 
 export function registerSampleBuffer(entityId: string, buffer: AudioBuffer): void {
   sampleBuffers.set(entityId, buffer);
+}
+
+// The live 'grain' voice instance for each entity, keyed by id — unlike
+// sampleBuffers above, this isn't a "register before nodes exist" registry:
+// a grain voice's captured buffer/points can only ever be produced by
+// ui/grainSampler.ts's own popup, which (per ui/render.ts's feature-drawing
+// pass) can only be open while its owner is undocked, i.e. already built —
+// so there's no "not built yet" case to guard here the way sampleBuffers'
+// own comment describes. Cleared on rebuildEntity (see that function) so a
+// drag-out-of-dock-and-back-in doesn't leak the old instance's setInterval.
+const grainVoices = new Map<string, GrainVoiceControls>();
+
+export function getGrainVoice(entityId: string): GrainVoiceControls | undefined {
+  return grainVoices.get(entityId);
 }
 
 // A single note's worth of one-off overrides for a triggered voice —
@@ -542,6 +558,39 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       registerControls(entity.id, grindControls);
 
       return melodyGate;
+    }
+    // A grain-cloud voice reading from a CAPTURED sample (audio/grainPlayer.ts,
+    // ui/grainSampler.ts's popup) — unlike 'grind' just above, this has no
+    // sound of its own until a source has been dropped onto its popup and at
+    // least one point has been placed on the resulting spectrogram; until
+    // then it's silent, same as an un-plucked TRIGGERED_KINDS voice. No
+    // melodyGate — this voice has no melody-organelle feature (see grind's
+    // own comment on grindMelody above).
+    case 'grain': {
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.7;
+
+      const pauseGate = ctx.createGain();
+      level.connect(pauseGate);
+      registerPauseGate(entity.id, pauseGate);
+
+      const grainInitialParams: Record<string, number> = {
+        density: entity.params.density ?? 0.4,
+        grainLength: entity.params.grainLength ?? 0.08,
+      };
+      for (const key of GRAIN_TUNING_KEYS) {
+        grainInitialParams[key] = entity.params[key] ?? GRAIN_TUNING[key].value;
+      }
+      const grainVoice = startGrainVoice(level, grainInitialParams);
+      grainVoices.set(entity.id, grainVoice);
+
+      registerControls(entity.id, {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+        density: (value) => grainVoice.set('density', value),
+        grainLength: (value) => grainVoice.set('grainLength', value),
+      });
+
+      return pauseGate;
     }
     case 'kick': {
       const voiceOutput = ctx.createGain(); // summing point for each transient hit; not itself an envelope
@@ -1575,5 +1624,11 @@ export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
   pausedEntities.delete(entity.id);
   playingEntities.delete(entity.id);
   melodyOwnersByEntity.delete(entity.id);
+  // Stops the old instance's setInterval scheduler before dropping the
+  // reference — otherwise a 'grain' voice rebuilt this way (drag out of the
+  // dock, then back in) would leak a still-ticking scheduler forever, on
+  // top of the fresh one createGenerator's own 'grain' case starts below.
+  grainVoices.get(entity.id)?.stop();
+  grainVoices.delete(entity.id);
   activateEntity(entity, graph);
 }

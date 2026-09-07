@@ -619,6 +619,50 @@ graph.add({
   ownerId: 'sampler-1',
   expanded: false,
 });
+// A grain-cloud voice reading from a CAPTURED sample (audio/grainPlayer.ts,
+// audio/graph.ts's 'grain' case) — unlike grind-1's own granular voice
+// above (grains cut from generated noise), this one's grains are cut from
+// real, user-captured audio: drag any source onto grain-1-editor's popup to
+// capture a one-shot sample from it (sound-triggered, same mechanism as the
+// beat-matcher's own capture), then click points onto the resulting
+// spectrogram to mark time offsets a grain can be read from. Silent until
+// at least one point exists.
+graph.add({
+  id: 'grain-1',
+  type: 'source',
+  kind: 'grain',
+  parentId: null,
+  children: [],
+  params: { level: 0.7, density: 0.4, grainLength: 0.08 },
+  x: 2280,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 27,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// grain-1's own capture+point-editor organelle (EntityType 'feature', kind
+// 'grainEditor' — ui/grainSampler.ts). Same porthole/popup mechanism as
+// sampler-1-capture above. x/y/width/height/seed are unused for a feature
+// entity, same as every other feature in this file.
+graph.add({
+  id: 'grain-1-editor',
+  type: 'feature',
+  kind: 'grainEditor',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 28,
+  docked: false,
+  ownerId: 'grain-1',
+  expanded: false,
+});
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.

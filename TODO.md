@@ -128,6 +128,29 @@ Placeholders for larger features to elaborate on when we get to each one.
    — `frequency` is a plain control-dot, wireable from a knob/clock the
    same as any other if a sweep is wanted.
 
+9. **Grain sampler** (`audio/grainPlayer.ts`, `ui/grainSampler.ts`) — a
+   second granular voice alongside `grind`, but drawing its grains from a
+   real captured sample instead of generated noise, so its character comes
+   from whatever recording it's fed rather than filter/timing chaos. Same
+   porthole/popup mechanism as every other organelle, but its capture
+   mechanism (drag a Source/live-input onto the open popup; sound-triggered
+   auto start/stop; `audio/nodeCapture.ts`/`ui/spectrogram.ts` reused
+   unmodified) is a direct, trimmed-down port of `ui/beatMatcher.ts`'s own —
+   no note track, no selection ruler, no transport, no onset suggestions;
+   just the finished capture's spectrogram as a surface to click small
+   circle POINT markers onto. Free-running once at least one point exists:
+   each grain independently picks one point at random (uniformly — no
+   per-point weighting) and reads a short, randomized-length window of the
+   captured buffer starting there. `level`/`density`/`grainLength` are
+   control-dots (`ui/controlSpecs.ts`'s `grain` entry); every other constant
+   (position/pitch jitter, envelope fade, the density-to-interval mapping)
+   is tuned in `audio/grainPlayer.ts`'s own `GRAIN_TUNING` only — no by-ear
+   tuning organelle built for this voice yet, unlike grind/bass/metal (a
+   natural follow-up, reusing `ui/tuningOrganelle.ts`). A point's vertical
+   position is currently cosmetic only (every point reads the full-band
+   capture regardless of where it was clicked); a later per-point
+   bandpass-by-height idea was discussed but deliberately deferred.
+
 ## Next: a doom/industrial/drone sound palette
 
 The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,

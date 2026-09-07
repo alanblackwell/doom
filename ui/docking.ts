@@ -9,6 +9,7 @@ import { controlsFor } from './controlSpecs';
 import { removeWireTo } from './wiring';
 import { removeEventWiresTo } from './eventWiring';
 import { stopCapture } from './sampler';
+import { stopGrainCapture } from './grainSampler';
 
 // Only a leaf, non-control entity can dock — a Control (knob/clock/tap) has
 // no independent sound to silence and isn't drawn as a box at all (see
@@ -46,6 +47,10 @@ export function dockEntity(graph: EntityGraph, entity: Entity): void {
     // live mic stream — parking the instrument in the dock must release
     // that, not leave it running silently in the background.
     if (feature.kind === 'sampler') stopCapture(feature.id);
+    // A grain-editor organelle (ui/grainSampler.ts) may be mid-capture too —
+    // same reasoning, its own watcher/recording must stop, not run on
+    // silently in the background.
+    if (feature.kind === 'grainEditor') stopGrainCapture(feature.id);
   }
   entity.docked = true;
 }

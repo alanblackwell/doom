@@ -106,6 +106,17 @@ overdrive: [
     // own muted red, so it doesn't read as just another tone/character dial.
     { param: 'kill', label: 'kill', min: 0, max: 1, color: '#e04a3c' },
   ],
+  // A grain-cloud voice reading from a captured sample (audio/grainPlayer.ts,
+  // audio/graph.ts's 'grain' case; ui/grainSampler.ts's popup is where the
+  // capture and its point markers actually live — this voice has no
+  // frequency/pitch dot the way grind does, since its character comes from
+  // whatever was captured, not a synthesized tone). density reuses grind's
+  // own red for the same "sparse -> dense/chaotic" concept.
+  grain: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'density', label: 'density', min: 0, max: 1, color: '#c85a5a' },
+    { param: 'grainLength', label: 'grain length', min: 0.01, max: 0.5, color: '#8a7ec8' },
+  ],
   kick: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
     // Same blue as bass/bow's pitch — same concept, deliberately consistent.
