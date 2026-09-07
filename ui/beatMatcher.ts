@@ -1698,15 +1698,18 @@ function hitTestSelectionClearButton(grid: Grid, pxPerSec: number, state: BeatMa
 
 const SELECTION_LOOP_TOGGLE_GAP = 10; // from the start caret's own x to the toggle's own center, mirroring SELECTION_CLEAR_BUTTON_GAP on the other side
 
-// Null (no selection, or no room to draw it past the plot's own left edge)
-// unless a selection region actually exists — same shape as
-// selectionClearButtonPosition, just anchored off the start caret instead
-// of the end one, and on the opposite side.
+// Null only when there's no selection region at all — otherwise anchored
+// off the start caret, on the opposite side from selectionClearButtonPosition
+// (which sits past the end caret). Unlike that button, this one is clamped
+// to stay inside the plot rather than disappearing when the start caret is
+// near (or at) the very beginning of the visible window and there's no room
+// to its left: it's drawn on top of whatever's already there (the ruler
+// band, the start caret itself) instead, since a loop/stop toggle the user
+// can never click is worse than one that occasionally overlaps something.
 function selectionLoopTogglePosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point | null {
   if (state.selectionStartSeconds === null || state.selectionEndSeconds === null) return null;
   const startX = secondsToX(grid, pxPerSec, state.scrollSeconds, state.selectionStartSeconds);
-  const x = startX - SELECTION_LOOP_TOGGLE_GAP;
-  if (x - TRANSPORT_BUTTON_RADIUS < grid.left) return null;
+  const x = Math.max(grid.left + TRANSPORT_BUTTON_RADIUS, startX - SELECTION_LOOP_TOGGLE_GAP);
   return { x, y: (grid.selectionRulerTop + grid.selectionRulerBottom) / 2 };
 }
 
