@@ -309,6 +309,17 @@ export interface BeatMatcherState {
   // setBeatMatcherCurrentPoint's own `confirm` parameter. Reset alongside
   // currentPointSeconds.
   confirmedPointSeconds: number | null;
+  // The gap from confirmedPointSeconds to selectionStartSeconds/
+  // selectionEndSeconds, as of the last time the user manually drew or
+  // resized the selection (a drag-create, a caret drag, or a keyboard
+  // nudge — see captureBeatMatcherSelectionMargins and its call sites in
+  // ui/interaction.ts). stepBeatMatcherCandidate reuses these two fixed
+  // margins on every Tab/Shift-Tab step rather than re-deriving them from
+  // whatever the window currently is — see that function's own comment for
+  // why. Null until a selection has been manually drawn at least once, and
+  // reset alongside selectionStart/EndSeconds.
+  selectionMarginBeforeSeconds: number | null;
+  selectionMarginAfterSeconds: number | null;
   // While a selection region exists, playback is bounded to it (see
   // startBeatMatcherPlayback/rewindBeatMatcherPlayback/
   // advanceBeatMatcherPastEnd) — auditioning a specific point, per this
@@ -350,6 +361,8 @@ export function beatMatcherStateFor(entityId: string): BeatMatcherState {
       playbackSpeed: 1,
       selectionStartSeconds: null,
       selectionEndSeconds: null,
+      selectionMarginBeforeSeconds: null,
+      selectionMarginAfterSeconds: null,
       currentPointSeconds: null,
       confirmedPointSeconds: null,
       selectionLoop: false,
@@ -447,6 +460,8 @@ function finishBeatMatcherCapture(featureEntityId: string): void {
     state.playbackSpeed = 1;
     state.selectionStartSeconds = null;
     state.selectionEndSeconds = null;
+    state.selectionMarginBeforeSeconds = null;
+    state.selectionMarginAfterSeconds = null;
     state.currentPointSeconds = null;
     state.confirmedPointSeconds = null;
     state.selectionLoop = false;
@@ -478,6 +493,8 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.notes = [];
   state.selectionStartSeconds = null;
   state.selectionEndSeconds = null;
+  state.selectionMarginBeforeSeconds = null;
+  state.selectionMarginAfterSeconds = null;
   state.currentPointSeconds = null;
   state.confirmedPointSeconds = null;
   state.selectionLoop = false;
@@ -1361,7 +1378,10 @@ export function setBeatMatcherNoteEnvelopeFromHandle(
 // instead (see ui/interaction.ts's own pointerdown/pointermove handling for
 // exactly which gesture does which). The point also doubles as an extra
 // snap target for note dragging in the track above (applyBeatMatcherNoteSnap
-// below).
+// below) — and so, while a Tab/Shift-Tab walk has it diverge from
+// confirmedPointSeconds, does the confirmed point: both stay visible
+// (drawCurrentPointLine/drawConfirmedPointLine) and both stay snappable
+// (snapCandidatesFor) for as long as they differ.
 
 // Moves the current point, clamped to the clip's own bounds, and selects
 // whatever note (if any) now sits under it — the one part of this feature
@@ -1384,7 +1404,12 @@ export function setBeatMatcherCurrentPoint(featureEntityId: string, seconds: num
 }
 
 // Sets the selection region from a drag's two endpoints, in whichever order
-// they were actually dragged — always normalized so start <= end.
+// they were actually dragged — always normalized so start <= end. Does NOT
+// touch selectionMarginBeforeSeconds/AfterSeconds itself — callers that
+// represent a MANUAL edit (a drag, a resize, a nudge) follow up with
+// captureBeatMatcherSelectionMargins; stepBeatMatcherCandidate's own
+// programmatic calls deliberately don't, since re-deriving margins from its
+// own output on every step is what used to make the window grow-only.
 export function setBeatMatcherSelectionRange(featureEntityId: string, aSeconds: number, bSeconds: number): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (!state.capturedBuffer) return;
@@ -1395,77 +1420,98 @@ export function setBeatMatcherSelectionRange(featureEntityId: string, aSeconds: 
   state.selectionEndSeconds = Math.max(a, b);
 }
 
-// Clamps a desired window start so [start, start+width] fits inside
-// [0, duration] AS A WHOLE — shifting the window back into bounds rather
-// than clamping each endpoint independently (which would shrink it instead
-// of just moving it). Shared by stepBeatMatcherCandidate below.
-function clampedWindowStart(desiredStart: number, width: number, duration: number): number {
-  const maxStart = Math.max(0, duration - width);
-  return Math.max(0, Math.min(maxStart, desiredStart));
+// Snapshots the current selection window's margins around
+// confirmedPointSeconds — the gap from the anchor back to the window start,
+// and out to the window end — into selectionMarginBeforeSeconds/
+// AfterSeconds. Call this after any MANUAL edit to the window (drag-create,
+// caret drag, keyboard nudge — see ui/interaction.ts's beatMatcherSelectionDrag
+// handling and this file's own nudgeBeatMatcherSelection), so
+// stepBeatMatcherCandidate has a fixed, user-chosen pair of margins to
+// reuse on every Tab/Shift-Tab step rather than ones inflated by its own
+// prior steps. A no-op while there's no anchor or no window yet.
+export function captureBeatMatcherSelectionMargins(featureEntityId: string): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  if (state.confirmedPointSeconds === null || state.selectionStartSeconds === null || state.selectionEndSeconds === null) return;
+  state.selectionMarginBeforeSeconds = state.confirmedPointSeconds - state.selectionStartSeconds;
+  state.selectionMarginAfterSeconds = state.selectionEndSeconds - state.confirmedPointSeconds;
 }
 
 // Tab/Shift-Tab (ui/interaction.ts's attachKeyboard, gated on
-// state.hoveredBeatMatcherTimelineId) — steps the current point to the next
-// or previous entry in the CURRENTLY DRAWN suggestion list
-// (suggestedBeatMatcherOnsets — the same handful of faint lines actually
-// visible in the spectrogram), not the much larger raw pool of every
-// detected transient in the clip (onsetCandidateSeconds) — moving to a point
-// with no suggestion line under it would contradict "next candidate." Walks
-// the list in RANK order (rankSuggestedOnsets' own return order — best
-// match first), not chronological order: Tab from a non-candidate position
-// (nothing picked yet, or sitting on the confirmed reference itself, which
-// is never among the candidates — see rankSuggestedOnsets) always lands on
-// the single best match first, and further Tab presses step to the 2nd-
-// best, 3rd-best, etc. Shift-Tab does the reverse, and clamps at rank 0
-// rather than wrapping — there's nothing "more similar than the best
-// match" to find, so it just stays there.
+// state.hoveredBeatMatcherTimelineId) — steps the current point through a
+// FIXED set of candidates: the same handful suggestedBeatMatcherOnsets ranks
+// (the faint lines actually drawn in the spectrogram, not the much larger
+// raw pool of every detected transient in onsetCandidateSeconds), but walked
+// in TIME order rather than rank order — rank order made consecutive Tab
+// presses jump back and forth across the clip, which reads as random rather
+// than "next." The set is a pure function of the confirmed reference (placed
+// notes, or confirmedPointSeconds — see suggestedBeatMatcherOnsets), and
+// Tab/Shift-Tab never touch that reference (setBeatMatcherCurrentPoint's
+// `confirm` parameter, passed false below) — otherwise Tab would train the
+// next ranking on its own guess, drifting away from what the user actually
+// meant. So the set only changes when the user does define a new reference:
+// placing a note, or clicking/dragging/nudging the current point (confirm
+// defaults true for all of those) — never as a side effect of walking it.
+//
+// Wraps at both ends: Tab past the latest candidate lands back on the
+// earliest; Shift-Tab before the earliest wraps to the latest. Landing with
+// nothing currently selected enters at the natural end for the direction
+// pressed — earliest for Tab, latest for Shift-Tab.
 //
 // Landing on a candidate moves the current point there for audition/preview,
-// but deliberately does NOT confirm it as the new reference (see
-// setBeatMatcherCurrentPoint's `confirm` parameter) — otherwise Tab would
-// train the next ranking on its own guess ("that one looked similar, so
-// call it ground truth"), drifting away from whatever the user actually
-// meant rather than converging on it. Once there are no placed notes yet to
-// anchor the reference instead, repeated Tab presses re-rank around the
-// SAME confirmed point (whichever the user last clicked, dragged, or
-// nudged) until a manual refinement moves it — a stable list to walk,
-// rather than a moving target.
+// but deliberately does NOT confirm it as the new reference, per above.
 //
 // If an audition selection window (selectionStartSeconds/selectionEndSeconds)
-// is already active, it moves along with the point per this feature's own
-// spec: if the point being moved FROM was inside the window, the window
-// shifts by the same delta (which, since its width doesn't change, is
-// exactly "the point keeps the same relative position within it"); if the
-// point was outside the window (or there was no prior point at all), the
-// window is simply re-centered on the new point instead.
+// is already active, each step recomputes it to TIGHTLY bracket just the
+// confirmed anchor (confirmedPointSeconds — the last manual selection, not
+// wherever a previous Tab step left the point) and the current candidate:
+// [min(anchor, candidate) - marginBefore, max(anchor, candidate) +
+// marginAfter], using the fixed margins captured from the user's last
+// manual edit of the window (selectionMarginBeforeSeconds/AfterSeconds —
+// lazily captured here on the first step of a walk if nothing's been
+// captured yet, since at that point the current window IS still the
+// manually-drawn one). Recomputing from the anchor and the fixed margins
+// on every step — rather than growing the previous step's own window — is
+// what lets the region SHRINK again as well as grow: stepping to a
+// candidate closer to the anchor than the previous one pulls the far edge
+// back in, instead of it only ever having crept outward.
 export function stepBeatMatcherCandidate(featureEntityId: string, direction: 1 | -1): void {
   const state = beatMatcherStateFor(featureEntityId);
   if (!state.capturedBuffer) return;
-  const candidates = suggestedBeatMatcherOnsets(state); // rank order, best match first — per rankSuggestedOnsets
+  const candidates = suggestedBeatMatcherOnsets(state).slice().sort((a, b) => a - b); // time order, frozen while the reference doesn't change
   if (candidates.length === 0) return;
   const previousPoint = state.currentPointSeconds;
-  // -1 both when nothing's picked yet AND when previousPoint is the
-  // confirmed reference itself (excluded from candidates by
-  // rankSuggestedOnsets) — either way there's no rank position to step
-  // from, so the natural entry point, in either direction, is the best
-  // match.
   const previousIndex = previousPoint !== null ? candidates.indexOf(previousPoint) : -1;
-  const targetIndex = previousIndex === -1 ? 0 : Math.max(0, Math.min(candidates.length - 1, previousIndex + direction));
+  const targetIndex =
+    previousIndex === -1
+      ? (direction === 1 ? 0 : candidates.length - 1)
+      : (previousIndex + direction + candidates.length) % candidates.length;
   const target = candidates[targetIndex];
 
   const hadWindow = state.selectionStartSeconds !== null && state.selectionEndSeconds !== null;
-  const oldStart = state.selectionStartSeconds;
-  const oldEnd = state.selectionEndSeconds;
-  const previousInWindow = hadWindow && previousPoint !== null && previousPoint >= oldStart! && previousPoint <= oldEnd!;
-  const width = hadWindow ? oldEnd! - oldStart! : 0;
+  const anchor = state.confirmedPointSeconds;
 
   setBeatMatcherCurrentPoint(featureEntityId, target, false);
   focusBeatMatcherSelection(featureEntityId, 'point');
 
-  if (hadWindow) {
-    const desiredStart = previousInWindow ? oldStart! + (target - previousPoint!) : target - width / 2;
-    const clampedStart = clampedWindowStart(desiredStart, width, state.capturedBuffer.duration);
-    setBeatMatcherSelectionRange(featureEntityId, clampedStart, clampedStart + width);
+  if (hadWindow && anchor !== null) {
+    if (state.selectionMarginBeforeSeconds === null || state.selectionMarginAfterSeconds === null) {
+      captureBeatMatcherSelectionMargins(featureEntityId);
+    }
+    const marginBefore = state.selectionMarginBeforeSeconds ?? 0;
+    const marginAfter = state.selectionMarginAfterSeconds ?? 0;
+    setBeatMatcherSelectionRange(
+      featureEntityId,
+      Math.min(anchor, target) - marginBefore,
+      Math.max(anchor, target) + marginAfter
+    );
+  }
+
+  // Both points need to stay visible while they're both "in play" (see
+  // ensureBeatMatcherPointsVisible's own comment) — independent of the
+  // selection-window logic above, since the two points are worth keeping in
+  // frame even when there's no selection region active at all.
+  if (anchor !== null) {
+    ensureBeatMatcherPointsVisible(state, anchor, target);
   }
 }
 
@@ -1495,6 +1541,8 @@ export function clearBeatMatcherSelection(featureEntityId: string): void {
   const state = beatMatcherStateFor(featureEntityId);
   state.selectionStartSeconds = null;
   state.selectionEndSeconds = null;
+  state.selectionMarginBeforeSeconds = null;
+  state.selectionMarginAfterSeconds = null;
 }
 
 // The loop control to the left of the selection region (see
@@ -1587,6 +1635,7 @@ export function nudgeBeatMatcherSelection(graph: EntityGraph, direction: -1 | 1)
     state.selectionStartSeconds = newStart;
     state.selectionEndSeconds = newStart + width;
   }
+  captureBeatMatcherSelectionMargins(entityId); // a manual edit — see that function's own comment
 }
 
 const CURRENT_POINT_MARKER_HIT_RADIUS = 7;
@@ -1615,6 +1664,17 @@ function currentPointMarkerPosition(grid: Grid, pxPerSec: number, state: BeatMat
 function hitTestCurrentPointMarker(grid: Grid, pxPerSec: number, state: BeatMatcherState, point: Point): boolean {
   const center = currentPointMarkerPosition(grid, pxPerSec, state);
   return !!center && dist(point, center) <= CURRENT_POINT_MARKER_HIT_RADIUS;
+}
+
+// Only meaningful while it differs from the current point — i.e. mid Tab/
+// Shift-Tab walk (stepBeatMatcherCandidate leaves confirmedPointSeconds
+// alone while moving currentPointSeconds around). Null the rest of the
+// time so drawConfirmedPointLine has nothing extra to draw over the single
+// current-point marker.
+function confirmedPointMarkerPosition(grid: Grid, pxPerSec: number, state: BeatMatcherState): Point | null {
+  if (state.confirmedPointSeconds === null || state.confirmedPointSeconds === state.currentPointSeconds) return null;
+  const x = secondsToX(grid, pxPerSec, state.scrollSeconds, state.confirmedPointSeconds);
+  return { x, y: (grid.selectionRulerTop + grid.selectionRulerBottom) / 2 };
 }
 
 const SELECTION_CLEAR_BUTTON_RADIUS = 5;
@@ -1725,8 +1785,12 @@ export function beatMatcherNoteSnapHoldFraction(snap: BeatMatcherNoteSnapState, 
 }
 
 // Every note boundary (onset and offset) in the track except the note
-// currently being dragged, plus the selection ruler's own current point (if
-// set) — see this section's own header.
+// currently being dragged, plus the selection ruler's own current point and
+// confirmed point (if set) — see this section's own header. The two points
+// coincide outside a Tab/Shift-Tab walk (setBeatMatcherCurrentPoint keeps
+// them in sync by default), but diverge during one — the manual selection
+// (confirmedPointSeconds) is still a meaningful place to snap a note to
+// even while the current point is off auditioning a candidate elsewhere.
 function snapCandidatesFor(state: BeatMatcherState, excludeNoteId: string | null): number[] {
   const candidates: number[] = [];
   for (const note of state.notes) {
@@ -1734,6 +1798,9 @@ function snapCandidatesFor(state: BeatMatcherState, excludeNoteId: string | null
     candidates.push(note.onsetSeconds, note.onsetSeconds + note.durationSeconds);
   }
   if (state.currentPointSeconds !== null) candidates.push(state.currentPointSeconds);
+  if (state.confirmedPointSeconds !== null && state.confirmedPointSeconds !== state.currentPointSeconds) {
+    candidates.push(state.confirmedPointSeconds);
+  }
   return candidates;
 }
 
@@ -1886,6 +1953,40 @@ function maxScrollSeconds(state: BeatMatcherState): number {
 
 function clampBeatMatcherScroll(state: BeatMatcherState): void {
   state.scrollSeconds = Math.max(0, Math.min(maxScrollSeconds(state), state.scrollSeconds));
+}
+
+// Keeps a small gap from the view's own left/right edges so a point marker
+// never draws flush against the popup border — same idea as
+// AUTO_SCROLL_LOOKAHEAD_FRACTION's margin during playback, just symmetric
+// instead of a single lookahead direction.
+const POINT_VISIBILITY_MARGIN_FRACTION = 0.05;
+
+// Scrolls (never rezooms) so both aSeconds and bSeconds are visible at
+// once — stepBeatMatcherCandidate's own fix for the manual selection
+// (confirmedPointSeconds) going off-screen and effectively disappearing
+// once a Tab walk lands on a candidate far enough away: nothing previously
+// adjusted scrollSeconds to follow the walk at all, so the confirmed
+// point's line (drawConfirmedPointLine) would silently scroll out of the
+// clipped [grid.left, grid.right] range it's drawn against. If the two
+// points are farther apart than the current zoom can show at once, the
+// live point (b — whichever one was just tabbed to) wins and the view
+// centers on it instead, same as if there were no anchor to keep in frame;
+// never widens zoomSeconds to force a fit, since that would resize the
+// user's own view as a surprising side effect of pressing Tab.
+function ensureBeatMatcherPointsVisible(state: BeatMatcherState, aSeconds: number, bSeconds: number): void {
+  const lo = Math.min(aSeconds, bSeconds);
+  const hi = Math.max(aSeconds, bSeconds);
+  const margin = state.zoomSeconds * POINT_VISIBILITY_MARGIN_FRACTION;
+  if (hi - lo + margin * 2 <= state.zoomSeconds) {
+    if (lo - margin < state.scrollSeconds) {
+      state.scrollSeconds = lo - margin;
+    } else if (hi + margin > state.scrollSeconds + state.zoomSeconds) {
+      state.scrollSeconds = hi + margin - state.zoomSeconds;
+    }
+  } else {
+    state.scrollSeconds = bSeconds - state.zoomSeconds / 2;
+  }
+  clampBeatMatcherScroll(state);
 }
 
 interface Grid {
@@ -3283,6 +3384,30 @@ function drawCurrentPointLine(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSe
   ctx.restore();
 }
 
+// The manual selection's own line, drawn alongside drawCurrentPointLine's
+// during a Tab/Shift-Tab walk (confirmedPointMarkerPosition is null the rest
+// of the time, so this is a no-op then) — deliberately the SAME weight/dash
+// as drawCurrentPointLine (not a fainter/thinner treatment, which read as
+// "the original line disappeared" rather than "there are now two lines" —
+// per this feature's own spec, the manually-clicked line is meant to stay
+// visibly put while a Tab walk adds a second one next to it, not fade into
+// the background). Both remain valid note-drag snap targets
+// (snapCandidatesFor) while they're both visible.
+function drawConfirmedPointLine(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: number, state: BeatMatcherState): void {
+  const point = confirmedPointMarkerPosition(grid, pxPerSec, state);
+  if (!point || point.x < grid.left || point.x > grid.right) return;
+  ctx.save();
+  ctx.strokeStyle = ACCENT;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, grid.trackTop);
+  ctx.lineTo(point.x, grid.spectrogramBottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 // Shown for a note-edge/move drag while a snap candidate is in range —
 // whether or not the hold has completed. Same shape as
 // ui/sequencer.ts's own NoteSnapIndicator, independent code.
@@ -3809,6 +3934,7 @@ export function drawBeatMatcherPopup(
     if (noteSnap) {
       drawBeatMatcherNoteSnapIndicator(ctx, grid, pxPerSec, state, noteSnap);
     }
+    drawConfirmedPointLine(ctx, grid, pxPerSec, state);
     drawCurrentPointLine(ctx, grid, pxPerSec, state);
     drawBeatMatcherPlaybackLine(ctx, grid, pxPerSec, state, beatMatcherCursorFlashGlow(entity.id, now));
     drawAxisHandle(ctx, grid, isAxisDragging);

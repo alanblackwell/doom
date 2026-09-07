@@ -152,6 +152,7 @@ import {
   beatMatcherVelocitySliderOpenFor,
   beatMatcherZoomStep,
   applyBeatMatcherNoteSnap,
+  captureBeatMatcherSelectionMargins,
   closeBeatMatcherInfoOverlay,
   clearBeatMatcherSelection,
   closeBeatMatcherVelocitySlider,
@@ -1702,6 +1703,9 @@ export function attachInteraction(
           else setBeatMatcherSelectionEnd(drag.entityId, seconds);
         }
       }
+      // A manual edit to the window — see captureBeatMatcherSelectionMargins'
+      // own comment on why stepBeatMatcherCandidate needs this snapshotted.
+      captureBeatMatcherSelectionMargins(drag.entityId);
       return;
     }
 

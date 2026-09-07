@@ -337,13 +337,14 @@ const TEMPORAL_SPREAD_CAP_SECONDS = 1; // separation beyond this earns no furthe
 // reference point that's just that point's own vector, so this covers both
 // cases without a separate code path.
 //
-// Returned in RANK order — best match first — not chronological order:
-// ui/beatMatcher.ts's drawBeatMatcherSuggestions/hitTestSuggestionLine don't
-// care about order (every entry is drawn/tested identically), but
-// stepBeatMatcherCandidate's Tab/Shift-Tab walk does, and needs "next" to
-// mean "next-best match," not "next in time" — the two aren't the same
-// thing, and treating them as if they were is what made Shift-Tab look like
-// it could find something "more similar" than the best match.
+// Picks the top `count` matches BY RANK (best match first) — that part of
+// "top N" is this function's job. Returned in that same rank order, since
+// none of ui/beatMatcher.ts's consumers need anything else: drawing/hit-
+// testing don't care about order at all (every entry is drawn/tested
+// identically), and stepBeatMatcherCandidate's Tab/Shift-Tab walk re-sorts
+// its own copy into chronological order before walking it (rank order made
+// consecutive Tab presses jump back and forth across the clip) — it's the
+// SET of top matches this function fixes, not the order they get walked in.
 export function rankSuggestedOnsets(
   features: OnsetFeature[],
   candidateSeconds: number[],
