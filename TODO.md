@@ -70,6 +70,73 @@ Placeholders for larger features to elaborate on when we get to each one.
    firing rate (adaptively tracked, not fixed), decaying toward a dim
    floor between pulses rather than sitting fully dark.
 
+## Next: a doom/industrial/drone sound palette
+
+The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,
+`overdrive`, `fuzz`, `reverb`, `chorus`, `flanger` — see `audio/graph.ts`)
+leans clean/melodic: physically-modeled strings and simple sweeps. None of
+it is gritty, grinding, or earthquake-scale. Target character: machinery
+meeting nature (a chainsaw in a dungeon), ominous power (a volcano the
+moment before it erupts), scale (Godzilla dropping a boulder on an
+airport), catastrophe (a nuclear plant hit by a tsunami). New sources and
+filters to add, roughly in order:
+
+1. **Grind** — a new WASM voice (`dsp/rust`, worklet shim alongside
+   `dsp/worklets/bow-processor.js`), reusing `bow`'s stick-slip friction
+   model but deliberately driven into the chaotic-scraping region that
+   `bow-processor.js`'s own comment warns is normally *unplayable*
+   (bowVelocity outside ~0.03–0.25) — that chaos is the point here: a
+   chainsaw/angle-grinder/dungeon-drill texture rather than a clean pitch.
+
+2. **Rumble** — extend `bass`'s twin-detuned-saw approach (`dsp/rust`) an
+   octave or two lower into sub-audio range, plus a slow 1–4Hz
+   infrasonic AM or filter-cutoff wobble — earthquake/volcano-tension
+   drone, the low end everything else in a scene sits on top of.
+
+3. **Impact/boulder** — reuses `kick`'s trigger pipeline
+   (`audio/graph.ts`'s `case 'kick'`) but replaces the single
+   pitch-sweeping sine with a small bank of inharmonic resonant bandpass
+   filters excited by one impulse (modal synthesis) — a rock/boulder
+   doesn't ring like a drum head, it rings like several detuned masses at
+   once. This is the "Godzilla drops a boulder on an airport" hit.
+
+4. **Clang/gong** — standalone inharmonic modal voice: 4-6 partials at
+   non-integer frequency ratios, each with its own decay — dungeon bell,
+   warning klaxon, distant structure groaning under load.
+
+5. **Drone/servo** — pulse oscillator(s) with slow PWM plus ring
+   modulation between two closely-tuned low oscillators, for a
+   distinctly mechanical beating/grinding texture, as a machine-not-organism
+   counterpart to `bow`/`pluck`.
+
+6. **Bitcrusher** (filter) — sample-rate/bit-depth reduction. Small
+   JS-only `AudioWorkletProcessor` (no WASM needed, simpler than
+   `noise-processor.js`) — cheap harsh digital grit layer on any source.
+
+7. **Ring modulator** (filter) — an audio-rate carrier oscillator driving
+   a `GainNode`'s `.gain`, the same audio-rate-modulation trick
+   `chorus`/`flanger` already use for their LFO (see around
+   `audio/graph.ts:1062`), just at audio rate instead of sub-audio —
+   robotic/possessed/metallic tone.
+
+8. **Resonator bank** (filter) — parallel *fixed* (not swept, unlike
+   flanger's comb) `BiquadFilterNode` bandpasses tuned to inharmonic
+   ratios — routes plain noise or `bass` into a gong/metal-clang timbre.
+
+9. **Growl filter** — a `BiquadFilterNode` pushed to near-self-oscillating
+   Q with a slow rising cutoff automation — the "volcano about to erupt"
+   tension riser, or a monster-growl sweep under a drone note.
+
+10. **Sub-octave** (filter) — zero-crossing pitch divider adding an
+    octave-down copy underneath any existing source's signal — the
+    cheapest way to make an already-built instrument (`pluck`, `bow`,
+    `bass`) read as earthquake-heavy without a new voice.
+
+11. **Pumping compressor** (filter) — `DynamicsCompressorNode` at an
+    extreme ratio, gated by the clock/sequencer's own trigger rate — a
+    "machinery breathing" / tidal-surge pulse to put under a sustained
+    drone.
+
 ## Maybe someday
 
 Speculative — not committed work, and not clear it's ever actually needed.
