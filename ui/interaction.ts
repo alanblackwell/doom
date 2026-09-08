@@ -10,10 +10,13 @@ import {
   activateEventTarget,
   getControlSetter,
   rebuildEntity,
-  releaseEntity,
   resetEntityToDefaults,
   triggerEntity,
   isEntityPlaying,
+  isEntitySustained,
+  startSustainableNote,
+  stopSustainableNote,
+  toggleSustain,
   stopEntity,
   CONTINUOUS_KINDS,
   PROCESSOR_KINDS,
@@ -46,13 +49,7 @@ import type { ControlHit, ControlSpec, Track } from './controls';
 import { isWithinPad } from './pads';
 import { hitTestWireHandle, withinControlBody } from './knobs';
 import { addWire, getAllWires, getWiresFrom, removeWireTo } from './wiring';
-import {
-  addEventWire,
-  getAllEventWires,
-  getEventWiresFrom,
-  removeEventWire,
-  removeEventWiresTo,
-} from './eventWiring';
+import { addEventWire, getAllEventWires, getEventWiresFrom, removeEventWire } from './eventWiring';
 import { eventWireEndpoints, hitTestWireCurve, valueWireEndpoints } from './wireGeometry';
 import { bindKey, getEntityForKey } from './tapBindings';
 import { recordSourcePulse } from './eventPulse';
@@ -2047,31 +2044,64 @@ export function attachInteraction(
     // hit and can still become a drag if the pointer moves far enough, so
     // repositioning a triggered instrument from its own pad still works.
     if (TRIGGERED_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
-      // A long-running 'sample' already playing: this press means "stop it"
-      // rather than "retrigger" — the pad doubles as a pause button while
-      // sound is coming out of it (see ui/render.ts's drawPad for the
-      // matching play/pause icon swap). isEntityPlaying is always false for
-      // the other TRIGGERED_KINDS (short one-shots), so they always hit the
-      // normal trigger branch below.
-      if (isEntityPlaying(hit.id)) {
+      if (isEntitySustained(hit.id)) {
+        // Any click ends a sustain latch, not just another right-click —
+        // see the contextmenu handler's own toggleSustain call for how one
+        // gets started. Takes priority over the 'sample' pause-button
+        // check below: ending the sustain IS this click's meaning here,
+        // regardless of what a plain (unsustained) click on this pad would
+        // otherwise do.
+        toggleSustain(hit.id);
+      } else if (isEntityPlaying(hit.id)) {
+        // A long-running 'sample' already playing: this press means "stop
+        // it" rather than "retrigger" — the pad doubles as a pause button
+        // while sound is coming out of it (see ui/render.ts's drawPad for
+        // the matching play/pause icon swap). isEntityPlaying is always
+        // false for the other TRIGGERED_KINDS (short one-shots), so they
+        // always hit the normal trigger branch below.
         stopEntity(hit.id);
       } else {
         triggerEntity(hit.id);
         state.triggerFlashes.set(hit.id, performance.now());
         // Gate-on for a press-and-hold envelope (see endPress's matching
-        // release) — a no-op release if this instrument has no envelope
-        // feature attached, so tracked unconditionally.
+        // gate-off) — a no-op release if this instrument has no envelope
+        // feature attached, so tracked unconditionally. Skipped at release
+        // time if a right-click has since latched this pad sustaining (see
+        // toggleSustain in the contextmenu handler below) — a held note and
+        // a sustain latch share the same underlying gate, so releasing on
+        // mouse-up would otherwise cut a sustain short.
         state.gatedId = hit.id;
       }
     } else if (CONTINUOUS_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
-      // Same pad/button, same press-fires-immediately reasoning as above.
-      // Routed through activateEventTarget (not toggleEntityPaused directly)
-      // so a direct click and a wired-in pulse behave identically once this
-      // entity has a melody organelle attached — see activateEventTarget's
-      // own comment in audio/graph.ts. Falls back to the plain play/pause
-      // toggle for an entity with no melody (or an empty one).
-      activateEventTarget(hit.id);
-      state.triggerFlashes.set(hit.id, performance.now());
+      if (isEntitySustained(hit.id)) {
+        // Same "any click ends it" as the TRIGGERED_KINDS branch above.
+        toggleSustain(hit.id);
+      } else {
+        // A melody organelle attached (bow-1's own, so far) takes over this
+        // click entirely — advancing through its notes, not a hold gesture —
+        // exactly as before, via activateEventTarget (see its own comment
+        // in audio/graph.ts). Pulsing also force-opens pauseGate every
+        // time, which the new hold-to-sound gesture below would otherwise
+        // fight (gating pauseGate closed again on release, right after a
+        // pulse just forced it open) — so a melody-equipped drone keeps its
+        // own click-to-advance behavior unconditionally, never the new
+        // gesture.
+        const hasMelody = graph.featuresOf(hit.id).some((f) => f.kind === 'melody');
+        if (hasMelody) {
+          activateEventTarget(hit.id);
+          state.triggerFlashes.set(hit.id, performance.now());
+        } else {
+          // New: press-and-hold plays it like a single note ("note on" on
+          // press, "note off" on release — see endPress below), unifying
+          // with a TRIGGERED_KINDS pad's own gesture. A right-click instead
+          // latches it playing continuously regardless of hold (see
+          // toggleSustain in the contextmenu handler below) — "the current
+          // drone" behavior this pad used to give on every plain click.
+          startSustainableNote(hit.id);
+          state.triggerFlashes.set(hit.id, performance.now());
+          state.gatedId = hit.id;
+        }
+      }
     } else if (hit.kind === 'tap' && withinControlBody(effectiveBounds(graph, hit), point)) {
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see
@@ -2971,10 +3001,18 @@ export function attachInteraction(
     state.hoverGrainId = null;
 
     // Gate-off for a held pad press (see pointerdown's matching gate-on) —
-    // unconditional on release regardless of whether a repositioning drag
-    // also happened in between.
+    // happens on release regardless of whether a repositioning drag also
+    // happened in between, UNLESS a right-click has since latched this same
+    // pad sustaining (toggleSustain, in the contextmenu handler below) — a
+    // held note and a sustain latch share the same gate, so releasing here
+    // would otherwise cut a sustain short the moment this press's own
+    // mouse-up fires. stopSustainableNote (not releaseEntity directly)
+    // since this same gate-off now also covers a CONTINUOUS_KINDS pad's own
+    // new hold-to-sound gesture, not just a TRIGGERED_KINDS envelope.
     if (state.gatedId) {
-      releaseEntity(state.gatedId);
+      if (!isEntitySustained(state.gatedId)) {
+        stopSustainableNote(state.gatedId);
+      }
       state.gatedId = null;
     }
   }
@@ -3058,6 +3096,14 @@ export function attachInteraction(
       return;
     }
 
+    // A pad's own sustain switch (see this file's pointerdown/endPress for
+    // the matching press-and-hold gesture, and audio/graph.ts's
+    // toggleSustain for what each kind's own gate-on/off actually does):
+    // first right-click latches it sounding regardless of hold, a second
+    // releases/pauses it again. Replaces this pad's own former right-click
+    // behavior (bulk-clearing every event wire feeding it) — an individual
+    // event wire can still be removed by right-clicking its own curve
+    // (checked above), just not the whole pad in one click anymore.
     const bodyHit = hitTest(graph, point, new Set());
     if (
       bodyHit &&
@@ -3065,7 +3111,10 @@ export function attachInteraction(
       isWithinPad(effectiveBounds(graph, bodyHit), point)
     ) {
       e.preventDefault();
-      removeEventWiresTo(bodyHit.id);
+      toggleSustain(bodyHit.id);
+      if (isEntitySustained(bodyHit.id)) {
+        state.triggerFlashes.set(bodyHit.id, performance.now());
+      }
     }
   });
 }

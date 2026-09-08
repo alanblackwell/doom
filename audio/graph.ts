@@ -424,6 +424,59 @@ export function activateEventTarget(entityId: string, overrides?: TriggerOverrid
   }
 }
 
+// Which entities are currently latched "on" via a right-click sustain
+// toggle (ui/interaction.ts's contextmenu handler) — unifies a
+// TRIGGERED_KINDS pad's press-and-hold gesture with a CONTINUOUS_KINDS
+// pad's own play/pause: for either kind, right-click now means "keep
+// sounding regardless of whether the pad is currently held," so a plain
+// press-and-hold's own release (ui/interaction.ts's endPress) needs to
+// check this before actually silencing anything.
+const sustainedEntities = new Set<string>();
+
+export function isEntitySustained(entityId: string): boolean {
+  return sustainedEntities.has(entityId);
+}
+
+// The gate-on/off primitives shared by a normal press-and-hold pad gesture
+// AND the right-click sustain toggle below — same underlying action either
+// way (start/stop this entity's own note or drone), just triggered by two
+// different gestures. Deliberately bypasses activateEventTarget's own
+// melody-pulse/sequencer-toggle dispatch above: those are a click's OTHER
+// possible meanings, decided by ui/interaction.ts before it ever calls
+// these, not something a held note or a sustain latch should also try to
+// re-interpret.
+export function startSustainableNote(entityId: string, overrides?: TriggerOverrides): void {
+  if (triggersByEntity.has(entityId)) {
+    triggerEntity(entityId, overrides);
+  } else if (pauseGatesByEntity.has(entityId)) {
+    setEntityPaused(entityId, false);
+  }
+}
+
+export function stopSustainableNote(entityId: string, overrides?: TriggerOverrides): void {
+  if (triggersByEntity.has(entityId)) {
+    releaseEntity(entityId, overrides);
+  } else if (pauseGatesByEntity.has(entityId)) {
+    setEntityPaused(entityId, true);
+  }
+}
+
+// Right-click on a pad (ui/interaction.ts's contextmenu handler): first
+// click latches it sounding (a TRIGGERED_KINDS voice gated fully open, a
+// CONTINUOUS_KINDS one unpaused) regardless of whether the pad is being
+// held; a second click releases/pauses it again — "the current drone"
+// behavior a CONTINUOUS_KINDS pad's own plain click used to have
+// unconditionally, now shared with TRIGGERED_KINDS voices too.
+export function toggleSustain(entityId: string): void {
+  if (sustainedEntities.has(entityId)) {
+    sustainedEntities.delete(entityId);
+    stopSustainableNote(entityId);
+  } else {
+    sustainedEntities.add(entityId);
+    startSustainableNote(entityId);
+  }
+}
+
 // Wall-clock (performance.now()) timing for an in-progress envelope, so
 // ui/organelle.ts's rAF-driven cursor animation can compute "where along
 // the curve is playback right now" without needing to reconcile against
@@ -894,12 +947,32 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         return segmentStartOffset + (ctx.currentTime - segmentStartCtxTime) * segmentRate;
       }
 
+      // Long/slow single-voice playback (the short-one-shot layering path
+      // below never calls this) is hard-coded as if it were an ADSR
+      // envelope — instantaneous attack (starts at full level immediately,
+      // no ramp) and, in effect, infinite release: gate-on (registerTrigger)
+      // starts the buffer LOOPING immediately, so a held or right-click-
+      // sustained gate (ui/interaction.ts's press-and-hold/toggleSustain —
+      // audio/graph.ts's own registerTrigger/registerRelease pair, same as
+      // every other TRIGGERED_KINDS voice) can keep it sounding
+      // indefinitely; gate-off (registerRelease below) doesn't stop
+      // anything itself, it just clears `source.loop` so the CURRENTLY
+      // playing pass finishes on its own rather than being cut off
+      // mid-buffer — "terminates when the end of the sample is reached,"
+      // not on release itself. A plain quick tap is audibly indistinguishable
+      // from a single non-looping play: release clears `loop` almost
+      // immediately, well before the first pass would ever repeat. Kept
+      // consistent with every other envelope-bearing voice for exactly the
+      // reason this shape was chosen: a real attack/decay/sustain/release
+      // organelle could read/drive these same two gate calls later, if
+      // sampled textures ever want shaping beyond hard on/off.
       function startPlayback(buffer: AudioBuffer, offset: number): void {
         const now = ctx.currentTime;
         const rate = entity.params.speed ?? 1;
         const source = ctx.createBufferSource();
         source.buffer = buffer;
         source.playbackRate.value = rate;
+        source.loop = true;
         source.connect(level);
         // Guards a paused-right-at-the-end race (offsetNow() landing at or
         // past duration) — start() would otherwise reject an out-of-range
@@ -929,6 +1002,21 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         if (!buffer) return;
 
         const rate = entity.params.speed ?? 1;
+
+        // A right-click sustain latch (toggleSustain adds to
+        // sustainedEntities BEFORE calling triggerEntity — see
+        // startSustainableNote) always loops, regardless of the sample's
+        // own length: "a sample can be used as a drone" the same way a
+        // synth/pluck/metal voice's own envelope never enters release while
+        // its sustain is held. Checked ahead of the short/long split below,
+        // which only decides how a PLAIN (unsustained) trigger behaves.
+        if (isEntitySustained(entity.id)) {
+          current?.stop();
+          pausedOffset = 0;
+          startPlayback(buffer, 0);
+          return;
+        }
+
         // Actual playback time at the current speed, not the buffer's raw
         // duration — a file slowed to 0.2x plays 5x longer than its native
         // length, and that's the "long/slow" behavior that should trigger,
@@ -941,10 +1029,13 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
           // same "click it again before the last hit fades" expectation
           // kick/pluck/metal already have. Deliberately never touches
           // current/pausedOffset — those belong to the single-voice
-          // pause/resume path below, for slow/long samples where
+          // gate-driven path below, for slow/long samples where
           // overlapping playback wouldn't read as a deliberate retrigger.
           // Never added to playingEntities either, so the pad never shows
-          // a pause icon or treats a press as "stop" for this kind of hit.
+          // a pause icon or treats a press as "stop" for this kind of hit —
+          // and never loops, so registerRelease's own loop=false is a
+          // harmless no-op on `current` regardless of whichever long
+          // sample (if any) it currently references.
           const now = ctx.currentTime;
           const hit = ctx.createBufferSource();
           hit.buffer = buffer;
@@ -955,8 +1046,11 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
           return;
         }
 
-        // Long/slow — single voice, pause/resume via pausedOffset (see
-        // registerStop below and startPlayback's offset argument).
+        // Long/slow — single voice, gate-driven (see startPlayback's own
+        // comment). Resumes from a pause point if the pad's own explicit
+        // "stop it now" button (registerStop below) left one; a plain
+        // release never sets one (see registerRelease), so this is only
+        // ever nonzero after that gesture specifically.
         const resumeFrom = pausedOffset;
         pausedOffset = 0;
         // Replaces rather than layers, if something's already playing (e.g.
@@ -966,7 +1060,19 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         startPlayback(buffer, resumeFrom);
       });
 
+      registerRelease(entity.id, () => {
+        // "Infinite release" — see startPlayback's own comment. Not a no-op
+        // for the short-one-shot layering path above (current is never set
+        // there), so this is safe to fire unconditionally regardless of
+        // which path the matching trigger actually took.
+        if (current) current.loop = false;
+      });
+
       registerStop(entity.id, () => {
+        // The pad's OWN "stop it right now" gesture (a press while already
+        // playing — see ui/interaction.ts's isEntityPlaying check) — an
+        // explicit, immediate cutoff, distinct from a plain release above,
+        // which lets whatever's currently playing finish on its own instead.
         if (!current) return;
         pausedOffset = offsetNow();
         current.stop();
@@ -1269,6 +1375,20 @@ function createSynthVoice(entity: Entity, graph: EntityGraph): AudioNode {
 
   const controls: Record<string, (value: number) => void> = {
     level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    // Unlike pluck/metal's WASM string models (whose pitch only takes
+    // effect at the next excite — see createPluckVoice's own registerTrigger),
+    // these are plain persistent OscillatorNodes: a live glide while a note
+    // is already sustaining (held, or right-click-latched — see
+    // audio/graph.ts's toggleSustain) is both technically trivial and
+    // musically the whole point of a doom lever wired to pitch. Same
+    // AudioParam every trigger already ramps, so a lever drag mid-note and
+    // the next note's own attack never fight each other.
+    pitch: (value) => {
+      const now = ctx.currentTime;
+      for (const wave of SYNTH_WAVEFORMS) {
+        oscillators[wave].frequency.setTargetAtTime(value, now, 0.02);
+      }
+    },
   };
   for (const wave of SYNTH_WAVEFORMS) {
     controls[wave] = (value) => waveGains[wave].gain.setTargetAtTime(value, ctx.currentTime, 0.01);
@@ -2405,6 +2525,7 @@ export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
   stopsByEntity.delete(entity.id);
   pauseGatesByEntity.delete(entity.id);
   pausedEntities.delete(entity.id);
+  sustainedEntities.delete(entity.id);
   playingEntities.delete(entity.id);
   melodyOwnersByEntity.delete(entity.id);
   // Stops the old instance's setInterval scheduler before dropping the

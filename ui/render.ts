@@ -6,7 +6,14 @@
 // logic in layout.ts.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
-import { CONTINUOUS_KINDS, PROCESSOR_KINDS, TRIGGERED_KINDS, isEntityPaused, isEntityPlaying } from '../audio/graph';
+import {
+  CONTINUOUS_KINDS,
+  PROCESSOR_KINDS,
+  TRIGGERED_KINDS,
+  isEntityPaused,
+  isEntityPlaying,
+  isEntitySustained,
+} from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds } from './layout';
 import type { DragContext, Point, Rect } from './layout';
 import type { InteractionState } from './interaction';
@@ -392,15 +399,21 @@ function drawPad(
   // Small "play"-style triangle at rest, subtle — enough to read as a
   // button without competing with the id/kind labels underneath it. Swaps
   // to a "pause"-style two-bar icon while sound is actually coming out of
-  // it: for a 'sample' entity, once playback has actually started (see
-  // audio/graph.ts's isEntityPlaying — always false for the other
-  // TRIGGERED_KINDS, so their pad never shows this); for a CONTINUOUS_KINDS
-  // drone, the icon's polarity is reversed — playing is its normal resting
-  // state, so the bars show whenever it's NOT paused, inviting a click to
-  // pause rather than to start something that's already sounding.
+  // it, same as a CONTINUOUS_KINDS drone's own icon (whose polarity is
+  // reversed — playing is ITS normal resting state, so its bars show
+  // whenever it's NOT paused, inviting a click to pause rather than to
+  // start something that's already sounding). For a TRIGGERED_KINDS voice,
+  // "sounding" covers three cases: a long-running 'sample' actually playing
+  // (isEntityPlaying — always false for every other TRIGGERED_KINDS voice),
+  // a press-and-hold currently gating its envelope open (interaction.gatedId,
+  // the same UI-only press-tracking ui/interaction.ts's endPress reads to
+  // release it), or a right-click sustain latch keeping it open regardless
+  // of hold (isEntitySustained — see audio/graph.ts's toggleSustain).
   ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
   const s = radius * 0.5;
-  const showPauseIcon = continuous ? !isEntityPaused(entity.id) : isEntityPlaying(entity.id);
+  const showPauseIcon = continuous
+    ? !isEntityPaused(entity.id)
+    : isEntityPlaying(entity.id) || interaction.gatedId === entity.id || isEntitySustained(entity.id);
   if (showPauseIcon) {
     const barWidth = s * 0.4;
     const barHeight = s * 1.4;
