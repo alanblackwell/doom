@@ -135,6 +135,16 @@ import {
   toggleMetalTunerExposed,
 } from './metalTuner';
 import {
+  beginGrainTunerMaxDrag,
+  copyGrainTuning,
+  grainTunerRawValueAtPoint,
+  hitTestGrainTunerPopup,
+  setGrainTunerMax,
+  setGrainTunerMin,
+  setGrainTunerValue,
+  toggleGrainTunerExposed,
+} from './grainTuner';
+import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
@@ -408,6 +418,8 @@ export interface InteractionState {
   bassTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
   // Same shape again, for an open metal-tuning popup (ui/metalTuner.ts).
   metalTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
+  // Same shape again, for an open grain-tuning popup (ui/grainTuner.ts).
+  grainTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -583,6 +595,7 @@ export function createInteractionState(): InteractionState {
     grindTunerSliderDrag: null,
     bassTunerSliderDrag: null,
     metalTunerSliderDrag: null,
+    grainTunerSliderDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -1136,6 +1149,44 @@ export function attachInteraction(
           break;
         case 'copy':
           copyMetalTuning(graph, metalTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open grain-tuning popup (ui/grainTuner.ts) — same shape as the
+    // grind/bass/metal-tuning popups just above.
+    const grainTunerHit = hitTestGrainTunerPopup(graph, point);
+    if (grainTunerHit) {
+      switch (grainTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(grainTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'checkbox':
+          toggleGrainTunerExposed(grainTunerHit.entityId, grainTunerHit.key);
+          break;
+        case 'slider':
+          canvas.setPointerCapture(e.pointerId);
+          setGrainTunerValue(graph, grainTunerHit.entityId, grainTunerHit.key, grainTunerHit.value);
+          state.grainTunerSliderDrag = { entityId: grainTunerHit.entityId, key: grainTunerHit.key, target: 'value' };
+          break;
+        case 'minCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setGrainTunerMin(graph, grainTunerHit.entityId, grainTunerHit.key, grainTunerHit.value);
+          state.grainTunerSliderDrag = { entityId: grainTunerHit.entityId, key: grainTunerHit.key, target: 'min' };
+          break;
+        case 'maxCaret':
+          canvas.setPointerCapture(e.pointerId);
+          beginGrainTunerMaxDrag(grainTunerHit.entityId, grainTunerHit.key);
+          setGrainTunerMax(graph, grainTunerHit.entityId, grainTunerHit.key, grainTunerHit.value);
+          state.grainTunerSliderDrag = { entityId: grainTunerHit.entityId, key: grainTunerHit.key, target: 'max' };
+          break;
+        case 'copy':
+          copyGrainTuning(graph, grainTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
@@ -2085,6 +2136,17 @@ export function attachInteraction(
       return;
     }
 
+    if (state.grainTunerSliderDrag) {
+      const { entityId, key, target } = state.grainTunerSliderDrag;
+      const value = grainTunerRawValueAtPoint(graph, entityId, key, point);
+      if (value !== null) {
+        if (target === 'value') setGrainTunerValue(graph, entityId, key, value);
+        else if (target === 'min') setGrainTunerMin(graph, entityId, key, value);
+        else setGrainTunerMax(graph, entityId, key, value);
+      }
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2451,6 +2513,12 @@ export function attachInteraction(
     if (state.metalTunerSliderDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.metalTunerSliderDrag = null;
+      return;
+    }
+
+    if (state.grainTunerSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.grainTunerSliderDrag = null;
       return;
     }
 

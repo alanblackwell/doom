@@ -144,9 +144,9 @@ Placeholders for larger features to elaborate on when we get to each one.
    captured buffer starting there. `level`/`density`/`grainLength` are
    control-dots (`ui/controlSpecs.ts`'s `grain` entry); every other constant
    (position/pitch jitter, envelope fade, the density-to-interval mapping)
-   is tuned in `audio/grainPlayer.ts`'s own `GRAIN_TUNING` only — no by-ear
-   tuning organelle built for this voice yet, unlike grind/bass/metal (a
-   natural follow-up, reusing `ui/tuningOrganelle.ts`). A point's vertical
+   is by-ear tunable through `ui/grainTuner.ts`'s own tuning organelle
+   (`audio/grainPlayer.ts`'s `GRAIN_TUNING`, reusing `ui/tuningOrganelle.ts`
+   same as grind/bass/metal) but has no control-dot of its own yet. A point's vertical
    position is currently cosmetic only (every point reads the full-band
    capture regardless of where it was clicked); a later per-point
    bandpass-by-height idea was discussed but deliberately deferred.

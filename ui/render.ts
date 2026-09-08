@@ -43,6 +43,7 @@ import { drawGrainSamplerPopup } from './grainSampler';
 import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
+import { drawGrainTunerPopup } from './grainTuner';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1202,6 +1203,14 @@ export function renderFrame(
             ? { key: interaction.metalTunerSliderDrag.key, target: interaction.metalTunerSliderDrag.target as 'min' | 'max' }
             : null;
         drawMetalTunerPopup(ctx, graph, feature, owner, now, metalCaretDrag, interaction.lastPointerPoint, drag);
+      } else if (feature.kind === 'grainTuning') {
+        const grainCaretDrag =
+          interaction.grainTunerSliderDrag &&
+          interaction.grainTunerSliderDrag.entityId === feature.id &&
+          interaction.grainTunerSliderDrag.target !== 'value'
+            ? { key: interaction.grainTunerSliderDrag.key, target: interaction.grainTunerSliderDrag.target as 'min' | 'max' }
+            : null;
+        drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

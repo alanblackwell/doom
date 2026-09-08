@@ -20,10 +20,9 @@
 // SCHEDULE_AHEAD_SECONDS, sample-accurate ctx-time scheduling) and the same
 // GRAIN_TUNING-constants-vs-control-dot split: `level`/`density`/`grainLength`
 // are audio/graph.ts's own control-dots (see ui/controlSpecs.ts's 'grain'
-// entry), everything below is tuned by eye/ear in this file only for now —
-// no by-ear tuning organelle (ui/tuningOrganelle.ts) built for this voice
-// yet, unlike grind/bass/metal, since this task was scoped to the
-// spectrogram+points editor and this engine only. A natural follow-up.
+// entry), everything below is by-ear tunable through ui/grainTuner.ts's own
+// tuning organelle (same ui/tuningOrganelle.ts factory grind/bass/metal use)
+// but has no control-dot of its own yet.
 
 import { getAudioContext } from './context';
 
@@ -44,17 +43,18 @@ export interface GrainPoint {
 }
 
 export interface GrainTuningParam {
-  value: number;
+  value: number; // current factory default — what a fresh instance seeds from
   min: number;
   max: number;
-  step: number;
-  label: string;
-  description: string;
+  step: number; // UI drag/readout granularity only, not enforced on live control-wire input
+  label: string; // shown in ui/grainTuner.ts's popup and as a ControlSpec label if exposed
+  exposed: boolean; // whether ui/controlSpecs.ts's 'grain' entry currently also lists this as a control-dot (kept in sync by hand — see this file's own header)
+  description: string; // shown as a hover tooltip over the label in ui/grainTuner.ts's popup — how this constant relates to scheduleGrain's own algorithm below, written to double as a source comment
 }
 
-// Internal-only constants (no control-dot, no tuning organelle yet — see
-// this file's own header) — tuned by ear against a handful of test
-// captures, not derived from anything.
+// By-ear-tunable constants (ui/grainTuner.ts's own organelle), none exposed
+// as a control-dot yet — tuned by ear against a handful of test captures,
+// not derived from anything.
 export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
   positionJitterSeconds: {
     value: 0.015,
@@ -62,6 +62,7 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 0.1,
     step: 0.001,
     label: 'position jitter',
+    exposed: false,
     description: "Random +/- offset (seconds) applied to a grain's own read position around whichever point it picked, so repeated grains from the same point don't read as an identical, looping fragment.",
   },
   pitchJitterFraction: {
@@ -70,6 +71,7 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 0.3,
     step: 0.01,
     label: 'pitch jitter',
+    exposed: false,
     description: "Random +/- playback-rate variation per grain, as a fraction of normal speed — keeps a dense cloud from all its grains reading as one exactly-repeating pitch.",
   },
   envelopeFadeFraction: {
@@ -78,7 +80,8 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 0.5,
     step: 0.01,
     label: 'envelope fade',
-    description: "Fraction of each grain's own (randomized-by-grainLength) duration spent fading in and fading back out, so no grain clicks at its own edges — same trapezoid-envelope idea as audio/grindPlayer.ts's own grainFade, just expressed as a fraction of a variable length rather than a fixed seconds value.",
+    exposed: false,
+    description: "Fraction of each grain's own (randomized-by-grainLength) duration spent fading in and fading back out, so no grain clicks at its own edges — same trapezoid-envelope idea as audio/grindPlayer.ts's own grainFade, just expressed as a fraction of a variable length rather than a fixed seconds value. Raising this widens each grain's overlap with its neighbors, which is the main lever for smoothing out an audible grain-rate pulse into a continuous texture.",
   },
   intervalAtDensity0: {
     value: 0.12,
@@ -86,6 +89,7 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 0.4,
     step: 0.001,
     label: 'interval @ density=0',
+    exposed: false,
     description: 'Gap between grains, in seconds, at density=0 — sparse, individually audible grains.',
   },
   intervalAtDensity1: {
@@ -94,6 +98,7 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 0.1,
     step: 0.001,
     label: 'interval @ density=1',
+    exposed: false,
     description: 'Gap between grains, in seconds, at density=1 — a dense, continuous cloud/texture.',
   },
   intervalJitterFraction: {
@@ -102,7 +107,8 @@ export const GRAIN_TUNING: Record<string, GrainTuningParam> = {
     max: 1,
     step: 0.01,
     label: 'interval jitter',
-    description: 'Random +/- variation on the grain interval, as a fraction of it — keeps even a fixed density from locking into an audible periodic tick, same reasoning as grindIntervalJitter.',
+    exposed: false,
+    description: 'Random +/- variation on the grain interval, as a fraction of it — keeps even a fixed density from locking into an audible periodic tick, same reasoning as grindIntervalJitter. Widening this randomizes grain ONSET times further, the other main lever (alongside envelope fade above) for breaking up a metronomic grain-rate pulse.',
   },
 };
 

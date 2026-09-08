@@ -663,6 +663,31 @@ graph.add({
   ownerId: 'grain-1',
   expanded: false,
 });
+// grain-1's own tuning organelle (EntityType 'feature', kind 'grainTuning' —
+// ui/grainTuner.ts): a by-ear tuning panel for every constant
+// audio/grainPlayer.ts's granular engine uses (GRAIN_TUNING), with a Copy
+// button that turns the current tuning into ready-to-paste source text. Same
+// organelle pattern as grind-1-tuning/bass-1-tuning/metal-1-tuning, and a
+// second feature on grain-1 alongside grain-1-editor above (ui/organelle.ts's
+// portholePosition lays out more than one feature's porthole side by side).
+// x/y/width/height/seed are unused for a feature entity, same as every other
+// feature in this file.
+graph.add({
+  id: 'grain-1-tuning',
+  type: 'feature',
+  kind: 'grainTuning',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 29,
+  docked: false,
+  ownerId: 'grain-1',
+  expanded: false,
+});
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.

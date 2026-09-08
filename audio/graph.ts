@@ -584,11 +584,18 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       const grainVoice = startGrainVoice(level, grainInitialParams);
       grainVoices.set(entity.id, grainVoice);
 
-      registerControls(entity.id, {
+      const grainControls: Record<string, (value: number) => void> = {
         level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
         density: (value) => grainVoice.set('density', value),
         grainLength: (value) => grainVoice.set('grainLength', value),
-      });
+      };
+      // Registered for EVERY tuning key regardless of its own `exposed` flag —
+      // same reasoning as 'grind' above: the live setter exists unconditionally
+      // so ui/grainTuner.ts's sliders always take immediate audible effect.
+      for (const key of GRAIN_TUNING_KEYS) {
+        grainControls[key] = (value) => grainVoice.set(key, value);
+      }
+      registerControls(entity.id, grainControls);
 
       return pauseGate;
     }
