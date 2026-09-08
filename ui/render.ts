@@ -1019,9 +1019,15 @@ export function renderFrame(
 
   // Dragged entity (and, if it's a container, its whole subtree — children
   // ride along rather than being left behind at their pre-drag position)
-  // drawn last, translated to the live pointer position, lifted above
-  // everything else regardless of where it started in the hierarchy.
+  // translated to the live pointer position. The delta is computed here
+  // since the controls/pad loop and drawWires below need it too, but the
+  // actual drawing is deferred past the feature-popup loop (see the
+  // drawDraggedSubtree call further down) so a source being dragged over an
+  // expanded organelle popup — e.g. dropping a sample onto the grain
+  // synth's "drag a source in to capture" popup — renders on top of that
+  // popup rather than getting drawn over by it.
   let dragDelta: { x: number; y: number } | null = null;
+  let draggedEntityForDraw: Entity | null = null;
   if (interaction.draggingId && interaction.dragPointer) {
     const entity = graph.get(interaction.draggingId);
     if (entity) {
@@ -1030,7 +1036,7 @@ export function renderFrame(
         x: interaction.dragPointer.x - original.x,
         y: interaction.dragPointer.y - original.y,
       };
-      drawDraggedSubtree(ctx, graph, entity, dragDelta, 0, true, drag);
+      draggedEntityForDraw = entity;
     }
   }
 
@@ -1209,6 +1215,14 @@ export function renderFrame(
     // visible affordance (close on click; for a beat-matcher, also a wire
     // jack) even once the popup is open, not just while collapsed.
     drawPorthole(ctx, graph, feature, owner, drag);
+  }
+
+  // Drawn last of all the canvas content — see this variable's own comment
+  // above for why the draw is deferred to here rather than happening
+  // alongside the delta computation: it needs to land on top of expanded
+  // feature popups (organelles), not underneath them.
+  if (dragDelta && draggedEntityForDraw) {
+    drawDraggedSubtree(ctx, graph, draggedEntityForDraw, dragDelta, 0, true, drag);
   }
 
   // A wash over everything drawn on the canvas so far (entities, wires,
