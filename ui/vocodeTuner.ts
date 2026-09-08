@@ -15,7 +15,7 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
 import { ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
-import { getEntityNodes, analyzeAndApplyVocode } from '../audio/graph';
+import { getEntityNodes, analyzeAndApplyVocode, setVocodeMode } from '../audio/graph';
 import { getAudioContext } from '../audio/context';
 import { getMasterChain } from '../audio/master';
 import { ACCENT } from './palette';
@@ -44,6 +44,14 @@ const LIVE_ANALYSER_FFT_SIZE = 8192;
 const TONE_GAIN = 0.12;
 const MONITOR_GAIN = 0.35;
 const REANALYZE_THROTTLE_MS = 80; // coalesces rapid marker-drag re-analysis, same idiom as audio/graph.ts's own reverb decay-regen throttle
+
+// The pedal's own resynthesis engines (audio/vocodePlayer.ts's oscillator/
+// formant-bank vocoder, audio/vocodeGranularPlayer.ts's granular/overlap-
+// add pitch shifter) — index into this array IS entity.params.mode
+// (audio/graph.ts's setVocodeMode). Extending this array is the whole
+// mechanism for offering further modes (e.g. a future WSOLA engine) the
+// same way.
+const VOCODE_MODES = ['vocoder', 'granular'] as const;
 
 function hzFromX(left: number, right: number, x: number): number {
   const t = right > left ? Math.min(1, Math.max(0, (x - left) / (right - left))) : 0;
@@ -240,6 +248,18 @@ export function reanalyzeVocodeTuner(graph: EntityGraph, featureEntityId: string
   });
 }
 
+// Advances the pedal's own resynthesis mode to the next entry in
+// VOCODE_MODES, wrapping around — same "click to cycle through a short
+// list of discrete states" idiom as ui/beatMatcher.ts's own
+// cycleBeatMatcherSpeed/PLAYBACK_SPEEDS.
+export function cycleVocodeMode(graph: EntityGraph, featureEntityId: string): void {
+  const feature = graph.get(featureEntityId);
+  const owner = feature ? ownerOf(graph, feature) : undefined;
+  if (!owner) return;
+  const current = owner.params.mode === 1 ? 1 : 0;
+  setVocodeMode(owner, (current + 1) % VOCODE_MODES.length);
+}
+
 // --- Geometry --------------------------------------------------------------
 
 export function vocodeTunerPopupRect(graph: EntityGraph, owner: Entity, drag?: DragContext, feature?: Entity): Rect {
@@ -262,6 +282,30 @@ function reanalyzeButtonRect(popup: Rect): Rect {
   return { x: popup.x, y: bottom - PADDING - REANALYZE_BUTTON_HEIGHT / 2, width: popup.width - PADDING * 2, height: REANALYZE_BUTTON_HEIGHT };
 }
 
+// The resynthesis-mode toggle — anchored off the popup's own close button,
+// same relative-positioning idiom as ui/beatMatcher.ts's own
+// speedControlPosition, so it sits in the title-bar row with no extra
+// popup height needed. A rect hit region (it shows a text label, not an
+// icon), same reasoning as ui/beatMatcher.ts's own hitTestSpeedControl.
+const MODE_CONTROL_WIDTH = 56; // wider than beat-matcher's own 22px speed control — "vocoder"/"granular" are longer labels than "1/1"
+const MODE_CONTROL_HEIGHT = 14;
+const MODE_CONTROL_GAP = 42; // from the close button's own center — clears both CLOSE_BUTTON_RADIUS and half this control's own width
+
+function modeControlPosition(popup: Rect): Point {
+  const close = closeButtonPosition(popup);
+  return { x: close.x - MODE_CONTROL_GAP, y: close.y };
+}
+
+function hitTestModeControl(popup: Rect, point: Point): boolean {
+  const p = modeControlPosition(popup);
+  return (
+    point.x >= p.x - MODE_CONTROL_WIDTH / 2 - 3 &&
+    point.x <= p.x + MODE_CONTROL_WIDTH / 2 + 3 &&
+    point.y >= p.y - MODE_CONTROL_HEIGHT / 2 - 3 &&
+    point.y <= p.y + MODE_CONTROL_HEIGHT / 2 + 3
+  );
+}
+
 const HANDLE_RADIUS = 7; // drawn size — matches ui/organelle.ts's own CLOSE_BUTTON_RADIUS for visual consistency
 const HANDLE_HIT_RADIUS = HANDLE_RADIUS + 4; // a little grabbier than its drawn size, same margin ui/organelle.ts's own close button uses
 
@@ -281,6 +325,7 @@ function markerHandleCenter(hist: Rect, axis: Rect, markerHz: number): Point {
 
 export type VocodeTunerHit =
   | { entityId: string; kind: 'close' }
+  | { entityId: string; kind: 'mode' }
   | { entityId: string; kind: 'marker'; hz: number }
   | { entityId: string; kind: 'reanalyze' }
   | { entityId: string; kind: 'background' };
@@ -298,6 +343,10 @@ export function hitTestVocodeTunerPopup(graph: EntityGraph, point: Point, drag?:
 
     if (dist(point, closeButtonPosition(popup)) <= CLOSE_BUTTON_RADIUS + 4) {
       return { entityId: entity.id, kind: 'close' };
+    }
+
+    if (hitTestModeControl(popup, point)) {
+      return { entityId: entity.id, kind: 'mode' };
     }
 
     const hist = histRect(popup);
@@ -401,6 +450,24 @@ export function drawVocodeTunerPopup(
   ctx.lineTo(close.x - 3, close.y + 3);
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.stroke();
+
+  // The resynthesis-mode toggle — same rounded-rect-label shape as
+  // ui/beatMatcher.ts's own drawSpeedControl, ACCENT-highlighted once
+  // switched away from the default (vocoder) mode so a glance at the
+  // title bar shows whether it's active.
+  const modeIndex = owner.params.mode === 1 ? 1 : 0;
+  const modeChanged = modeIndex !== 0;
+  const modePos = modeControlPosition(popup);
+  ctx.beginPath();
+  ctx.roundRect(modePos.x - MODE_CONTROL_WIDTH / 2, modePos.y - MODE_CONTROL_HEIGHT / 2, MODE_CONTROL_WIDTH, MODE_CONTROL_HEIGHT, 3);
+  ctx.strokeStyle = modeChanged ? ACCENT : 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = modeChanged ? 1.5 : 1;
+  ctx.stroke();
+  ctx.fillStyle = modeChanged ? ACCENT : 'rgba(255, 255, 255, 0.8)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(VOCODE_MODES[modeIndex], modePos.x, modePos.y + 0.5);
 
   const hist = histRect(popup);
   const histLeft = hist.x - hist.width / 2;

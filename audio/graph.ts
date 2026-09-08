@@ -23,6 +23,8 @@ import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
 import { METAL_TUNING, METAL_TUNING_KEYS } from './metalTuning';
 import { startVocodeVoice } from './vocodePlayer';
 import type { VocodeVoiceControls } from './vocodePlayer';
+import { startVocodeGranularVoice } from './vocodeGranularPlayer';
+import type { VocodeGranularVoiceControls } from './vocodeGranularPlayer';
 import { watchSound } from './nodeCapture';
 import type { LevelWatcher } from './nodeCapture';
 import { estimateF0, extractFormants } from '../ui/pitchAnalysis';
@@ -143,6 +145,38 @@ export function getVocodeVoice(entityId: string): VocodeVoiceControls | undefine
   return vocodeVoices.get(entityId);
 }
 
+// The 'vocode' pedal's OTHER resynthesis engine (audio/vocodeGranularPlayer.ts's
+// granular/overlap-add pitch shifter — ui/vocodeTuner.ts's mode toggle
+// switches between this and vocodeVoices above) — a separate registry
+// rather than folding the two into one map/shape, since vocodeVoices/
+// getVocodeVoice have no callers outside this file to worry about
+// disturbing, and each engine's own controls type is genuinely different.
+// Both engines run continuously regardless of which is selected — see
+// createVocodeFilter's own mode-select gain stage.
+const vocodeGranularVoices = new Map<string, VocodeGranularVoiceControls>();
+
+const VOCODE_MODE_SWITCH_FADE_SECONDS = 0.02; // short crossfade between modes, just enough to avoid a click
+
+// Crossfades the pedal's own mode-select gain stage (createVocodeFilter's
+// own vocoderModeGain/granularModeGain) and persists the choice on
+// entity.params.mode — a genuine first for this codebase (no existing kind
+// stores a discrete mode as a plain number) but it belongs on the entity's
+// own params rather than as organelle-local UI state (contrast the beat-
+// matcher's own ephemeral playbackSpeed, ui/beatMatcher.ts): this is
+// audio-engine-affecting state, same category as this pedal's own
+// params.f0. Called from ui/vocodeTuner.ts's own cycleVocodeMode.
+export function setVocodeMode(entity: Entity, mode: number): void {
+  const gains = vocodeModeGainsByEntity.get(entity.id);
+  if (!gains) return;
+  const ctx = getAudioContext();
+  const granular = mode === 1 ? 1 : 0;
+  gains.vocoderModeGain.gain.setTargetAtTime(1 - granular, ctx.currentTime, VOCODE_MODE_SWITCH_FADE_SECONDS);
+  gains.granularModeGain.gain.setTargetAtTime(granular, ctx.currentTime, VOCODE_MODE_SWITCH_FADE_SECONDS);
+  entity.params.mode = granular;
+}
+
+const vocodeModeGainsByEntity = new Map<string, { vocoderModeGain: GainNode; granularModeGain: GainNode }>();
+
 // A watcher waiting for a freshly-built 'vocode' pedal's contained source to
 // start sounding for the very first time, so createVocodeFilter's own
 // "auto-prime once" trigger can fire — see that function's own comment.
@@ -220,6 +254,10 @@ export function analyzeAndApplyVocode(
 
     liveNodes.input.disconnect(analyser);
     liveVoice.setFormants(formants);
+    // Kept in sync regardless of which resynthesis mode is currently
+    // selected (ui/vocodeTuner.ts's mode toggle) — both engines' own
+    // window/rate math depends on knowing the current f0.
+    vocodeGranularVoices.get(entity.id)?.setF0(f0);
     entity.params.f0 = f0;
     onDone?.({ f0, formants });
   }, fillDelayMs);
@@ -1487,14 +1525,30 @@ function createVocodeFilter(entity: Entity, input: GainNode): AudioNode {
   });
   vocodeVoices.set(entity.id, voice);
 
+  // The pedal's other resynthesis engine (audio/vocodeGranularPlayer.ts) —
+  // built and run alongside the oscillator/formant-bank one above
+  // regardless of which is currently selected (see the mode-select gain
+  // stage below); ui/vocodeTuner.ts's mode toggle just crossfades between
+  // their two already-live outputs.
+  const granularVoice = startVocodeGranularVoice(input);
+  granularVoice.setTargetPitch(entity.params.targetPitch ?? 110);
+  // Seeded from whatever was last locked in (persists on the entity itself
+  // across a rebuild, unlike the formant bank above, which has no simple
+  // persisted equivalent and really does start empty until the next
+  // auto-prime/re-analyze) — this engine's own window-length/rate math
+  // depends on f0 even before that next analysis runs.
+  granularVoice.setF0(entity.params.f0 ?? 110);
+  vocodeGranularVoices.set(entity.id, granularVoice);
+
   // Envelope follower: rectify (abs-value WaveShaper) + smooth (a slow
-  // lowpass) the live input, then connect that signal straight into
-  // voice.outputGate's own gain AudioParam — connecting an audio-rate
+  // lowpass) the live input, then connect that signal straight into both
+  // engines' own outputGate.gain AudioParam — connecting an audio-rate
   // signal into an AudioParam sums with its base .value, same idiom
-  // createModulatedDelay below uses for its own LFO. outputGate's base
-  // value is 0 (see startVocodeVoice's own comment), so the resynthesized
-  // output's level is driven almost entirely by this envelope rather than
-  // running open-loop regardless of whether anything's actually playing.
+  // createModulatedDelay below uses for its own LFO. Each outputGate's base
+  // value is 0 (see startVocodeVoice's own comment), so whichever engine's
+  // resynthesized output is level is driven almost entirely by this
+  // envelope rather than running open-loop regardless of whether anything's
+  // actually playing.
   const rectifier = ctx.createWaveShaper();
   rectifier.curve = ABS_CURVE;
   const envelopeSmoother = ctx.createBiquadFilter();
@@ -1507,6 +1561,7 @@ function createVocodeFilter(entity: Entity, input: GainNode): AudioNode {
   rectifier.connect(envelopeSmoother);
   envelopeSmoother.connect(envelopeScale);
   envelopeScale.connect(voice.outputGate.gain);
+  envelopeScale.connect(granularVoice.outputGate.gain);
 
   // Auto-prime: the first time the contained input actually sounds, take
   // one analysis snapshot (analyzeAndApplyVocode above) and lock it in — a
@@ -1538,15 +1593,33 @@ function createVocodeFilter(entity: Entity, input: GainNode): AudioNode {
   const outLevel = ctx.createGain();
   outLevel.gain.value = entity.params.level ?? 0.7;
 
+  // Mode-select: both engines' own outputGate feed the SAME wet bus, each
+  // through its own gain that setVocodeMode above crossfades between — the
+  // inactive engine keeps running (see startVocodeGranularVoice's own
+  // comment), just silent, so a mode switch is a plain gain crossfade with
+  // no node rebuild.
+  const vocoderModeGain = ctx.createGain();
+  const granularModeGain = ctx.createGain();
+  const initialMode = entity.params.mode === 1 ? 1 : 0;
+  vocoderModeGain.gain.value = initialMode === 0 ? 1 : 0;
+  granularModeGain.gain.value = initialMode === 1 ? 1 : 0;
+  voice.outputGate.connect(vocoderModeGain);
+  granularVoice.outputGate.connect(granularModeGain);
+  vocoderModeGain.connect(wet);
+  granularModeGain.connect(wet);
+  vocodeModeGainsByEntity.set(entity.id, { vocoderModeGain, granularModeGain });
+
   input.connect(dry);
   dry.connect(mixBus);
-  voice.outputGate.connect(wet);
   wet.connect(mixBus);
   mixBus.connect(outLevel);
 
   registerControls(entity.id, {
     level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
-    targetPitch: (value) => voice.set('targetPitch', value),
+    targetPitch: (value) => {
+      voice.set('targetPitch', value);
+      granularVoice.setTargetPitch(value);
+    },
     mix: (value) => {
       const m = Math.min(1, Math.max(0, value));
       dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
@@ -1842,9 +1915,13 @@ export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
   grainVoices.get(entity.id)?.stop();
   grainVoices.delete(entity.id);
   // Same reasoning, for a 'vocode' pedal's own oscillator plus (if it
-  // never fired) its still-pending auto-prime watcher.
+  // never fired) its still-pending auto-prime watcher, plus its other
+  // (granular) resynthesis engine and their shared mode-select gains.
   vocodeVoices.get(entity.id)?.stop();
   vocodeVoices.delete(entity.id);
+  vocodeGranularVoices.get(entity.id)?.stop();
+  vocodeGranularVoices.delete(entity.id);
+  vocodeModeGainsByEntity.delete(entity.id);
   vocodeAutoPrimeWatchers.get(entity.id)?.stop();
   vocodeAutoPrimeWatchers.delete(entity.id);
   activateEntity(entity, graph);

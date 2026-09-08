@@ -432,7 +432,7 @@ graph.add({
   kind: 'vocode',
   parentId: null,
   children: [],
-  params: { level: 0.7, targetPitch: 110, mix: 0.85 },
+  params: { level: 0.7, targetPitch: 110, mix: 0.85, mode: 0 },
   x: 1340,
   y: 380,
   width: 64,

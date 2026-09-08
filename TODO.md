@@ -155,8 +155,10 @@ Placeholders for larger features to elaborate on when we get to each one.
     `ui/vocodeTuner.ts`, `audio/graph.ts`'s `vocode` case) — a routable pedal
     (drag any drone source into it, same containment-as-wiring convention as
     `overdrive`/`growl`) that resynthesizes its contained source at a new,
-    independently controlled pitch while keeping its timbre. Deliberately
-    NOT real-time pitch tracking, and NOT PSOLA/grain-based: the input's
+    independently controlled pitch while keeping its timbre, in either of
+    two switchable resynthesis modes (`ui/vocodeTuner.ts`'s own mode
+    toggle, `audio/graph.ts`'s `setVocodeMode`/`entity.params.mode`) —
+    deliberately not real-time pitch *tracking* either way: the input's
     fundamental (f0) is estimated once via autocorrelation and locked
     (auto-primed the first time the contained source starts sounding), a
     formant filter bank is extracted from the same snapshot via cepstral
@@ -176,6 +178,28 @@ Placeholders for larger features to elaborate on when we get to each one.
     at all — every tap is transient, torn down the instant the popup
     closes; only the corrected f0 number (the pedal's own `params.f0`)
     survives, unlike `ui/grainSampler.ts`'s captured-and-kept spectrogram.
+
+    The second mode, `audio/vocodeGranularPlayer.ts`, is a genuinely
+    different DSP technique — time-domain granular/overlap-add pitch
+    shifting: continuously read overlapping windows of the *live* input
+    (a persistent `AnalyserNode`'s own `getFloatTimeDomainData`, same
+    zero-postMessage-overhead mechanism the f0-tuner's own live histogram
+    and `analyzeAndApplyVocode`'s one-shot snapshot already use — no new
+    AudioWorkletProcessor/WASM needed), play each window back through a
+    plain `AudioBufferSourceNode` at `targetPitch / f0` via
+    `playbackRate`, trapezoid-crossfaded on the same lookahead-scheduler
+    shape `audio/grainPlayer.ts`/`audio/grindPlayer.ts` already use.
+    Window length is chosen as a small multiple of the locked f0's own
+    pitch period — a cheap "PSOLA-lite" heuristic that reduces (not
+    eliminates) the comb-filtering/phasiness that comes from crossfading
+    windows that aren't aligned to the source's own periodicity. Both
+    engines run continuously regardless of which is selected; the mode
+    toggle is a plain gain crossfade between their two already-live
+    outputs, not a node rebuild. If phase artifacts are still audible,
+    WSOLA (a small per-grain correlation search for the best-aligned
+    splice point, needing no known f0 at all) is the natural next mode to
+    offer the same way — `ui/vocodeTuner.ts`'s `VOCODE_MODES` array is
+    built to extend.
 
 ## Next: a doom/industrial/drone sound palette
 

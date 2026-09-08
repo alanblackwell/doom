@@ -145,6 +145,7 @@ import {
   toggleGrainTunerExposed,
 } from './grainTuner';
 import {
+  cycleVocodeMode,
   hitTestVocodeTunerPopup,
   pressVocodeTunerHandle,
   reanalyzeVocodeTuner,
@@ -1228,6 +1229,9 @@ export function attachInteraction(
           break;
         case 'reanalyze':
           reanalyzeVocodeTuner(graph, vocodeTunerHit.entityId);
+          break;
+        case 'mode':
+          cycleVocodeMode(graph, vocodeTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
