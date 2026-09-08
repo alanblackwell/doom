@@ -46,6 +46,7 @@ import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
 import { drawGrainTunerPopup } from './grainTuner';
 import { drawVocodeTunerPopup, endVocodeTunerFrame } from './vocodeTuner';
+import { drawSynthConfigPopup, drawWaveGlyph } from './synthConfig';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -178,6 +179,8 @@ function drawEntity(
       drawSequencerBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
     } else if (entity.kind === 'beatMatcher') {
       drawBeatMatcherBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
+    } else if (entity.kind === 'lfo') {
+      drawLfo(ctx, entity, bounds, entity.id === interaction.selectedId);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }
@@ -603,6 +606,31 @@ function drawClock(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${bpm} BPM`, bounds.x, bounds.y + radius + 14);
+  ctx.restore();
+}
+
+// A shared LFO modulation source (audio/graph.ts's 'lfo' case): same body as
+// a knob, but a small drawn sine squiggle above it (ui/synthConfig.ts's own
+// waveform-glyph drawer — this control is always a sine, so just the one
+// glyph, not the full icon row that module's own popup shows) stands in for
+// the rotating dial pointer a knob has (no single dial position means
+// anything for a modulation rate), and its rate readout sits below, same
+// spot drawClock's BPM readout uses and for the same reason — the body's
+// own center is where the live rate dot/slider (drawn separately, in
+// renderFrame's overlay pass) sits.
+function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
+  const rate = entity.params.rate ?? 4;
+
+  drawWaveGlyph(ctx, { x: bounds.x, y: bounds.y - radius - 8 }, radius * 1.1, radius * 0.5, 'sine', false);
+  drawWireBump(ctx, bounds, 0);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${rate.toFixed(1)} Hz`, bounds.x, bounds.y + radius + 14);
   ctx.restore();
 }
 
@@ -1281,6 +1309,16 @@ export function renderFrame(
         drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
       } else if (feature.kind === 'vocodeTuner') {
         drawVocodeTunerPopup(ctx, graph, feature, owner, drag);
+      } else if (feature.kind === 'synthConfig') {
+        const activeDepthDrag =
+          interaction.synthConfigSliderDrag && interaction.synthConfigSliderDrag.entityId === feature.id
+            ? interaction.synthConfigSliderDrag.param
+            : null;
+        const wireDropTarget =
+          interaction.wireHoverTarget && interaction.wireHoverTarget.entityId === feature.id
+            ? interaction.wireHoverTarget.spec.param
+            : null;
+        drawSynthConfigPopup(ctx, graph, feature, owner, activeDepthDrag, wireDropTarget, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;

@@ -22,6 +22,7 @@ export const KIND_COLORS: Record<string, string> = {
   vocode: '#4a3a6e', // cold violet — robotic/resynthesized, distinct from flanger's own blue-violet
   ringmod: '#2c6a8a', // bright electric teal-blue — modulated/robotic, distinct from reverb's darker teal and vocode's violet
   bitcrush: '#5a8a2c', // acid/toxic green — digital glitch harshness, distinct from grain's olive and grind's rust
+  synth: '#2c4a8a', // a clean saturated blue — the "conventional" electronic voice, distinct from every other source's wood/steel/rust/violet hues
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

@@ -97,6 +97,10 @@ export const DOOM_LEVER_PITCH_TARGETS: Record<string, DoomLeverPitchTarget> = {
   kick: { param: 'pitch', minValue: 5, maxValue: 100 },
   pluck: { param: 'pitch', minValue: 5, maxValue: 200 },
   metal: { param: 'pitch', minValue: 5, maxValue: 400 },
+  // A conventional oscillator voice (audio/graph.ts's 'synth' case) — the
+  // widest pitch range of any TRIGGERED_KINDS voice here, since it's meant
+  // to cover a full melodic range rather than one instrument's own register.
+  synth: { param: 'pitch', minValue: 5, maxValue: 1000 },
   vocode: { param: 'targetPitch', minValue: 5, maxValue: 800 },
   ringmod: { param: 'frequency', minValue: 5, maxValue: 2000 },
   // Not a frequency at all — a playback-rate multiplier — but the same

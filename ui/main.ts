@@ -781,6 +781,97 @@ graph.add({
   ownerId: 'grain-1',
   expanded: false,
 });
+// A completely conventional oscillator+LFO synth voice (audio/graph.ts's
+// 'synth' case, ui/synthConfig.ts's own organelle) — up to four blended
+// native-oscillator waveforms, gated by the same ADSR-envelope-organelle
+// mechanism every other TRIGGERED_KINDS voice uses, pitched per-note from
+// the sequencer or the doom lever exactly like pluck-1/metal-1.
+graph.add({
+  id: 'synth-1',
+  type: 'source',
+  kind: 'synth',
+  parentId: null,
+  children: [],
+  params: { level: 0.6, pitch: 220 },
+  x: 2580,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 30,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// synth-1's own ADSR envelope organelle — same mechanism/defaults as
+// pluck-1-envelope above.
+graph.add({
+  id: 'synth-1-envelope',
+  type: 'feature',
+  kind: 'envelope',
+  parentId: null,
+  children: [],
+  params: { attack: 0.01, decay: 0.2, sustain: 0.6, release: 0.3, timeScale: 2 },
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 31,
+  docked: false,
+  ownerId: 'synth-1',
+  expanded: false,
+});
+// synth-1's own second feature (EntityType 'feature', kind 'synthConfig' —
+// ui/synthConfig.ts): the waveform-blend icon row plus vibrato/tremolo
+// LFO-depth ports. A second feature on the same owner, same "stacks
+// alongside the first" porthole layout as grain-1-editor/grain-1-tuning
+// above (ui/organelle.ts's portholePosition). sine starts as the only
+// enabled waveform (audio/graph.ts's createSynthVoice default) — no
+// waveform toggle state lives in THIS entity's own params, since toggling
+// writes through to synth-1's params instead (see toggleSynthWaveform's own
+// comment). Both depths default non-zero so wiring an LFO into either port
+// produces an audible effect immediately, rather than needing the slider
+// dragged up first — they sit dimmed either way (ui/synthConfig.ts's own
+// drawSynthConfigPopup) until a wire's actually connected, since neither
+// does anything on its own. x/y/width/height/seed are unused for a feature
+// entity, same as every other feature in this file.
+graph.add({
+  id: 'synth-1-config',
+  type: 'feature',
+  kind: 'synthConfig',
+  parentId: null,
+  children: [],
+  params: { vibratoDepth: 0.3, tremoloDepth: 0.3 },
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 32,
+  docked: false,
+  ownerId: 'synth-1',
+  expanded: false,
+});
+// A shared LFO modulation source (audio/graph.ts's 'lfo' case) — a Control
+// entity like knob-1/clock-1 above, but its own wire carries a real,
+// continuously-running audio-rate signal rather than a one-shot value-copy
+// (see ui/controlSpecs.ts's own 'lfo' comment). Drag a wire from its bump
+// onto synth-1-config's vibrato/tremolo depth dot (open synth-1's second
+// porthole first) to hear it. Left unwired by default.
+graph.add({
+  id: 'lfo-1',
+  type: 'control',
+  kind: 'lfo',
+  parentId: null,
+  children: [],
+  params: { rate: 4 },
+  x: 60,
+  y: 490,
+  width: 30,
+  height: 30,
+  seed: 33,
+  docked: false, // controls never dock — see ui/docking.ts's isDockable
+  ownerId: null,
+  expanded: false,
+});
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.

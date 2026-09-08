@@ -174,6 +174,13 @@ import {
   vocodeTunerHzAtPoint,
 } from './vocodeTuner';
 import {
+  hitTestSynthConfigPopup,
+  setSynthConfigValue,
+  synthConfigDepthAtPoint,
+  toggleSynthWaveform,
+} from './synthConfig';
+import { reconcileLfoWireTarget } from './lfoWiring';
+import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
@@ -485,6 +492,10 @@ export interface InteractionState {
   // this only needs to remember which feature entity's popup is being
   // dragged.
   vocodeMarkerDrag: { entityId: string } | null;
+  // A depth slider currently being dragged in an open synth-config popup
+  // (ui/synthConfig.ts) — entityId is the synthConfig FEATURE entity,
+  // param one of its two ControlSpec params ('vibratoDepth'/'tremoloDepth').
+  synthConfigSliderDrag: { entityId: string; param: string } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -667,6 +678,7 @@ export function createInteractionState(): InteractionState {
     metalTunerSliderDrag: null,
     grainTunerSliderDrag: null,
     vocodeMarkerDrag: null,
+    synthConfigSliderDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -711,6 +723,17 @@ export function applyControlValue(graph: EntityGraph, entityId: string, param: s
   // Safe from infinite recursion only because wire targets are restricted
   // to non-control entities (see the pointermove wiring-hover check below)
   // — a knob can never itself be a target, so this recurses at most once.
+  // An 'lfo' entity's own wires never go through this one-shot value-copy —
+  // its 'rate' is a live rate, not a modulation depth/target value, and the
+  // wire itself carries a real continuously-running audio-rate signal
+  // instead (see ui/lfoWiring.ts's reconcileLfoWireTarget and
+  // audio/graph.ts's reconcileSynthConfigModulation/reconcileLfoDotModulation).
+  // Without this guard, connecting an LFO to any target would immediately
+  // clobber that target's own value with 'rate' remapped into its range,
+  // the moment the wire lands (right below, at this function's own "apply
+  // immediately" call site in the wiring pointerup handler).
+  if (entity.kind === 'lfo') return;
+
   for (const wire of getWiresFrom(entityId)) {
     if (wire.sourceParam !== param) continue;
     const sourceSpec = controlsFor(entity.kind).find((s) => s.param === param);
@@ -1384,6 +1407,31 @@ export function attachInteraction(
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open synth-config popup (ui/synthConfig.ts) — the 'synth' voice's
+    // waveform-blend + LFO-depth-port organelle. Same priority as every
+    // other feature-kind popup above.
+    const synthConfigHit = hitTestSynthConfigPopup(graph, point);
+    if (synthConfigHit) {
+      switch (synthConfigHit.kind) {
+        case 'close': {
+          const feature = graph.get(synthConfigHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'waveformToggle':
+          toggleSynthWaveform(graph, synthConfigHit.entityId, synthConfigHit.wave);
+          break;
+        case 'depthSlider':
+          canvas.setPointerCapture(e.pointerId);
+          setSynthConfigValue(graph, synthConfigHit.entityId, synthConfigHit.param, synthConfigHit.value);
+          state.synthConfigSliderDrag = { entityId: synthConfigHit.entityId, param: synthConfigHit.param };
+          break;
+        // 'background' is absorbed with no further action, same as every
+        // other popup's own catch-all.
       }
       return;
     }
@@ -2393,6 +2441,13 @@ export function attachInteraction(
       return;
     }
 
+    if (state.synthConfigSliderDrag) {
+      const { entityId, param } = state.synthConfigSliderDrag;
+      const value = synthConfigDepthAtPoint(graph, entityId, point);
+      if (value !== null) setSynthConfigValue(graph, entityId, param, value);
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2796,6 +2851,12 @@ export function attachInteraction(
       return;
     }
 
+    if (state.synthConfigSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.synthConfigSliderDrag = null;
+      return;
+    }
+
     if (state.vocodeMarkerDrag) {
       canvas.releasePointerCapture(e.pointerId);
       releaseVocodeTunerHandle(state.vocodeMarkerDrag.entityId);
@@ -2873,6 +2934,11 @@ export function attachInteraction(
           // Apply immediately rather than waiting for the source to change
           // again — connecting a wire should show its effect right away.
           applyControlValue(graph, source.id, sourceSpec.param, source.params[sourceSpec.param] ?? sourceSpec.min);
+          // The real audio-rate connection an 'lfo' source's own wire needs
+          // — see ui/lfoWiring.ts's reconcileLfoWireTarget and
+          // applyControlValue's own 'lfo' guard above. A no-op unless this
+          // wire's source is actually an lfo.
+          reconcileLfoWireTarget(graph, state.wireHoverTarget.entityId, state.wireHoverTarget.spec.param);
         }
       }
       state.wiringFrom = null;
@@ -2968,6 +3034,7 @@ export function attachInteraction(
       if (endpoints && hitTestWireCurve(ctx2d, endpoints, point)) {
         e.preventDefault();
         removeWireTo(wire.targetEntityId, wire.targetParam);
+        reconcileLfoWireTarget(graph, wire.targetEntityId, wire.targetParam);
         return;
       }
     }
@@ -2987,6 +3054,7 @@ export function attachInteraction(
     if (hit) {
       e.preventDefault();
       removeWireTo(hit.entityId, hit.spec.param);
+      reconcileLfoWireTarget(graph, hit.entityId, hit.spec.param);
       return;
     }
 

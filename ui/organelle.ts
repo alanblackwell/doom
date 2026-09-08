@@ -122,14 +122,40 @@ export function popupRect(graph: EntityGraph, owner: Entity, drag?: DragContext,
   return popupRectFor(graph, owner, POPUP_WIDTH, POPUP_HEIGHT, drag, feature);
 }
 
+// Per-kind popup width/height, for the two generic cross-canvas functions
+// below (featureDotAbsolutePosition/hitTestFeatureDot) — every OTHER popup
+// module (melody, the tuning organelles, sampler, ...) draws/hit-tests its
+// own popup entirely itself, but a kind with a CONTROL_SPECS entry (so far
+// just 'envelope' and 'synthConfig') needs these two functions to agree
+// with that module's own drawing on exactly where its dots land, which
+// requires knowing that popup's real size — envelope's own POPUP_WIDTH/
+// POPUP_HEIGHT above was a fine default as long as it was the only kind
+// this mechanism ever served; a second kind (ui/synthConfig.ts) needs its
+// own entry instead of silently being measured against envelope's box.
+// Registered once, at module load, by whichever module owns that popup
+// (avoids organelle.ts importing every such module directly, which would
+// cycle back given ui/synthConfig.ts already imports FROM here).
+const FEATURE_POPUP_SIZE = new Map<string, { width: number; height: number }>();
+
+export function registerFeaturePopupSize(kind: string, width: number, height: number): void {
+  FEATURE_POPUP_SIZE.set(kind, { width, height });
+}
+
+function popupSizeFor(kind: string): { width: number; height: number } {
+  return FEATURE_POPUP_SIZE.get(kind) ?? { width: POPUP_WIDTH, height: POPUP_HEIGHT };
+}
+
 export function closeButtonPosition(popup: Rect): Point {
   return { x: popup.x + popup.width / 2 - 14, y: popup.y - popup.height / 2 + 12 };
 }
 
 // Index 0 (attack) nearest the popup's bottom edge, rising — same
 // bottom-up-column convention as controlSpecs.ts's dotPosition uses for a
-// box's own edge.
-function featureDotPosition(popup: Rect, index: number): Point {
+// box's own edge. Exported so another feature kind's own popup module
+// (currently just ui/synthConfig.ts) can lay its own connection dots out
+// identically to how featureDotAbsolutePosition/hitTestFeatureDot below
+// already expect them, without duplicating this math.
+export function featureDotPosition(popup: Rect, index: number): Point {
   return {
     x: popup.x - popup.width / 2 + DOT_COLUMN_INSET,
     y: popup.y + popup.height / 2 - DOT_BOTTOM_INSET - index * DOT_SPACING,
@@ -485,11 +511,12 @@ export function featureDotAbsolutePosition(
 ): Point | null {
   const owner = ownerOf(graph, entity);
   if (!owner) return null;
-  if (!entity.expanded) return portholePosition(graph, owner, drag);
+  if (!entity.expanded) return portholePosition(graph, owner, drag, entity);
   const specs = controlsFor(entity.kind);
   const index = specs.findIndex((s) => s.param === param);
   if (index === -1) return null;
-  return featureDotPosition(popupRect(graph, owner, drag), index);
+  const size = popupSizeFor(entity.kind);
+  return featureDotPosition(popupRectFor(graph, owner, size.width, size.height, drag, entity), index);
 }
 
 // Used for wiring a NEW connection in (dragging a wire's endpoint onto one
@@ -502,7 +529,8 @@ export function hitTestFeatureDot(graph: EntityGraph, point: Point, drag?: DragC
     if (entity.type !== 'feature' || !entity.expanded) continue;
     const owner = ownerOf(graph, entity);
     if (!owner) continue;
-    const popup = popupRect(graph, owner, drag);
+    const size = popupSizeFor(entity.kind);
+    const popup = popupRectFor(graph, owner, size.width, size.height, drag, entity);
     const specs = controlsFor(entity.kind);
     for (let i = 0; i < specs.length; i++) {
       const dot = featureDotPosition(popup, i);

@@ -86,7 +86,7 @@ export function setPan(entityId: string, value: number): void {
 // the graph is built. There's no event transport yet (ARCHITECTURE.md
 // §5.3) — this is the manual/interactive way to fire a hit until that
 // exists.
-export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample']);
+export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample', 'synth']);
 
 // Source kinds that play continuously as soon as their nodes are built,
 // rather than needing to be triggered (TRIGGERED_KINDS above) or acting as
@@ -845,6 +845,10 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         level: 0.8,
         exposeFeedback: true,
       });
+    // A completely conventional oscillator+LFO synth voice — see
+    // createSynthVoice's own header for the full shape.
+    case 'synth':
+      return createSynthVoice(entity, graph);
     // A dropped-in audio file (ui/sampleDrop.ts) or a recorded-and-trimmed
     // clip (ui/sampler.ts) — click-to-fire like kick, not a drone, so it's
     // in TRIGGERED_KINDS above. Unlike kick's synthesis, there's real
@@ -1140,6 +1144,328 @@ function createPluckVoice(entity: Entity, graph: EntityGraph, defaults: PluckVoi
   return level;
 }
 
+// The four native OscillatorNode waveforms a 'synth' voice can blend
+// together — ui/synthConfig.ts's own icon row toggles each one on/off
+// independently (entity.params[wave], 0 or 1), rather than picking a single
+// exclusive waveform, so a "square + sawtooth" blend is exactly as valid as
+// a plain sine.
+const SYNTH_WAVEFORMS = ['sine', 'square', 'sawtooth', 'triangle'] as const;
+type SynthWaveform = (typeof SYNTH_WAVEFORMS)[number];
+
+// Live oscillator/mix-gain handles for one 'synth' entity, kept around (not
+// just returned up through createGenerator's own AudioNode return) so
+// reconcileSynthConfigModulation below can patch an LFO's own oscillator
+// straight into them later, whenever a wire lands on/leaves this voice's
+// synthConfig organelle — long after createSynthVoice itself has returned.
+interface SynthVoiceNodes {
+  oscillators: Record<SynthWaveform, OscillatorNode>;
+  // Sum of every waveform's own (enable-gated) gain — tremoloDepth targets
+  // THIS gain's own AudioParam (an LFO summed onto it swings the whole
+  // voice's loudness); vibratoDepth targets each oscillator's own `detune`
+  // instead (see SYNTH_CONFIG_PORTS below).
+  mixGain: GainNode;
+}
+const synthVoicesByEntity = new Map<string, SynthVoiceNodes>();
+
+// A completely conventional oscillator+LFO synth voice: up to four blended
+// native OscillatorNode waveforms (SYNTH_WAVEFORMS above, individually
+// enabled/disabled via ui/synthConfig.ts's icon row), gated by the same
+// ADSR-envelope-organelle mechanism createPluckVoice's own voices use
+// (attack/decay/sustain ramps on gate-on, release ramp on gate-off), pitched
+// per-trigger from a sequencer note or the doom lever exactly like
+// pluck/metal. registerControls only covers `level` and each waveform's own
+// enable gain — pitch has no live setter (matching pluck/metal: it's read
+// fresh at trigger time, see registerTrigger below) and vibrato/tremolo
+// depth are pushed live through the synthConfig FEATURE entity's own
+// control setter (registered below, keyed by ITS id, not this voice's —
+// see ui/interaction.ts's applyControlValue, which resolves a wire target
+// by whatever entity id the wire actually names).
+function createSynthVoice(entity: Entity, graph: EntityGraph): AudioNode {
+  const ctx = getAudioContext();
+  const basePitch = entity.params.pitch ?? 220; // cello/guitar A, a reasonable default melodic register
+
+  const mixGain = ctx.createGain();
+  mixGain.gain.value = 1;
+
+  // sine alone is on by default — a plain tone until the synthConfig
+  // organelle's waveform row enables more.
+  const defaultEnabled: Record<SynthWaveform, number> = { sine: 1, square: 0, sawtooth: 0, triangle: 0 };
+  const oscillators = {} as Record<SynthWaveform, OscillatorNode>;
+  const waveGains = {} as Record<SynthWaveform, GainNode>;
+  for (const wave of SYNTH_WAVEFORMS) {
+    const osc = ctx.createOscillator();
+    osc.type = wave;
+    osc.frequency.value = basePitch;
+    const gain = ctx.createGain();
+    gain.gain.value = entity.params[wave] ?? defaultEnabled[wave];
+    osc.connect(gain);
+    gain.connect(mixGain);
+    osc.start();
+    oscillators[wave] = osc;
+    waveGains[wave] = gain;
+  }
+  synthVoicesByEntity.set(entity.id, { oscillators, mixGain });
+
+  const level = ctx.createGain();
+  level.gain.value = entity.params.level ?? 0.6;
+
+  // Same envelope-organelle wiring as createPluckVoice above — an extra
+  // gain stage between the raw voice and `level`, silent until gated on.
+  const envelope = graph.featuresOf(entity.id).find((f) => f.kind === 'envelope');
+  let tail: AudioNode = mixGain;
+  let envelopeGain: GainNode | undefined;
+  if (envelope) {
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    mixGain.connect(gain);
+    tail = gain;
+    envelopeGain = gain;
+
+    registerRelease(entity.id, (overrides) => {
+      const now = ctx.currentTime;
+      const release = Math.max(0.001, overrides?.envelope?.release ?? envelope.params.release ?? 0.3);
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + release);
+
+      const playback = envelopePlaybackByFeature.get(envelope.id);
+      if (playback) {
+        playback.gateOffAt = performance.now();
+        playback.release = release;
+      }
+    });
+  }
+  tail.connect(level);
+
+  registerTrigger(entity.id, (overrides) => {
+    const now = ctx.currentTime;
+    const freq = overrides?.pitchHz ?? entity.params.pitch ?? basePitch;
+    // A short glide, not an instant jump — same "glides slightly instead of
+    // clicking" reasoning as pluck/metal's own frequency setter, just via a
+    // native AudioParam ramp instead of a WASM message.
+    for (const wave of SYNTH_WAVEFORMS) {
+      oscillators[wave].frequency.setTargetAtTime(freq, now, 0.005);
+    }
+
+    if (envelope && envelopeGain) {
+      const attack = Math.max(0.001, overrides?.envelope?.attack ?? envelope.params.attack ?? 0.01);
+      const decay = Math.max(0.001, overrides?.envelope?.decay ?? envelope.params.decay ?? 0.2);
+      const sustain = Math.min(1, Math.max(0, overrides?.envelope?.sustain ?? envelope.params.sustain ?? 0.6));
+      const velocity = overrides?.velocity ?? 1;
+      envelopeGain.gain.cancelScheduledValues(now);
+      envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
+      envelopeGain.gain.linearRampToValueAtTime(velocity, now + attack);
+      envelopeGain.gain.linearRampToValueAtTime(sustain * velocity, now + attack + decay);
+
+      envelopePlaybackByFeature.set(envelope.id, {
+        gateOnAt: performance.now(),
+        attack,
+        decay,
+        gateOffAt: null,
+        release: 0,
+      });
+    }
+  });
+
+  const controls: Record<string, (value: number) => void> = {
+    level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+  };
+  for (const wave of SYNTH_WAVEFORMS) {
+    controls[wave] = (value) => waveGains[wave].gain.setTargetAtTime(value, ctx.currentTime, 0.01);
+  }
+  registerControls(entity.id, controls);
+
+  // The synthConfig organelle's own two depth params (vibratoDepth/
+  // tremoloDepth) are pushed live the same way any wired control-dot value
+  // is (ui/interaction.ts's applyControlValue: entity.params write + a
+  // registered control setter) — but keyed by the FEATURE's own entity id,
+  // since that's what a wire into it actually names as its target, not this
+  // voice's id. setSynthConfigDepth is a no-op until an LFO is actually
+  // wired in (see reconcileSynthConfigModulation below), same as every
+  // other "primed but not yet connected" control here.
+  const synthConfig = graph.featuresOf(entity.id).find((f) => f.kind === 'synthConfig');
+  if (synthConfig) {
+    registerControls(synthConfig.id, {
+      vibratoDepth: (value) => setSynthConfigDepth(synthConfig.id, 'vibratoDepth', value),
+      tremoloDepth: (value) => setSynthConfigDepth(synthConfig.id, 'tremoloDepth', value),
+    });
+  }
+
+  return level;
+}
+
+// Where each synthConfig depth port's own LFO connection actually lands, and
+// how far a depth of 1 (the port's own ControlSpec max — ui/controlSpecs.ts)
+// pushes that AudioParam. vibratoDepth's 50 cents at full depth is a
+// pronounced-but-musical vibrato; tremoloDepth's 1 swings the voice's own
+// mix gain the full ±1 around its resting value of 1 (silent at the
+// trough), a dramatic full-depth tremolo.
+const SYNTH_CONFIG_PORTS: Record<string, { target: 'detune' | 'gain'; scale: number }> = {
+  vibratoDepth: { target: 'detune', scale: 50 },
+  tremoloDepth: { target: 'gain', scale: 1 },
+};
+
+// entityId -> its own persistent LFO oscillator (audio/graph.ts's own 'lfo'
+// control case, see buildFromEntityGraph below) — a genuinely different
+// shape of "control source" than every other one in this file: it has to
+// keep RUNNING and be patchable straight into another entity's AudioParam,
+// not just write a value through ui/wiring.ts's one-shot copy mechanism
+// (see that module's own header). Read by reconcileSynthConfigModulation
+// below whenever a wire from an 'lfo'-kind entity lands on a synthConfig
+// port.
+const lfoOscillatorsByEntity = new Map<string, OscillatorNode>();
+
+// `${synthConfigEntityId}:${port}` -> the live depth-scaling GainNode
+// currently patched between that LFO's oscillator and the target AudioParam
+// — exists only while a wire from an 'lfo' actually occupies that port.
+const synthModConnections = new Map<string, { lfoEntityId: string; depthGain: GainNode }>();
+
+function synthModKey(synthConfigEntityId: string, port: string): string {
+  return `${synthConfigEntityId}:${port}`;
+}
+
+function disconnectSynthModulation(synthConfigEntityId: string, port: string): void {
+  const key = synthModKey(synthConfigEntityId, port);
+  const existing = synthModConnections.get(key);
+  if (!existing) return;
+  existing.depthGain.disconnect();
+  synthModConnections.delete(key);
+}
+
+// Live depth control for an already-connected port — a no-op (not an error)
+// if nothing's wired in yet, the same "primed but dormant until connected"
+// shape every other registered control setter in this file has. Called both
+// by createSynthVoice's own registered control setter (a manual depth-slider
+// drag, or an ordinary wire's value fanning through applyControlValue) and
+// by reconcileSynthConfigModulation itself, to prime a freshly-made
+// connection with whatever depth was already dialed in before the LFO was
+// ever wired up.
+function setSynthConfigDepth(synthConfigEntityId: string, port: string, depth: number): void {
+  const portSpec = SYNTH_CONFIG_PORTS[port];
+  const connection = synthModConnections.get(synthModKey(synthConfigEntityId, port));
+  if (!portSpec || !connection) return;
+  connection.depthGain.gain.setTargetAtTime(depth * portSpec.scale, getAudioContext().currentTime, 0.02);
+}
+
+// The one deliberate exception to this file's "never needs to know wires
+// exist" rule (ui/wiring.ts's own header) — an LFO's modulation has to be a
+// real, continuously-running Web Audio connection (an oscillator's own
+// audio-rate output summed straight into a target AudioParam), not the
+// one-shot value-copy every other wire uses. Called by
+// ui/lfoWiring.ts's reconcileLfoWireTarget, itself called from
+// ui/interaction.ts right after any wire add/remove — see that module for
+// why this narrow bridge lives on the UI-orchestration side rather than
+// this file importing ui/wiring.ts directly. `lfoEntityId` null means "no
+// LFO wired here right now" (or the
+// wire that was there just got removed) — always disconnects whatever was
+// there before, then reconnects only if a real LFO is now present, so
+// replacing one LFO with another (or with nothing) never leaves a stale
+// connection behind.
+export function reconcileSynthConfigModulation(
+  synthConfigEntityId: string,
+  port: string,
+  ownerEntityId: string,
+  lfoEntityId: string | null,
+  depth: number
+): void {
+  disconnectSynthModulation(synthConfigEntityId, port);
+  if (!lfoEntityId) return;
+
+  const portSpec = SYNTH_CONFIG_PORTS[port];
+  const lfoOsc = lfoOscillatorsByEntity.get(lfoEntityId);
+  const voice = synthVoicesByEntity.get(ownerEntityId);
+  if (!portSpec || !lfoOsc || !voice) return;
+
+  const ctx = getAudioContext();
+  const depthGain = ctx.createGain();
+  depthGain.gain.value = depth * portSpec.scale;
+  lfoOsc.connect(depthGain);
+
+  if (portSpec.target === 'detune') {
+    for (const wave of SYNTH_WAVEFORMS) depthGain.connect(voice.oscillators[wave].detune);
+  } else {
+    depthGain.connect(voice.mixGain.gain);
+  }
+
+  synthModConnections.set(synthModKey(synthConfigEntityId, port), { lfoEntityId, depthGain });
+}
+
+// The general case reconcileSynthConfigModulation above is a special
+// instance of: ANY plain control dot backed by a genuine native AudioParam
+// can be an LFO's target, not just synth-1's own two dedicated depth ports —
+// a resonant/tone filter's own cutoff (the classic auto-wah target) being
+// the obvious one. Two real differences from the synthConfig case keep this
+// a separate, simpler mechanism rather than a shared one:
+//   - one AudioParam per (entity, param) here, vs. vibratoDepth's four
+//     oscillator detunes at once — SYNTH_CONFIG_PORTS' own `target` union
+//     exists specifically to fan one connection out to all four.
+//   - no dedicated depth control exists on a plain dot the way synthConfig's
+//     own popup sliders do, so the sweep amount is a fixed proportion of the
+//     dot's own ControlSpec range (computed by the caller, ui/lfoWiring.ts,
+//     which is where controlsFor(...) already lives) rather than something
+//     this file can read live off an entity's own params.
+//
+// Registered by whichever createGenerator/createProcessor case actually has
+// a native AudioParam worth exposing this way — so far just overdrive/fuzz/
+// reverb's own `tone` lowpass cutoff. A kind that never registers one here
+// (most of them: everything driven by an AudioWorkletNode's message port,
+// like bow/pluck/growl/bass, has no real AudioParam to connect an
+// oscillator into at all) just makes reconcileLfoDotModulation below a
+// harmless no-op for it.
+const lfoTargetsByEntity = new Map<string, Record<string, AudioParam>>();
+
+function registerLfoTarget(entityId: string, param: string, audioParam: AudioParam): void {
+  const existing = lfoTargetsByEntity.get(entityId);
+  if (existing) existing[param] = audioParam;
+  else lfoTargetsByEntity.set(entityId, { [param]: audioParam });
+}
+
+// `${entityId}:${param}` -> the live depth-scaling GainNode currently
+// patched between an LFO's oscillator and the target AudioParam — same
+// shape as synthModConnections above, just keyed directly by the target
+// dot instead of a synthConfig port.
+const lfoDotConnections = new Map<string, { lfoEntityId: string; depthGain: GainNode }>();
+
+function lfoDotKey(entityId: string, param: string): string {
+  return `${entityId}:${param}`;
+}
+
+function disconnectLfoDotModulation(entityId: string, param: string): void {
+  const key = lfoDotKey(entityId, param);
+  const existing = lfoDotConnections.get(key);
+  if (!existing) return;
+  existing.depthGain.disconnect();
+  lfoDotConnections.delete(key);
+}
+
+// Called by ui/lfoWiring.ts's reconcileLfoWireTarget, the same "right after
+// any wire add/remove" bridge reconcileSynthConfigModulation above uses —
+// see that function's own comment for the add/remove/replace semantics,
+// identical here. `peakSwing` is in the target param's own raw units (e.g.
+// Hz for a filter cutoff), not a 0..1 depth — see this section's own header
+// for why that's computed by the caller rather than read live from here.
+export function reconcileLfoDotModulation(
+  entityId: string,
+  param: string,
+  lfoEntityId: string | null,
+  peakSwing: number
+): void {
+  disconnectLfoDotModulation(entityId, param);
+  if (!lfoEntityId) return;
+
+  const lfoOsc = lfoOscillatorsByEntity.get(lfoEntityId);
+  const audioParam = lfoTargetsByEntity.get(entityId)?.[param];
+  if (!lfoOsc || !audioParam) return;
+
+  const ctx = getAudioContext();
+  const depthGain = ctx.createGain();
+  depthGain.gain.value = peakSwing;
+  lfoOsc.connect(depthGain);
+  depthGain.connect(audioParam);
+
+  lfoDotConnections.set(lfoDotKey(entityId, param), { lfoEntityId, depthGain });
+}
+
 // Reusable short noise buffer for one-shot click/attack transients — plain
 // white noise, generated once rather than per-trigger.
 function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
@@ -1237,6 +1563,10 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
       const tone = ctx.createBiquadFilter();
       tone.type = 'lowpass';
       tone.frequency.value = entity.params.tone ?? 3000;
+      // A genuine native AudioParam — the classic auto-wah target. See
+      // registerLfoTarget's own header for why most other kinds' params
+      // can't offer this at all.
+      registerLfoTarget(entity.id, 'tone', tone.frequency);
 
       const level = ctx.createGain();
       level.gain.value = entity.params.level ?? 0.8;
@@ -1275,6 +1605,7 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
       const tone = ctx.createBiquadFilter();
       tone.type = 'lowpass';
       tone.frequency.value = entity.params.tone ?? 2500;
+      registerLfoTarget(entity.id, 'tone', tone.frequency);
 
       const level = ctx.createGain();
       level.gain.value = entity.params.level ?? 0.7;
@@ -1310,6 +1641,7 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
       const wetTone = ctx.createBiquadFilter();
       wetTone.type = 'lowpass';
       wetTone.frequency.value = entity.params.tone ?? 3500;
+      registerLfoTarget(entity.id, 'tone', wetTone.frequency);
 
       const wet = ctx.createGain();
       wet.gain.value = mix;
@@ -1918,6 +2250,22 @@ export async function buildFromEntityGraph(graph: EntityGraph): Promise<void> {
       } else if (entity.kind === 'beatMatcher') {
         const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'beatMatcher');
         if (feature) registerBeatMatcherForPlayback(entity.id, feature.id);
+      } else if (entity.kind === 'lfo') {
+        // Unlike every other Control kind, this one DOES need a real,
+        // permanently-running Web Audio node — see lfoOscillatorsByEntity's
+        // own comment above for why. Left unconnected to anything until a
+        // wire actually lands on a synthConfig depth port
+        // (reconcileSynthConfigModulation) — a plain running oscillator
+        // with nothing downstream is silent and harmless.
+        const ctx = getAudioContext();
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = entity.params.rate ?? 4;
+        osc.start();
+        lfoOscillatorsByEntity.set(entity.id, osc);
+        registerControls(entity.id, {
+          rate: (value) => osc.frequency.setTargetAtTime(value, ctx.currentTime, 0.01),
+        });
       }
       continue;
     }

@@ -222,6 +222,37 @@ overdrive: [
     { param: 'sustain', label: 'sustain', min: 0, max: 1, color: '#e0c840' },
     { param: 'release', label: 'release', min: 0.001, max: 15, color: '#5aa0c8' },
   ],
+  // A conventional oscillator+LFO synth voice (audio/graph.ts's 'synth'
+  // case, a TRIGGERED_KINDS voice like pluck/metal — see ui/synthConfig.ts
+  // for its own waveform-blend + LFO-routing organelle). Just `level` here:
+  // pitch is doom-lever-driven (ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS,
+  // same convention as every other pitched voice), and waveform mix/LFO
+  // depth live entirely in the synthConfig popup instead of this generic
+  // per-kind dot column.
+  synth: [{ param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' }],
+  // A shared modulation source (audio/graph.ts's 'lfo' case) — a Control
+  // entity like knob/clock, but its own live AudioParam value never gets
+  // copied through a wire the way a knob's does (see ui/wiring.ts's own
+  // header): it's wired into a synthConfig organelle's depth port instead,
+  // where audio/graph.ts makes a real, continuously-running Web Audio
+  // connection (reconcileSynthConfigModulation) rather than a one-shot
+  // value-copy. rate reuses chorus/flanger's own teal for the same "a
+  // frequency you're dialing in by ear" concept.
+  lfo: [{ param: 'rate', label: 'rate', min: 0.05, max: 20, color: '#5ac8a0' }],
+  // The 'synth' voice's own second organelle (ui/synthConfig.ts) — a
+  // waveform-blend selector plus two LFO-modulation input ports (vibrato:
+  // pitch, via each oscillator's own detune; tremolo: amplitude, via the
+  // voice's own mix gain). These two are wire TARGETS only, same as
+  // envelope's own params — a control-dot column entry gives them the
+  // generic wire-endpoint/porthole-convergence machinery (ui/organelle.ts's
+  // featureDotAbsolutePosition/hitTestFeatureDot, already kind-agnostic)
+  // for free, without this popup needing to reimplement any of it.
+  // vibratoDepth reuses chorus/flanger's own "depth" pink; tremoloDepth
+  // reuses volume's own amber, since what it's modulating IS a gain.
+  synthConfig: [
+    { param: 'vibratoDepth', label: 'vibrato depth', min: 0, max: 1, color: '#d87ab0' },
+    { param: 'tremoloDepth', label: 'tremolo depth', min: 0, max: 1, color: '#e0c840' },
+  ],
 };
 
 export function controlsFor(kind: string): ControlSpec[] {
