@@ -5,7 +5,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { PROCESSOR_KINDS } from '../audio/graph';
-import { controlsFor, dotPosition, CONTROL_HIT_RADIUS } from './controlSpecs';
+import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_CONTAINER_KINDS } from './controlSpecs';
 import { getTexture } from './textures';
 
 export interface Point {
@@ -126,8 +126,14 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // see controlSpecs.ts), so this guards against the reservation math
   // running against a feature's own unused x/y/width/height regardless.
   const specs = controlsFor(entity.kind);
-  const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
-  if (specs.length > 0 && entity.type !== 'control' && entity.type !== 'feature' && !isEmptyFilter) {
+  const isContainerKind = PROCESSOR_KINDS.has(entity.kind) || CONTROL_CONTAINER_KINDS.has(entity.kind);
+  const isEmptyFilter = isContainerKind && graph.childrenOf(entity.id).length === 0;
+  // A control-container kind (wander/jitter) reserves its own column the
+  // same as a plain source — see this function's own header for the
+  // "control-type entities skip this" reasoning, which is about a KNOB's
+  // single center dot specifically, not every control-type entity.
+  const isPlainControl = entity.type === 'control' && !CONTROL_CONTAINER_KINDS.has(entity.kind);
+  if (specs.length > 0 && !isPlainControl && entity.type !== 'feature' && !isEmptyFilter) {
     const baseRect = { x: pos.x, y: pos.y, width: size.width, height: size.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);

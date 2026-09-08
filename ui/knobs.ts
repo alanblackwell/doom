@@ -9,6 +9,7 @@
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { effectiveBounds } from './layout';
 import type { DragContext, Point, Rect } from './layout';
+import { CONTROL_CONTAINER_KINDS } from './controlSpecs';
 
 export function knobRadius(bounds: Rect): number {
   return Math.min(bounds.width, bounds.height) / 2;
@@ -64,8 +65,11 @@ export function hitTestWireHandle(
     // invisible, clickable phantom wire-start handle right on top of that
     // porthole. Same story for the beat-matcher (ui/beatMatcher.ts) — an
     // independent control kind, but it reuses this same bulge spot for its
-    // own porthole too.
-    if (entity.kind === 'sequencer' || entity.kind === 'beatMatcher') continue;
+    // own porthole too. A control-container kind (wander/jitter) has no
+    // bump either — it isn't itself a wire endpoint, just a box that
+    // modifies whatever's dropped into it (see CONTROL_CONTAINER_KINDS' own
+    // header); it draws via ui/render.ts's drawBox, not this module at all.
+    if (entity.kind === 'sequencer' || entity.kind === 'beatMatcher' || CONTROL_CONTAINER_KINDS.has(entity.kind)) continue;
     const bounds = effectiveBounds(graph, entity, drag);
     const handle = wireHandlePosition(bounds);
     if (Math.hypot(point.x - handle.x, point.y - handle.y) <= HANDLE_HIT_RADIUS) {

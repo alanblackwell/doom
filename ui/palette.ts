@@ -23,6 +23,8 @@ export const KIND_COLORS: Record<string, string> = {
   ringmod: '#2c6a8a', // bright electric teal-blue — modulated/robotic, distinct from reverb's darker teal and vocode's violet
   bitcrush: '#5a8a2c', // acid/toxic green — digital glitch harshness, distinct from grain's olive and grind's rust
   synth: '#2c4a8a', // a clean saturated blue — the "conventional" electronic voice, distinct from every other source's wood/steel/rust/violet hues
+  wander: '#4a5a6e', // cool slate-blue — a control container (ui/controlSpecs.ts's CONTROL_CONTAINER_KINDS), drawn hollow like a filter/pedal; "drift," distinct from every pedal's own warmer hues
+  jitter: '#6e4a4a', // dusty red-brown — the same hollow control-container treatment as wander, a duller red than growl/fuzz's own since this is "sloppy," not "hot"
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

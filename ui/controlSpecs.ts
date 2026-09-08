@@ -253,7 +253,50 @@ overdrive: [
     { param: 'vibratoDepth', label: 'vibrato depth', min: 0, max: 1, color: '#d87ab0' },
     { param: 'tremoloDepth', label: 'tremolo depth', min: 0, max: 1, color: '#e0c840' },
   ],
+  // A control-CONTAINING Control (audio/entityGraph.ts's containment reused
+  // for controls, not audio — see CONTROL_CONTAINER_KINDS' own header):
+  // continuously re-walks every contained control's own value (drawn via
+  // ui/interaction.ts's stepControlContainers) by a fresh Gaussian-sampled
+  // delta each step, so it drifts rather than jumping — a "sample and hold
+  // random LFO" idiom. rate reuses lfo's own teal ("a frequency you're
+  // dialing in by ear," same concept, just how often a fresh step is drawn
+  // rather than a continuous oscillation); amount reuses chorus/flanger's
+  // own depth pink (how big each step's neighbourhood is, as a fraction of
+  // the contained control's own range).
+  wander: [
+    { param: 'rate', label: 'rate', min: 0.05, max: 10, color: '#5ac8a0' },
+    { param: 'amount', label: 'amount', min: 0, max: 1, color: '#d87ab0' },
+  ],
+  // A control-containing Control like wander above, but for a contained
+  // tap/clock's own fired EVENTS rather than a continuous value: each firing
+  // is delayed by a random, Gaussian-magnitude offset (ui/interaction.ts's
+  // jitterDelayMs) instead of landing exactly on the beat/keypress — a
+  // "sloppy timing" humanizer. One-sided (always later, never earlier) —
+  // an event that already fired can't un-fire, so there's no way to honor a
+  // negative sample the way wander's own continuous value can. amount reuses
+  // bow pressure/grind's own "how far into the chaos" red, in seconds of
+  // jitter magnitude rather than a 0-1 fraction (there's no natural
+  // "full-scale" for a time offset the way a value dot's own min/max gives
+  // wander one).
+  jitter: [{ param: 'amount', label: 'amount', min: 0, max: 1, color: '#c85a5a' }],
 };
+
+// Control-CONTAINING Control kinds — the "control container" analog of
+// audio/graph.ts's PROCESSOR_KINDS (a sink+source pedal a Source can be
+// dropped into): a box a Control (knob/clock/tap/lfo/...) can be dropped
+// into, which then continuously modifies whatever's inside it rather than
+// passing audio through. Still `type: 'control'` (no audio output, no Web
+// Audio node — see audio/graph.ts's buildFromEntityGraph control-kind
+// switch, which needs no case for these, same as knob/tap's own no-op
+// entries there), but — unlike every OTHER control kind (knob/clock/tap/
+// lfo/sequencer/beatMatcher) — draws as a hollow box (ui/render.ts's
+// drawBox) and participates in containment/docking (ui/docking.ts's
+// isDockable, ui/interaction.ts's containerTarget) the same way a
+// PROCESSOR_KINDS pedal does, just gated on the DRAGGED entity being a
+// Control instead of a Source. Nesting one of these inside another is not
+// supported (ui/interaction.ts's containerTarget refuses it) — keeps "what
+// does dropping a wander into a jitter even mean" from ever coming up.
+export const CONTROL_CONTAINER_KINDS = new Set(['wander', 'jitter']);
 
 export function controlsFor(kind: string): ControlSpec[] {
   return CONTROL_SPECS[kind] ?? [];

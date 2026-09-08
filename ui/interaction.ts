@@ -32,6 +32,7 @@ import {
   valueFraction,
   valueFromTrackPosition,
 } from './controls';
+import { CONTROL_CONTAINER_KINDS } from './controlSpecs';
 import {
   DOOM_LEVER_GAUGE_RADIUS,
   DOOM_LEVER_LENGTH,
@@ -288,12 +289,26 @@ import {
 } from './beatMatcher';
 import type { BeatMatcherNoteSnapState, BeatMatcherVelocityTrack } from './beatMatcher';
 
-// Only sink+source ("pedal") kinds are valid containers — nesting one
-// instrument inside another has no coherent audio meaning (what would that
-// even route to?), so a drop onto a plain source is not a reparent: it's
-// just two boxes ending up visually overlapping at wherever it was dropped.
-function containerTarget(hit: Entity | null): Entity | null {
-  return hit && PROCESSOR_KINDS.has(hit.kind) ? hit : null;
+// Only sink+source ("pedal") kinds are valid containers for a dragged
+// Source/liveInput — nesting one instrument inside another has no coherent
+// audio meaning (what would that even route to?), so a drop onto a plain
+// source is not a reparent: it's just two boxes ending up visually
+// overlapping at wherever it was dropped.
+//
+// A dragged CONTROL, symmetrically, can only ever target a control-
+// CONTAINING control (wander/jitter, CONTROL_CONTAINER_KINDS — see that
+// set's own header) — never a PROCESSOR_KINDS pedal (audio routing has no
+// meaning for a Control, per ARCHITECTURE.md §3.2's containment-is-routing
+// rule) and never another control container (nesting one control container
+// inside another has no defined behavior, so it's refused the same way
+// nesting a pedal inside another instrument is above).
+function containerTarget(hit: Entity | null, dragged: Entity): Entity | null {
+  if (!hit) return null;
+  if (dragged.type === 'control') {
+    if (CONTROL_CONTAINER_KINDS.has(dragged.kind)) return null;
+    return CONTROL_CONTAINER_KINDS.has(hit.kind) ? hit : null;
+  }
+  return PROCESSOR_KINDS.has(hit.kind) ? hit : null;
 }
 
 export interface InteractionState {
@@ -784,34 +799,119 @@ function setDoomLeverAngle(graph: EntityGraph, entityId: string, angleDeg: numbe
 }
 
 // Fires a tap entity's single event, scheduled through the transport for
-// minimum jitter-free latency (audio/transport.ts's scheduleSoon) rather
-// than stamping the flash/triggering immediately — everything below should
-// visibly happen exactly when the event actually lands, not when the
-// tap/keypress happened. Reuses the existing triggerFlashes map (already
-// read by render.ts's drawPad/drawTap) rather than a parallel per-entity
-// flash store, for both the tap's own bump and any instrument it fires.
-function fireTap(entityId: string, state: InteractionState): void {
+// minimum latency (audio/transport.ts's scheduleSoon) rather than stamping
+// the flash/triggering immediately — everything below should visibly happen
+// exactly when the event actually lands, not when the tap/keypress
+// happened. Reuses the existing triggerFlashes map (already read by
+// render.ts's drawPad/drawTap) rather than a parallel per-entity flash
+// store, for both the tap's own bump and any instrument it fires.
+function fireTap(graph: EntityGraph, entityId: string, state: InteractionState): void {
   scheduleSoon(() => {
     const now = performance.now();
     state.triggerFlashes.set(entityId, now);
     recordSourcePulse(entityId, now); // ui/eventPulse.ts — animates any wire out of this tap's bump
-    fireEventWireTargets(entityId, state);
+    fireEventWireTargets(graph, entityId, state);
   });
 }
 
-// Fires every instrument wired from this event source's bump (right now,
-// not scheduled — callers that need scheduling, like fireTap above and
-// ui/clockPulse.ts's per-beat firing, already defer to the right moment
-// via scheduleSoon before calling this). Exported so the clock's own
-// recurring per-beat trigger can reuse the exact same firing path a tap's
-// one-off click/keypress uses, rather than duplicating it.
-export function fireEventWireTargets(entityId: string, state: InteractionState): void {
+// Standard-normal (mean 0, stddev 1) sample via Box-Muller — shared by
+// stepControlContainers' own wander walk and jitterDelayMs' own event
+// jitter below, the two consumers of CONTROL_CONTAINER_KINDS' "Gaussian
+// neighbourhood"/"Gaussian jitter" spec (see controlSpecs.ts's own 'wander'/
+// 'jitter' comments). Math.random() can return exactly 0, which would make
+// Math.log(u1) diverge to -Infinity — clamped away from that.
+function gaussianSample(): number {
+  const u1 = Math.max(Math.random(), 1e-9);
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// How long to defer this event source's firing before it actually reaches
+// its own wired targets — 0 unless it's sitting inside a 'jitter' control
+// container (CONTROL_CONTAINER_KINDS), in which case it's a random,
+// Gaussian-magnitude delay in milliseconds, scaled by that container's own
+// 'amount' (seconds). One-sided (|sample|, never negative) rather than a
+// genuine ± spread around the un-jittered onset — the onset has already
+// been decided (a keypress just happened, or the transport's own lookahead
+// already committed to this exact beat time), so there's no way to honor a
+// negative sample; only checks the IMMEDIATE parent, matching
+// containerTarget's own refusal to let one control container nest inside
+// another (so there's never a chain of these to walk).
+function jitterDelayMs(graph: EntityGraph, entityId: string): number {
+  const entity = graph.get(entityId);
+  const parent = entity?.parentId ? graph.get(entity.parentId) : undefined;
+  if (!parent || parent.kind !== 'jitter') return 0;
+  const amountSeconds = parent.params.amount ?? 0;
+  if (amountSeconds <= 0) return 0;
+  return Math.abs(gaussianSample()) * amountSeconds * 1000;
+}
+
+// Fires every instrument wired from this event source's bump — deferred by
+// jitterDelayMs above first, if this source sits inside a 'jitter' control
+// container. Exported so the clock's own recurring per-beat trigger
+// (ui/clockPulse.ts) can reuse the exact same firing path a tap's one-off
+// click/keypress uses (fireTap above), rather than duplicating it.
+export function fireEventWireTargets(graph: EntityGraph, entityId: string, state: InteractionState): void {
+  const delayMs = jitterDelayMs(graph, entityId);
+  if (delayMs > 0) {
+    setTimeout(() => fireEventWireTargetsNow(entityId, state), delayMs);
+    return;
+  }
+  fireEventWireTargetsNow(entityId, state);
+}
+
+function fireEventWireTargetsNow(entityId: string, state: InteractionState): void {
   for (const wire of getEventWiresFrom(entityId)) {
     // Trigger (TRIGGERED_KINDS) or toggle play/pause (CONTINUOUS_KINDS),
     // whichever this particular target actually is — see
     // audio/graph.ts's own comment on activateEventTarget.
     activateEventTarget(wire.targetEntityId);
     state.triggerFlashes.set(wire.targetEntityId, performance.now());
+  }
+}
+
+// How often (ms) a given (childId, param) pair sitting inside a 'wander'
+// control container is next due for a fresh Gaussian step — see
+// stepControlContainers below. Keyed by a plain string rather than a
+// nested Map since a child only ever has a handful of params, not enough to
+// justify the extra indirection.
+const wanderStepDueAt = new Map<string, number>();
+
+// Steps every 'wander' control container's contained controls by a fresh
+// Gaussian-sampled delta, at whatever cadence its own 'rate' dot specifies —
+// a "sample and hold random LFO" over each contained control's own value,
+// continuing from wherever that value currently sits (itself, not a
+// separate stored "center") rather than jumping to a freshly-centered
+// range each step, so a manual drag of the contained control's own dot
+// seamlessly becomes the walk's new starting point rather than being
+// fought/overwritten. Called once per animation frame from ui/main.ts's
+// draw loop, `now` the same performance.now() timestamp threaded through
+// renderFrame — cheap enough to just walk the whole graph every frame
+// rather than tracking which entities are inside a wander container as
+// they're dragged in/out.
+export function stepControlContainers(graph: EntityGraph, now: number): void {
+  for (const entity of graph.all()) {
+    if (entity.kind !== 'wander' || entity.docked) continue;
+    const rate = entity.params.rate ?? 0;
+    const amount = entity.params.amount ?? 0;
+    if (rate <= 0 || amount <= 0) continue;
+    const intervalMs = 1000 / rate;
+
+    for (const child of graph.childrenOf(entity.id)) {
+      if (child.type !== 'control' || CONTROL_CONTAINER_KINDS.has(child.kind)) continue;
+      for (const spec of controlsFor(child.kind)) {
+        const key = `${child.id}:${spec.param}`;
+        const dueAt = wanderStepDueAt.get(key) ?? 0;
+        if (now < dueAt) continue;
+        wanderStepDueAt.set(key, now + intervalMs);
+
+        const current = child.params[spec.param] ?? spec.min;
+        const range = spec.max - spec.min;
+        const delta = gaussianSample() * amount * range;
+        const next = Math.min(spec.max, Math.max(spec.min, current + delta));
+        applyControlValue(graph, child.id, spec.param, next);
+      }
+    }
   }
 }
 
@@ -2106,7 +2206,7 @@ export function attachInteraction(
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see
       // withinControlBody), not a smaller inset pad.
-      fireTap(hit.id, state);
+      fireTap(graph, hit.id, state);
     } else if (hit.kind === 'sequencer' && isWithinPad(effectiveBounds(graph, hit), point)) {
       // The sequencer's own center button — a small inset pad, same as a
       // 'sample' source's own center button above, not the tap's
@@ -2587,46 +2687,48 @@ export function attachInteraction(
     // dropped. No-op for a Control entity (knob/clock/tap — checked inside).
     applyPositionToMix(graph, canvas, entity.id, target);
 
-    // Control entities (knobs) never participate in containment — they're
-    // never a valid drop target for anything else (already excluded via
-    // containerTarget/PROCESSOR_KINDS), and dragging one around should
-    // never be interpreted as trying to drop it INTO a pedal either. Per
-    // ARCHITECTURE.md §3.2, a Control targets params by explicit reference
-    // (the wire), never by nesting.
+    // No Control (knob/clock/tap/lfo/sequencer/beatMatcher, or a control-
+    // CONTAINING control like wander/jitter, CONTROL_CONTAINER_KINDS) ever
+    // participates in the dock, or in an open beat-matcher/grain-editor
+    // popup's own "reference this as my capture source" drop (neither has
+    // any audio output to capture, and a Control never docks — see
+    // ui/docking.ts's isDockable). It CAN still target a control container
+    // though — the one deliberate exception to ARCHITECTURE.md §3.2's
+    // "a Control targets params by explicit reference (the wire), never by
+    // nesting" rule (see CONTROL_CONTAINER_KINDS' own header) — so this
+    // still falls through to the shared container-hover search below,
+    // rather than returning early the way it used to.
     if (entity.type === 'control') {
-      state.hoverTargetId = null;
-      state.hoverDock = false; // controls never dock — see ui/docking.ts's isDockable
+      state.hoverDock = false;
       state.hoverBeatMatcherId = null;
       state.hoverGrainId = null;
-      return;
-    }
+    } else {
+      // Dragging a Source/liveInput over an open beat-matcher popup (ui/
+      // beatMatcher.ts) references it as that beat-matcher's capture source
+      // on drop — not containment, so this is checked ahead of, and
+      // mutually exclusive with, the dock/container-hover checks below,
+      // same "one drop-target cue at a time" priority the dock check gets.
+      const beatMatcherId = beatMatcherDropTargetAt(graph, target) ?? beatMatcherDropTargetAt(graph, point);
+      if (beatMatcherId) {
+        state.hoverBeatMatcherId = beatMatcherId;
+        state.hoverGrainId = null;
+        state.hoverTargetId = null;
+        state.hoverDock = false;
+        return;
+      }
+      state.hoverBeatMatcherId = null;
 
-    // Dragging a Source/liveInput over an open beat-matcher popup (ui/
-    // beatMatcher.ts) references it as that beat-matcher's capture source on
-    // drop — not containment (a Control is never a container; see that
-    // file's own header), so this is checked ahead of, and mutually
-    // exclusive with, the dock/container-hover checks below, same
-    // "one drop-target cue at a time" priority the dock check gets.
-    const beatMatcherId = beatMatcherDropTargetAt(graph, target) ?? beatMatcherDropTargetAt(graph, point);
-    if (beatMatcherId) {
-      state.hoverBeatMatcherId = beatMatcherId;
+      // Same idiom, for an open grain-editor popup (ui/grainSampler.ts)
+      // instead — see hoverGrainId's own comment.
+      const grainId = grainSamplerDropTargetAt(graph, target) ?? grainSamplerDropTargetAt(graph, point);
+      if (grainId) {
+        state.hoverGrainId = grainId;
+        state.hoverTargetId = null;
+        state.hoverDock = false;
+        return;
+      }
       state.hoverGrainId = null;
-      state.hoverTargetId = null;
-      state.hoverDock = false;
-      return;
     }
-    state.hoverBeatMatcherId = null;
-
-    // Same idiom, for an open grain-editor popup (ui/grainSampler.ts)
-    // instead — see hoverGrainId's own comment.
-    const grainId = grainSamplerDropTargetAt(graph, target) ?? grainSamplerDropTargetAt(graph, point);
-    if (grainId) {
-      state.hoverGrainId = grainId;
-      state.hoverTargetId = null;
-      state.hoverDock = false;
-      return;
-    }
-    state.hoverGrainId = null;
 
     if (isDockable(entity) && isOverDock(canvas, graph, target, state.dockShowAll)) {
       state.hoverDock = true;
@@ -2673,8 +2775,8 @@ export function attachInteraction(
       // still visually overlaps the container keeps activating it too.
       const dragCtx: DragContext = { excludeId: entity.id, preview: null };
       hoverTarget =
-        containerTarget(hitTest(graph, point, exclude, dragCtx)) ??
-        containerTarget(hitTest(graph, target, exclude, dragCtx));
+        containerTarget(hitTest(graph, point, exclude, dragCtx), entity) ??
+        containerTarget(hitTest(graph, target, exclude, dragCtx), entity);
     }
 
     state.hoverTargetId = hoverTarget ? hoverTarget.id : null;
@@ -3362,7 +3464,7 @@ export function attachKeyboard(graph: EntityGraph, state: InteractionState): voi
 
     const entityId = getEntityForKey(e.code);
     if (entityId) {
-      fireTap(entityId, state);
+      fireTap(graph, entityId, state);
       e.preventDefault();
     }
   });

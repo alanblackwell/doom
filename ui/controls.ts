@@ -9,17 +9,23 @@ import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { PROCESSOR_KINDS } from '../audio/graph';
 import { effectiveBounds } from './layout';
 import type { DragContext, Point } from './layout';
-import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } from './controlSpecs';
+import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH, CONTROL_CONTAINER_KINDS } from './controlSpecs';
 import type { ControlSpec } from './controlSpecs';
 import { isControlEntity, knobValueDotPosition } from './knobs';
 import { featureDotAbsolutePosition } from './organelle';
 import { DOOM_LEVER_MAX_ANGLE, DOOM_LEVER_MIN_ANGLE, doomLeverAnchor, isWithinRivet } from './doomLever';
 
-// A knob's own dot sits at its body's center (see knobs.ts), not at
-// controlSpecs.ts's generic per-kind column position — every other kind
-// keeps the plain column layout.
+// A knob's own dot (and every other leaf control kind's — clock/tap/lfo/
+// sequencer/beatMatcher) sits at its body's center (see knobs.ts), not at
+// controlSpecs.ts's generic per-kind column position. A control-CONTAINING
+// control (wander/jitter, CONTROL_CONTAINER_KINDS) is the one exception —
+// it draws as a hollow box like a filter (ui/render.ts's drawBox), with its
+// own params (rate/amount) in the same left-edge column a filter's own
+// knobs use, not a single center dot.
 export function dotPositionFor(entity: Entity, bounds: Point & { width: number; height: number }, index: number): Point {
-  return isControlEntity(entity) ? knobValueDotPosition(bounds) : dotPosition(bounds, index);
+  return isControlEntity(entity) && !CONTROL_CONTAINER_KINDS.has(entity.kind)
+    ? knobValueDotPosition(bounds)
+    : dotPosition(bounds, index);
 }
 
 export type { ControlSpec } from './controlSpecs';
@@ -106,10 +112,14 @@ export function hitTestControl(
     if (entity.type === 'feature') continue;
     const specs = controlsFor(entity.kind);
     if (specs.length === 0) continue;
-    // Matches render.ts's drawControls: an empty filter's dots aren't
-    // drawn, so they shouldn't be hit-testable either — no invisible
-    // targets to stumble onto.
-    if (PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0) continue;
+    // Matches render.ts's drawControls: an empty filter (or empty control
+    // container — wander/jitter with nothing dropped in) has no dots drawn,
+    // so they shouldn't be hit-testable either — no invisible targets to
+    // stumble onto.
+    const isEmptyContainer =
+      (PROCESSOR_KINDS.has(entity.kind) || CONTROL_CONTAINER_KINDS.has(entity.kind)) &&
+      graph.childrenOf(entity.id).length === 0;
+    if (isEmptyContainer) continue;
 
     const bounds = effectiveBounds(graph, entity, drag);
     for (let i = 0; i < specs.length; i++) {

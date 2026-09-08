@@ -16,7 +16,13 @@ import {
 } from '../audio/beatMatcherPlayer';
 import { EntityGraph } from '../audio/entityGraph';
 import { renderFrame } from './render';
-import { attachInteraction, attachKeyboard, createInteractionState, updateSequencerDragAutoscroll } from './interaction';
+import {
+  attachInteraction,
+  attachKeyboard,
+  createInteractionState,
+  stepControlContainers,
+  updateSequencerDragAutoscroll,
+} from './interaction';
 import { attachClockPulse } from './clockPulse';
 import { attachSampleDrop } from './sampleDrop';
 import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
@@ -872,6 +878,53 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// A control-CONTAINING control (ui/controlSpecs.ts's CONTROL_CONTAINER_KINDS)
+// — same compact circular body as knob-1/clock-1/etc. above (drawn hollow —
+// see ui/render.ts's drawBox/isHollowContainer — rather than filled, until
+// something's dropped in), in the same left-hand control column, since it's
+// a Control like every other entity there, not a pedal. Drag knob-1 or
+// clock-1 into it once undocked: every param it has (knob-1's own 'value',
+// clock-1's own 'bpm') starts a fresh Gaussian random walk, re-stepped
+// 'rate' times/sec by up to 'amount' (a fraction of that param's own range)
+// each step — see ui/interaction.ts's stepControlContainers.
+graph.add({
+  id: 'wander-1',
+  type: 'control',
+  kind: 'wander',
+  parentId: null,
+  children: [],
+  params: { rate: 1, amount: 0.15 },
+  x: 60,
+  y: 560,
+  width: 30,
+  height: 30,
+  seed: 34,
+  docked: false, // controls never dock — see ui/docking.ts's isDockable
+  ownerId: null,
+  expanded: false,
+});
+// Same idiom as wander-1 above, but for a contained tap/clock's own fired
+// EVENTS rather than a continuous value — see ui/controlSpecs.ts's own
+// 'jitter' comment and ui/interaction.ts's jitterDelayMs. Drag tap-1 or
+// clock-1 into it once undocked: every firing lands a random, Gaussian-
+// magnitude delay late (never early — see jitterDelayMs' own comment) of up
+// to 'amount' seconds, instead of landing exactly on the keypress/beat.
+graph.add({
+  id: 'jitter-1',
+  type: 'control',
+  kind: 'jitter',
+  parentId: null,
+  children: [],
+  params: { amount: 0.08 },
+  x: 60,
+  y: 630,
+  width: 30,
+  height: 30,
+  seed: 35,
+  docked: false,
+  ownerId: null,
+  expanded: false,
+});
 
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.
@@ -910,7 +963,7 @@ const interaction = createInteractionState();
 attachTextureEditor(canvas, graph);
 attachInteraction(canvas, graph, interaction);
 attachKeyboard(graph, interaction);
-attachClockPulse('clock-1', interaction);
+attachClockPulse(graph, 'clock-1', interaction);
 attachBeatMatcherInteraction(interaction);
 attachBeatMatcherGraph(graph);
 attachSampleDrop(canvas, graph);
@@ -1064,6 +1117,7 @@ function draw(now: number): void {
   exportButton.disabled = !hasExportableSamples(graph);
   exportAppearanceButton.disabled = !hasExportableAppearance();
   updateSequencerDragAutoscroll(graph, interaction, now);
+  stepControlContainers(graph, now);
   renderFrame(ctx2d, canvas, graph, interaction, now);
   requestAnimationFrame(draw);
 }

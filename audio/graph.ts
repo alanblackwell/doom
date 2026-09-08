@@ -2458,6 +2458,14 @@ export function reparentEntity(id: string, newParentId: string | null): void {
 // once it does, since it's no longer docked by then.
 export function activateEntity(entity: Entity, graph: EntityGraph): void {
   if (!engineReady) return;
+  // Control entities (knobs, etc.) don't make or process sound — see
+  // buildFromEntityGraph's own matching skip above. Controls never dock
+  // (ui/docking.ts's isDockable), so this guard is only ever defensive —
+  // but cheap insurance against createNodes below being attempted against
+  // a kind it has no case for (e.g. a control-CONTAINING control like
+  // wander/jitter, ui/controlSpecs.ts's CONTROL_CONTAINER_KINDS, which
+  // never needs audio nodes of its own) if that ever changes.
+  if (entity.type === 'control') return;
 
   let nodes = nodesByEntity.get(entity.id);
   if (!nodes) {

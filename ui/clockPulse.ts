@@ -7,6 +7,7 @@
 // ui/interaction.ts's unified pad-drop-target handling), just one that
 // fires on a recurring schedule instead of a one-off tap/keypress.
 
+import type { EntityGraph } from '../audio/entityGraph';
 import { getAudioContext } from '../audio/context';
 import { onTick, SUBDIVISIONS_PER_BEAT } from '../audio/transport';
 import { fireEventWireTargets } from './interaction';
@@ -31,7 +32,7 @@ export function getBeatFlashGlow(now: number): number {
   return 1 - elapsed / FLASH_DURATION_MS;
 }
 
-export function attachClockPulse(entityId: string, state: InteractionState): void {
+export function attachClockPulse(graph: EntityGraph, entityId: string, state: InteractionState): void {
   onTick((tick, time) => {
     if (tick % SUBDIVISIONS_PER_BEAT !== 0) return; // downbeat only
 
@@ -44,7 +45,7 @@ export function attachClockPulse(entityId: string, state: InteractionState): voi
     setTimeout(() => {
       recordBeatFlash();
       recordSourcePulse(entityId, performance.now()); // ui/eventPulse.ts — animates any wire out of the clock's own bump
-      fireEventWireTargets(entityId, state);
+      fireEventWireTargets(graph, entityId, state);
     }, delayMs);
   });
 }

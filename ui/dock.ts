@@ -241,7 +241,9 @@ function drawDockIcon(ctx: CanvasRenderingContext2D, entity: Entity, rect: Rect,
   // fill (not the kind's own solid color) — rather than as a solid block
   // like a sound source, the same "empty until something's dropped in"
   // distinction ui/render.ts's own box drawing already makes for these on
-  // the main canvas, just carried into the dock's own iconography.
+  // the main canvas, just carried into the dock's own iconography. Control
+  // kinds (including a control container like wander/jitter) never dock at
+  // all — see ui/docking.ts's isDockable — so this never sees one.
   if (PROCESSOR_KINDS.has(entity.kind)) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — deliberately dark enough that white label text stays legible over any background image
     ctx.fillRect(left, top, rect.width, rect.height);

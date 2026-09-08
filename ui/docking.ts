@@ -11,13 +11,15 @@ import { removeEventWiresTo } from './eventWiring';
 import { stopCapture } from './sampler';
 import { stopGrainCapture } from './grainSampler';
 
-// Only a leaf, non-control entity can dock — a Control (knob/clock/tap) has
-// no independent sound to silence and isn't drawn as a box at all (see
-// ui/knobs.ts), so "park it in the dock" has no meaning for one. A
-// non-empty container (a pedal with something routed through it) can't dock
-// either: docking silences and detaches an entity on its own, and there's no
-// defined behavior yet for what should happen to whatever's nested inside
-// it — empty it out first, same as you'd have to before deleting it.
+// Only a leaf, non-control entity can dock — a Control (knob/clock/tap,
+// including a control-CONTAINING control like wander/jitter — see
+// ui/controlSpecs.ts's CONTROL_CONTAINER_KINDS) has no independent sound to
+// silence and lives in the left-hand control column instead (ui/main.ts),
+// so "park it in the dock" has no meaning for one. A non-empty container (a
+// pedal with something routed through it) can't dock either: docking
+// silences and detaches an entity on its own, and there's no defined
+// behavior yet for what should happen to whatever's nested inside it —
+// empty it out first, same as you'd have to before deleting it.
 export function isDockable(entity: Entity): boolean {
   return entity.type !== 'control' && entity.children.length === 0;
 }

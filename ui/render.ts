@@ -30,6 +30,7 @@ import {
   CONTROL_DOT_DROP_RADIUS,
   DOOM_LEVER_CONTROL_SPEC,
 } from './controls';
+import { CONTROL_CONTAINER_KINDS } from './controlSpecs';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { knobIndicatorAngle, wireHandlePosition, WIRE_BUMP_RADIUS } from './knobs';
 import { getAllWires, getWireTo } from './wiring';
@@ -177,7 +178,18 @@ function drawEntity(
   }
 
   if (entity.type === 'control') {
-    if (entity.kind === 'clock') {
+    if (CONTROL_CONTAINER_KINDS.has(entity.kind)) {
+      // A control-CONTAINING control (wander/jitter) — see
+      // drawControlContainer's own header for why it's an oval, not any of
+      // the fixed-circle bodies below or a PROCESSOR_KINDS pedal's box.
+      drawControlContainer(
+        ctx,
+        entity,
+        { x: bounds.x, y: bounds.y, width: bounds.width * scale, height: bounds.height * scale },
+        entity.id === interaction.selectedId,
+        entity.id === interaction.hoverTargetId
+      );
+    } else if (entity.kind === 'clock') {
       drawClock(ctx, entity, bounds, entity.id === interaction.selectedId, now);
     } else if (entity.kind === 'tap') {
       const highlighted = entity.id === interaction.selectedId || interaction.hoveredTapId === entity.id;
@@ -239,11 +251,16 @@ function drawControls(
 ): void {
   const specs = controlsFor(entity.kind);
   if (specs.length === 0) return;
-  // An empty filter has nothing routed through it yet for these params to
-  // affect — hiding them saves space and clutter until something's
-  // actually dropped in (see layout.ts's matching effectiveBounds
-  // exemption, which is what lets the box itself shrink to match).
-  if (PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0) return;
+  // An empty filter (or empty control container — wander/jitter with
+  // nothing dropped in) has nothing routed through/wrapped by it yet for
+  // these params to affect — hiding them saves space and clutter until
+  // something's actually dropped in (see layout.ts's matching
+  // effectiveBounds exemption, which is what lets the box itself shrink to
+  // match).
+  const isEmptyContainer =
+    (PROCESSOR_KINDS.has(entity.kind) || CONTROL_CONTAINER_KINDS.has(entity.kind)) &&
+    graph.childrenOf(entity.id).length === 0;
+  if (isEmptyContainer) return;
 
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i];
@@ -678,6 +695,61 @@ function drawTap(
   ctx.restore();
 }
 
+// A control-CONTAINING control (wander/jitter, CONTROL_CONTAINER_KINDS) —
+// round like every other control body above (drawControlBody), not
+// drawBox's jittered rectangle, so it reads as "a control" at a glance the
+// same way they do. Unlike them, it's hollow rather than solid-filled — the
+// same "empty until something's dropped in" idea drawBox's own
+// isHollowContainer gives a PROCESSOR_KINDS pedal — and an OVAL rather than
+// a fixed-radius circle: at rest it's a plain circle (bounds.width ===
+// bounds.height, its own 30x30 default in ui/main.ts), but
+// ui/layout.ts's effectiveBounds grows width/height independently once a
+// control is dropped in and its own rate/amount dots need room, so the
+// ellipse stretches to keep fully enclosing that rather than staying a
+// fixed circle the contents would spill out of — the direct oval analog of
+// a pedal's own growing rectangle. No wire-output bump (ui/knobs.ts's
+// hitTestWireHandle already excludes this kind from the wire-drag-start hit
+// test that draws one) — it isn't a wire source, it just modifies whatever
+// control is nested inside it.
+function drawControlContainer(
+  ctx: CanvasRenderingContext2D,
+  entity: Entity,
+  bounds: Rect,
+  selected: boolean,
+  dropTarget: boolean
+): void {
+  const baseColor = KIND_COLORS[entity.kind] ?? DEFAULT_COLOR;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 2;
+
+  ctx.beginPath();
+  ctx.ellipse(bounds.x, bounds.y, bounds.width / 2, bounds.height / 2, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — matches drawBox's own hollow-pedal fill
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  ctx.lineWidth = selected || dropTarget ? 2.5 : 1.5;
+  ctx.strokeStyle = selected || dropTarget ? ACCENT : shadeColor(baseColor, 1.3);
+  if (dropTarget) ctx.setLineDash([6, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // Below the shape, same spot drawClock/drawLfo put their own live readout
+  // — the body's own center is where the live rate/amount dot/slider
+  // (drawn separately, in renderFrame's overlay pass) sits once expanded.
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(entity.kind, bounds.x, bounds.y + bounds.height / 2 + 14);
+  ctx.restore();
+}
+
 // Wire opacity tracks the value actually being propagated along it — 25% at
 // the source param's minimum, 100% at its maximum — but only while that
 // param is actually being operated (hovered or dragged); otherwise the wire
@@ -900,8 +972,12 @@ function drawBox(
   // mass like a plain source/mixer. No id label (the box is about what's
   // inside it, not its own name) and the kind label sits in a top-left
   // corner that stays clear once contents grow the box, rather than a
-  // centered label that would get buried under whatever's dropped in.
-  const isFilter = PROCESSOR_KINDS.has(entity.kind);
+  // centered label that would get buried under whatever's dropped in. A
+  // control-CONTAINING control (wander/jitter, CONTROL_CONTAINER_KINDS)
+  // gets the same "hollow until something's dropped in" idea but drawn as
+  // an oval, not a box — see drawControlContainer below, which this
+  // module's own drawEntity dispatch routes it to instead.
+  const isHollowContainer = PROCESSOR_KINDS.has(entity.kind);
   // A user-customized texture (ui/textureEditor.ts) replaces the fill AND
   // the jittered-rect outline below — its own alpha channel defines the
   // visible silhouette (e.g. reshaping a filter's outline boundary),
@@ -930,7 +1006,7 @@ function drawBox(
       ctx.strokeRect(x - w / 2, y - h / 2, w, h);
       ctx.setLineDash([]);
     }
-  } else if (isFilter) {
+  } else if (isHollowContainer) {
     jitteredRectPath(ctx, x, y, w, h, entity.seed);
     ctx.shadowColor = 'transparent';
     ctx.lineWidth = flags.selected || flags.dropTarget ? 2.5 : 1.5;
@@ -963,7 +1039,7 @@ function drawBox(
     ctx.setLineDash([]);
   }
 
-  if (isFilter) {
+  if (isHollowContainer) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.font = '10px monospace';
     ctx.textAlign = 'left';
@@ -1391,16 +1467,24 @@ function drawDraggedSubtree(
 ): void {
   const bounds = effectiveBounds(graph, entity, drag);
   const scale = isRoot ? 1.06 : 1;
-  drawBox(
-    ctx,
-    entity,
-    bounds.x + delta.x,
-    bounds.y + delta.y,
-    bounds.width * scale,
-    bounds.height * scale,
-    depth,
-    { selected: isRoot, dropTarget: false, lifted: isRoot }
-  );
+  const scaledBounds = {
+    x: bounds.x + delta.x,
+    y: bounds.y + delta.y,
+    width: bounds.width * scale,
+    height: bounds.height * scale,
+  };
+  // A control-CONTAINING control (wander/jitter) keeps its own oval body
+  // while being dragged — see drawControlContainer's own header — rather
+  // than flashing over to drawBox's rectangle mid-drag and back on drop.
+  if (CONTROL_CONTAINER_KINDS.has(entity.kind)) {
+    drawControlContainer(ctx, entity, scaledBounds, isRoot, false);
+  } else {
+    drawBox(ctx, entity, scaledBounds.x, scaledBounds.y, scaledBounds.width, scaledBounds.height, depth, {
+      selected: isRoot,
+      dropTarget: false,
+      lifted: isRoot,
+    });
+  }
   for (const child of graph.childrenOf(entity.id)) {
     drawDraggedSubtree(ctx, graph, child, delta, depth + 1, false, drag);
   }
