@@ -15,11 +15,45 @@ import type { Point, Rect } from './layout';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 
 const COLUMN_WIDTH = 96; // one column's worth of panel width, same as the old fixed DOCK_WIDTH
-const DOCK_TOP_PADDING = 44; // room for the "DOCK" label above the first icon
+const DOCK_TOP_PADDING = 60; // room for the "DOCK" label + the "show all" toggle row above the first icon
 const DOCK_BOTTOM_PADDING = 12;
 const ICON_WIDTH = 56;
 const ICON_HEIGHT = 34;
 const ICON_GAP = 16;
+
+// Kinds hidden from the dock by default (still fully functional if dragged
+// out via "show all" — this only affects which icons are visible while
+// docked, nothing about the kind itself). A brand-new kind is NEVER added
+// here automatically — it shows by default the moment it's added anywhere
+// else in the app (ui/main.ts) — this set only grows when explicitly told
+// to demote a specific kind, same as ui/doomLever.ts's own
+// DOOM_LEVER_PITCH_TARGETS is hand-maintained rather than derived.
+export const LESS_USED_KINDS = new Set(['fuzz', 'flanger', 'growl', 'metal']);
+
+// The "show all" toggle row, just below the "DOCK" label — always at the
+// dock panel's own top, spanning its current width (whichever column count
+// that currently is) so it stays hit-testable/visible regardless of how
+// many columns are showing.
+const TOGGLE_ROW_HEIGHT = 16;
+const TOGGLE_ROW_Y_OFFSET = 26; // from the panel's own top
+
+export function dockShowAllToggleRect(canvas: HTMLCanvasElement, entityCount: number): Rect {
+  const panel = dockPanelRect(canvas, entityCount);
+  const top = panel.y - panel.height / 2;
+  return {
+    x: panel.x,
+    y: top + TOGGLE_ROW_Y_OFFSET + TOGGLE_ROW_HEIGHT / 2,
+    width: panel.width,
+    height: TOGGLE_ROW_HEIGHT,
+  };
+}
+
+export function isOverDockShowAllToggle(canvas: HTMLCanvasElement, entityCount: number, point: Point): boolean {
+  const rect = dockShowAllToggleRect(canvas, entityCount);
+  const left = rect.x - rect.width / 2;
+  const top = rect.y - rect.height / 2;
+  return point.x >= left && point.x <= left + rect.width && point.y >= top && point.y <= top + rect.height;
+}
 
 // How many icons fit in one column of a dock this tall. Always at least 1 —
 // a viewport too short to fit even one icon still shows one, just clipped,
@@ -62,8 +96,16 @@ export function dockPanelRect(canvas: HTMLCanvasElement, entityCount: number): R
   };
 }
 
-export function isOverDock(canvas: HTMLCanvasElement, graph: EntityGraph, point: Point): boolean {
-  const panel = dockPanelRect(canvas, graph.dockedEntities().length);
+// Docked entities actually shown right now — every less-used-kind entity
+// filtered out unless showAll is on. Shared by drawing, hit-testing, and
+// panel sizing so all three always agree on what's actually visible.
+export function shownDockedEntities(graph: EntityGraph, showAll: boolean): Entity[] {
+  const all = graph.dockedEntities();
+  return showAll ? all : all.filter((e) => !LESS_USED_KINDS.has(e.kind));
+}
+
+export function isOverDock(canvas: HTMLCanvasElement, graph: EntityGraph, point: Point, showAll: boolean): boolean {
+  const panel = dockPanelRect(canvas, shownDockedEntities(graph, showAll).length);
   const left = panel.x - panel.width / 2;
   const top = panel.y - panel.height / 2;
   return (
@@ -94,19 +136,21 @@ function dockIconRect(canvas: HTMLCanvasElement, index: number, entityCount: num
   };
 }
 
-// Entities currently shown in the dock — excludes whichever one (if any) is
-// actively being dragged out, since that one's drawn full-size via the
-// normal drag-overlay path instead (see ui/render.ts's drawDraggedSubtree).
+// Entities currently drawn as icons — shownDockedEntities, minus whichever
+// one (if any) is actively being dragged out, since that one's drawn
+// full-size via the normal drag-overlay path instead (see ui/render.ts's
+// drawDraggedSubtree).
 function visibleDockedEntities(graph: EntityGraph, interaction: InteractionState): Entity[] {
-  return graph.dockedEntities().filter((e) => e.id !== interaction.draggingId);
+  return shownDockedEntities(graph, interaction.dockShowAll).filter((e) => e.id !== interaction.draggingId);
 }
 
 export function hitTestDockIcon(
   graph: EntityGraph,
   canvas: HTMLCanvasElement,
-  point: Point
+  point: Point,
+  showAll: boolean
 ): Entity | null {
-  const entities = graph.dockedEntities();
+  const entities = shownDockedEntities(graph, showAll);
   for (let i = 0; i < entities.length; i++) {
     const rect = dockIconRect(canvas, i, entities.length);
     const left = rect.x - rect.width / 2;
@@ -125,7 +169,8 @@ export function drawDock(
   interaction: InteractionState,
   now: number
 ): void {
-  const panel = dockPanelRect(canvas, graph.dockedEntities().length);
+  const allDocked = shownDockedEntities(graph, interaction.dockShowAll);
+  const panel = dockPanelRect(canvas, allDocked.length);
   const left = panel.x - panel.width / 2;
   const top = panel.y - panel.height / 2;
 
@@ -153,8 +198,28 @@ export function drawDock(
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('DOCK', panel.x, top + 24);
 
+  // "Show all" toggle — a small checkbox + label row, right below the DOCK
+  // label. Ticked reveals every LESS_USED_KINDS icon too (see that set's own
+  // comment); unticked (the default) hides them, same idea as a DAW's own
+  // "hide unused tracks" toggle.
+  const toggleRect = dockShowAllToggleRect(canvas, allDocked.length);
+  const boxSize = 10;
+  const boxX = toggleRect.x - toggleRect.width / 2 + 14;
+  const boxY = toggleRect.y;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(boxX - boxSize / 2, boxY - boxSize / 2, boxSize, boxSize);
+  if (interaction.dockShowAll) {
+    ctx.fillStyle = ACCENT;
+    ctx.fillRect(boxX - boxSize / 2 + 2, boxY - boxSize / 2 + 2, boxSize - 4, boxSize - 4);
+  }
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('show all', boxX + boxSize / 2 + 6, boxY + 1);
+
   const entities = visibleDockedEntities(graph, interaction);
-  const allDocked = graph.dockedEntities();
   for (const entity of entities) {
     const index = allDocked.indexOf(entity);
     const rect = dockIconRect(canvas, index, allDocked.length);

@@ -57,7 +57,7 @@ import { eventWireEndpoints, hitTestWireCurve, valueWireEndpoints } from './wire
 import { bindKey, getEntityForKey } from './tapBindings';
 import { recordSourcePulse } from './eventPulse';
 import { scheduleSoon } from '../audio/transport';
-import { isOverDock, hitTestDockIcon } from './dock';
+import { isOverDock, hitTestDockIcon, isOverDockShowAllToggle, shownDockedEntities } from './dock';
 import { isDockable, dockEntity } from './docking';
 import { applyPositionToMix, clearLevelOverride, markLevelOverridden } from './stereoMix';
 import { isTextureEditorActive } from './textureEditor';
@@ -301,6 +301,10 @@ export interface InteractionState {
   // and the dragged entity is dockable (ui/docking.ts) — mutually exclusive
   // with hoverTargetId, same "one drop-target cue at a time" reasoning.
   hoverDock: boolean;
+  // Ticked = every ui/dock.ts LESS_USED_KINDS icon is shown too, not just
+  // the default set — a plain view toggle, not persisted per-entity state,
+  // same "session-local UI preference" footing as e.g. hoverDock itself.
+  dockShowAll: boolean;
   // The beat-matcher feature entity (ui/beatMatcher.ts) whose open popup the
   // drag is currently poised to drop a Source/liveInput onto, if any — a
   // reference, not containment (a Control is never a container), so it's
@@ -632,6 +636,7 @@ export function createInteractionState(): InteractionState {
     dragPointer: null,
     hoverTargetId: null,
     hoverDock: false,
+    dockShowAll: false,
     hoverBeatMatcherId: null,
     hoverGrainId: null,
     settleAnim: null,
@@ -1960,11 +1965,18 @@ export function attachInteraction(
       return;
     }
 
+    // The dock's own "show all" toggle (ui/dock.ts) — checked before the
+    // icons themselves since it sits inside the same panel, above them.
+    if (isOverDockShowAllToggle(canvas, shownDockedEntities(graph, state.dockShowAll).length, point)) {
+      state.dockShowAll = !state.dockShowAll;
+      return;
+    }
+
     // A docked instrument's icon (ui/dock.ts) — checked before the normal
     // canvas hitTest below since the dock panel visually sits on top of
     // everything else. Pressing it can only ever lead to a drag (undocking,
     // see finalizeDrop) or a plain select; it has no pad/controls to fire.
-    const dockHit = hitTestDockIcon(graph, canvas, point);
+    const dockHit = hitTestDockIcon(graph, canvas, point, state.dockShowAll);
     if (dockHit) {
       canvas.setPointerCapture(e.pointerId);
       pressId = dockHit.id;
@@ -2531,7 +2543,7 @@ export function attachInteraction(
     }
     state.hoverGrainId = null;
 
-    if (isDockable(entity) && isOverDock(canvas, graph, target)) {
+    if (isDockable(entity) && isOverDock(canvas, graph, target, state.dockShowAll)) {
       state.hoverDock = true;
       state.hoverTargetId = null;
       return;
