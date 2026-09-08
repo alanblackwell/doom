@@ -2231,7 +2231,7 @@ export function attachInteraction(
     }
     state.hoverGrainId = null;
 
-    if (isDockable(entity) && isOverDock(canvas, target)) {
+    if (isDockable(entity) && isOverDock(canvas, graph, target)) {
       state.hoverDock = true;
       state.hoverTargetId = null;
       return;

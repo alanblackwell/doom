@@ -13,11 +13,27 @@ import type { InteractionState } from './interaction';
 import type { Point, Rect } from './layout';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 
-export const DOCK_WIDTH = 96;
+const COLUMN_WIDTH = 96; // one column's worth of panel width, same as the old fixed DOCK_WIDTH
 const DOCK_TOP_PADDING = 44; // room for the "DOCK" label above the first icon
+const DOCK_BOTTOM_PADDING = 12;
 const ICON_WIDTH = 56;
 const ICON_HEIGHT = 34;
 const ICON_GAP = 16;
+
+// How many icons fit in one column of a dock this tall. Always at least 1 —
+// a viewport too short to fit even one icon still shows one, just clipped,
+// rather than dividing by a non-positive row count below.
+function maxRowsFor(viewportHeight: number): number {
+  const available = viewportHeight - DOCK_TOP_PADDING - DOCK_BOTTOM_PADDING;
+  return Math.max(1, Math.floor((available + ICON_GAP) / (ICON_HEIGHT + ICON_GAP)));
+}
+
+// Two columns only: once the second column's rows are exhausted too, later
+// icons overflow past the bottom rather than starting a third column — same
+// as a single column silently overflowing today, just delayed.
+function columnsFor(entityCount: number, viewportHeight: number): number {
+  return entityCount > maxRowsFor(viewportHeight) ? 2 : 1;
+}
 
 // The viewport is canvas's own parent (see index.html) — reading its
 // scroll position directly rather than threading it through renderFrame's
@@ -28,21 +44,25 @@ function viewportEl(canvas: HTMLCanvasElement): HTMLElement {
   return canvas.parentElement as HTMLElement;
 }
 
-// Center-based, matching layout.ts's Rect convention.
-export function dockPanelRect(canvas: HTMLCanvasElement): Rect {
+// Center-based, matching layout.ts's Rect convention. Widens to two columns
+// once there are more docked entities than fit in one column at this
+// viewport's height (see columnsFor) — entityCount is the caller's current
+// dockedEntities().length.
+export function dockPanelRect(canvas: HTMLCanvasElement, entityCount: number): Rect {
   const viewport = viewportEl(canvas);
-  const left = viewport.scrollLeft + viewport.clientWidth - DOCK_WIDTH;
+  const width = COLUMN_WIDTH * columnsFor(entityCount, viewport.clientHeight);
+  const left = viewport.scrollLeft + viewport.clientWidth - width;
   const top = viewport.scrollTop;
   return {
-    x: left + DOCK_WIDTH / 2,
+    x: left + width / 2,
     y: top + viewport.clientHeight / 2,
-    width: DOCK_WIDTH,
+    width,
     height: viewport.clientHeight,
   };
 }
 
-export function isOverDock(canvas: HTMLCanvasElement, point: Point): boolean {
-  const panel = dockPanelRect(canvas);
+export function isOverDock(canvas: HTMLCanvasElement, graph: EntityGraph, point: Point): boolean {
+  const panel = dockPanelRect(canvas, graph.dockedEntities().length);
   const left = panel.x - panel.width / 2;
   const top = panel.y - panel.height / 2;
   return (
@@ -50,15 +70,24 @@ export function isOverDock(canvas: HTMLCanvasElement, point: Point): boolean {
   );
 }
 
-// Stacked vertically from the panel's top, in graph insertion order — no
+// Stacked vertically within each column, in graph insertion order — no
 // reordering-by-drag support, dropping a docked icon back into the dock is
-// just a no-op (see ui/docking.ts).
-function dockIconRect(canvas: HTMLCanvasElement, index: number): Rect {
-  const panel = dockPanelRect(canvas);
+// just a no-op (see ui/docking.ts). Fills the rightmost column (the one
+// pinned to the viewport edge) top-to-bottom first, then flows overflow
+// into a second column that expands the panel leftward, so the icons
+// nearest the edge never shift position as more get docked.
+function dockIconRect(canvas: HTMLCanvasElement, index: number, entityCount: number): Rect {
+  const panel = dockPanelRect(canvas, entityCount);
   const top = panel.y - panel.height / 2;
+  const left = panel.x - panel.width / 2;
+  const rows = maxRowsFor(panel.height);
+  const totalColumns = panel.width / COLUMN_WIDTH;
+  const columnFromRight = Math.floor(index / rows);
+  const column = totalColumns - 1 - columnFromRight;
+  const row = index % rows;
   return {
-    x: panel.x,
-    y: top + DOCK_TOP_PADDING + index * (ICON_HEIGHT + ICON_GAP) + ICON_HEIGHT / 2,
+    x: left + column * COLUMN_WIDTH + COLUMN_WIDTH / 2,
+    y: top + DOCK_TOP_PADDING + row * (ICON_HEIGHT + ICON_GAP) + ICON_HEIGHT / 2,
     width: ICON_WIDTH,
     height: ICON_HEIGHT,
   };
@@ -78,7 +107,7 @@ export function hitTestDockIcon(
 ): Entity | null {
   const entities = graph.dockedEntities();
   for (let i = 0; i < entities.length; i++) {
-    const rect = dockIconRect(canvas, i);
+    const rect = dockIconRect(canvas, i, entities.length);
     const left = rect.x - rect.width / 2;
     const top = rect.y - rect.height / 2;
     if (point.x >= left && point.x <= left + rect.width && point.y >= top && point.y <= top + rect.height) {
@@ -95,7 +124,7 @@ export function drawDock(
   interaction: InteractionState,
   now: number
 ): void {
-  const panel = dockPanelRect(canvas);
+  const panel = dockPanelRect(canvas, graph.dockedEntities().length);
   const left = panel.x - panel.width / 2;
   const top = panel.y - panel.height / 2;
 
@@ -127,7 +156,7 @@ export function drawDock(
   const allDocked = graph.dockedEntities();
   for (const entity of entities) {
     const index = allDocked.indexOf(entity);
-    const rect = dockIconRect(canvas, index);
+    const rect = dockIconRect(canvas, index, allDocked.length);
     drawDockIcon(ctx, entity, rect, entity.id === interaction.selectedId);
   }
 
