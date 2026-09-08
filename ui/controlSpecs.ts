@@ -119,6 +119,29 @@ overdrive: [
     { param: 'targetPitch', label: 'target pitch', min: 20, max: 800, color: '#5aa0c8' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
+  // A ring modulator (audio/graph.ts's 'ringmod' case) — multiplies rather
+  // than filters, the inharmonic "robotic/metallic clang" effect nothing
+  // else here does. frequency reuses bass/bow/grind/vocode's own "pitch"
+  // blue since the carrier IS a pitch, just one that multiplies rather
+  // than sounds on its own; mix reuses growl's own dry/wet teal.
+  ringmod: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'frequency', label: 'carrier', min: 1, max: 2000, color: '#5aa0c8' },
+    { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
+  ],
+  // A bitcrusher (audio/graph.ts's 'bitcrush' case) — sample-rate
+  // reduction (dsp/worklets/bitcrush-processor.js) plus bit-depth
+  // reduction (a native WaveShaper curve), the other pillar of noise/
+  // industrial digital harshness alongside ringmod above. bits reuses
+  // overdrive/fuzz's own "how hard/crunchy is it" drive orange; rate
+  // reuses their tone purple, since it's a similarly cutoff-like
+  // frequency-domain dial; mix reuses growl's own dry/wet teal.
+  bitcrush: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'rate', label: 'sample rate', min: 200, max: 20000, color: '#c85ac8' },
+    { param: 'bits', label: 'bit depth', min: 1, max: 16, color: '#e0883c' },
+    { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
+  ],
   // A grain-cloud voice reading from a captured sample (audio/grainPlayer.ts,
   // audio/graph.ts's 'grain' case; ui/grainSampler.ts's popup is where the
   // capture and its point markers actually live — this voice has no

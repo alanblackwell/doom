@@ -20,6 +20,8 @@ export const KIND_COLORS: Record<string, string> = {
   sample: '#5a3a52', // dropped-in audio file — magenta-brown, distinct from every other kind's hue
   grain: '#4a5a2e', // olive/moss — a granular voice like grind, but distinct from its rust/industrial hue since the character comes from captured material, not noise
   vocode: '#4a3a6e', // cold violet — robotic/resynthesized, distinct from flanger's own blue-violet
+  ringmod: '#2c6a8a', // bright electric teal-blue — modulated/robotic, distinct from reverb's darker teal and vocode's violet
+  bitcrush: '#5a8a2c', // acid/toxic green — digital glitch harshness, distinct from grain's olive and grind's rust
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

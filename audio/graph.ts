@@ -469,7 +469,7 @@ export async function initAudioEngine(): Promise<void> {
   const ctx = getAudioContext();
 
   const wasmUrl = new URL('../dsp/rust/pkg/doom_dsp.wasm', import.meta.url);
-  const [, , , , , , wasmModule] = await Promise.all([
+  const [, , , , , , , wasmModule] = await Promise.all([
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/noise-processor.js', import.meta.url)
     ),
@@ -490,6 +490,12 @@ export async function initAudioEngine(): Promise<void> {
     // this way instead of via MediaRecorder.
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/capture-processor.js', import.meta.url)
+    ),
+    // Also plain JS, no WASM — see dsp/worklets/bitcrush-processor.js's own
+    // header comment on why its sample-and-hold decimation doesn't need it
+    // either.
+    ctx.audioWorklet.addModule(
+      new URL('../dsp/worklets/bitcrush-processor.js', import.meta.url)
     ),
     WebAssembly.compileStreaming(fetch(wasmUrl)),
   ]);
@@ -1149,7 +1155,7 @@ function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
 // Kinds that process `input` into `output` rather than just mixing it
 // through — exported so the renderer can mark these visually as sink+source
 // ("pedal") entities rather than plain sources/containers.
-export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl', 'vocode']);
+export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl', 'vocode', 'ringmod', 'bitcrush']);
 
 // Classic WaveShaperNode distortion curve (the one widely cited from
 // Kevin Ennis's WebAudio overdrive example) — soft-to-hard clipping
@@ -1381,6 +1387,10 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
       return createGrowlFilter(entity, input);
     case 'vocode':
       return createVocodeFilter(entity, input);
+    case 'ringmod':
+      return createRingModFilter(entity, input);
+    case 'bitcrush':
+      return createBitcrushFilter(entity, input);
     default:
       return null;
   }
@@ -1619,6 +1629,147 @@ function createVocodeFilter(entity: Entity, input: GainNode): AudioNode {
     targetPitch: (value) => {
       voice.set('targetPitch', value);
       granularVoice.setTargetPitch(value);
+    },
+    mix: (value) => {
+      const m = Math.min(1, Math.max(0, value));
+      dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
+      wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
+    },
+  });
+
+  return outLevel;
+}
+
+// A ring modulator: multiplies the input by a carrier oscillator (rather
+// than filtering/shaping it), the classic inharmonic "robotic/metallic
+// clang" effect (industrial — Skinny Puppy/NIN-adjacent — and dissonant
+// avant-garde metal alike) nothing else in this palette currently makes,
+// since nothing else does amplitude modulation. GainNode computes
+// output = input * gain; base gain value 0 plus ONE audio-rate signal
+// connected into that AudioParam makes the effective per-sample gain
+// literally BE the carrier's own waveform each sample — genuine
+// multiplication, not the additive LFO idiom createModulatedDelay below
+// (or audio/vocodePlayer.ts's envelope follower) uses elsewhere; the only
+// difference is what the gain's own base .value is (0 here vs a nonzero
+// baseline there). No worklet, no WASM — natively exact.
+function createRingModFilter(entity: Entity, input: GainNode): AudioNode {
+  const ctx = getAudioContext();
+
+  const carrier = ctx.createOscillator();
+  carrier.type = 'sine';
+  carrier.frequency.value = entity.params.frequency ?? 200;
+  carrier.start();
+
+  const ring = ctx.createGain();
+  ring.gain.value = 0; // carrier IS the effective gain — see this function's own header
+  input.connect(ring);
+  carrier.connect(ring.gain);
+
+  // Dry/wet mix, then a post-mix level — same shape as createGrowlFilter's
+  // own dry/wet/mixBus/outLevel.
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const mix = Math.min(1, Math.max(0, entity.params.mix ?? 0.8));
+  dry.gain.value = 1 - mix;
+  wet.gain.value = mix;
+
+  const mixBus = ctx.createGain();
+  const outLevel = ctx.createGain();
+  outLevel.gain.value = entity.params.level ?? 0.7;
+
+  input.connect(dry);
+  dry.connect(mixBus);
+  ring.connect(wet);
+  wet.connect(mixBus);
+  mixBus.connect(outLevel);
+
+  registerControls(entity.id, {
+    level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    frequency: (value) => carrier.frequency.setTargetAtTime(value, ctx.currentTime, 0.01),
+    mix: (value) => {
+      const m = Math.min(1, Math.max(0, value));
+      dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
+      wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
+    },
+  });
+
+  return outLevel;
+}
+
+// Fixed staircase-quantization curve for createBitcrushFilter's own
+// bit-depth reduction — same WaveShaperNode-as-lookup-table idiom as
+// makeOverdriveCurve/makeFuzzCurve above, just rounding to `2^bits`
+// discrete levels instead of clipping/folding. Rebuilt on every `bits`
+// control change (cheap — 1024 samples), same convention as those curves'
+// own live `drive`/`fuzz` updates.
+function makeBitcrushCurve(bits: number): Float32Array<ArrayBuffer> {
+  const samples = 1024;
+  const curve = new Float32Array(samples);
+  const levels = Math.max(2, Math.pow(2, Math.round(bits)));
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2) / samples - 1;
+    curve[i] = Math.round((x * levels) / 2) / (levels / 2);
+  }
+  return curve;
+}
+
+function bitcrushHoldSamples(sampleRate: number, rateHz: number): number {
+  return Math.max(1, Math.round(sampleRate / Math.min(sampleRate, Math.max(200, rateHz))));
+}
+
+// A bitcrusher: the other pillar of noise/industrial digital harshness
+// (Author & Punisher, digital hardcore/breakcore) alongside the ring
+// modulator above — two independent stages, each the cheapest tool that
+// actually does the job. Bit-depth reduction (the "stair-stepped
+// amplitude" half) is a pure lookup-table transform, so a native
+// WaveShaperNode (makeBitcrushCurve above) handles it with no worklet at
+// all. Sample-rate reduction (the "aliased/crunchy" half, and the actual
+// reason for dsp/worklets/bitcrush-processor.js to exist) genuinely needs
+// per-sample state — held value, tick counter — a native node has no way
+// to express; see that worklet's own header for why this doesn't need
+// WASM either. Conventional order: decimate first, then quantize, same as
+// a real lo-fi sampler's own ADC path.
+function createBitcrushFilter(entity: Entity, input: GainNode): AudioNode {
+  const ctx = getAudioContext();
+
+  const rateHz = entity.params.rate ?? 4000;
+  const decimator = new AudioWorkletNode(ctx, 'bitcrush-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+    processorOptions: { holdSamples: bitcrushHoldSamples(ctx.sampleRate, rateHz) },
+  });
+  input.connect(decimator);
+
+  const quantizer = ctx.createWaveShaper();
+  quantizer.curve = makeBitcrushCurve(entity.params.bits ?? 4);
+  decimator.connect(quantizer);
+
+  // Dry/wet mix, then a post-mix level — same shape as createGrowlFilter's
+  // own dry/wet/mixBus/outLevel.
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const mix = Math.min(1, Math.max(0, entity.params.mix ?? 0.85));
+  dry.gain.value = 1 - mix;
+  wet.gain.value = mix;
+
+  const mixBus = ctx.createGain();
+  const outLevel = ctx.createGain();
+  outLevel.gain.value = entity.params.level ?? 0.7;
+
+  input.connect(dry);
+  dry.connect(mixBus);
+  quantizer.connect(wet);
+  wet.connect(mixBus);
+  mixBus.connect(outLevel);
+
+  registerControls(entity.id, {
+    level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    rate: (value) => {
+      decimator.port.postMessage({ type: 'setHoldSamples', value: bitcrushHoldSamples(ctx.sampleRate, value) });
+    },
+    bits: (value) => {
+      quantizer.curve = makeBitcrushCurve(value);
     },
     mix: (value) => {
       const m = Math.min(1, Math.max(0, value));

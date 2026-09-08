@@ -466,6 +466,48 @@ graph.add({
   ownerId: 'vocode-1',
   expanded: false,
 });
+// A ring modulator (audio/graph.ts's 'ringmod' case): multiplies whatever's
+// dropped in by a sine carrier — the inharmonic "robotic/metallic clang"
+// this palette didn't have an amplitude-modulation effect for yet. Empty
+// until a source is dropped in, same convention as overdrive-1/reverb-1
+// above.
+graph.add({
+  id: 'ringmod-1',
+  type: 'source',
+  kind: 'ringmod',
+  parentId: null,
+  children: [],
+  params: { level: 0.7, frequency: 200, mix: 0.8 },
+  x: 1620,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 32,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// A bitcrusher (audio/graph.ts's 'bitcrush' case): sample-rate reduction
+// (dsp/worklets/bitcrush-processor.js) plus bit-depth reduction (a native
+// WaveShaper curve) — the other pillar of digital noise/industrial
+// harshness alongside ringmod-1 above. Empty until a source is dropped in,
+// same convention as overdrive-1/reverb-1 above.
+graph.add({
+  id: 'bitcrush-1',
+  type: 'source',
+  kind: 'bitcrush',
+  parentId: null,
+  children: [],
+  params: { level: 0.7, rate: 4000, bits: 4, mix: 0.85 },
+  x: 1900,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 33,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
 // any control dot on another entity. Drag from its small round bump

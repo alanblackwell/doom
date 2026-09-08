@@ -201,6 +201,66 @@ Placeholders for larger features to elaborate on when we get to each one.
     offer the same way — `ui/vocodeTuner.ts`'s `VOCODE_MODES` array is
     built to extend.
 
+11. **Ring modulator** (`audio/graph.ts`'s `ringmod` case,
+    `createRingModFilter`) — a routable pedal, same containment-as-wiring
+    convention as `overdrive`/`growl`. Multiplies the contained source by a
+    sine carrier rather than filtering/shaping it — the classic inharmonic
+    "robotic/metallic clang" effect (industrial, dissonant avant-garde
+    metal) nothing else in this palette did, since nothing else does
+    amplitude modulation. Fully native: a `GainNode` computes
+    `output = input * gain`, and with the gain's own base `.value` at 0,
+    connecting the carrier oscillator straight into that `AudioParam` makes
+    the effective per-sample gain literally *be* the carrier's own
+    waveform each sample — genuine multiplication, not the additive-LFO
+    idiom `chorus`/`flanger`/vocode's own envelope follower use (same
+    "connect a signal into an AudioParam" mechanism, different because of
+    what the base value is). No worklet, no WASM.
+
+12. **Bitcrusher** (`audio/graph.ts`'s `bitcrush` case,
+    `createBitcrushFilter`, `dsp/worklets/bitcrush-processor.js`) — the
+    other pillar of noise/industrial digital harshness (Author &
+    Punisher, digital hardcore/breakcore) alongside `ringmod` above. Two
+    independent stages, each the cheapest tool that does the job:
+    bit-depth reduction is a pure lookup-table transform, so a native
+    `WaveShaperNode` (`makeBitcrushCurve`, staircase-quantizes to `2^bits`
+    levels — same curve-rebuilt-on-control-change idiom as
+    `makeOverdriveCurve`/`makeFuzzCurve`) handles it with no worklet at
+    all; sample-rate reduction (the "aliased/crunchy" half) genuinely
+    needs per-sample state (a held value, a tick counter) a native node
+    can't express, so it's a small plain-JS `AudioWorkletProcessor` — no
+    WASM needed there either, same "trivial, purely-stateful
+    passthrough-shaped DSP" exception `dsp/worklets/capture-processor.js`
+    already established (see ARCHITECTURE.md §5.2 for when WASM actually
+    earns its keep). Signal order: decimate first, then quantize, same as
+    a real lo-fi sampler's own ADC path.
+
+13. **Noise gate** (not yet built) — the third genre-relevant effect
+    identified alongside `ringmod`/`bitcrush` above, deferred since it's
+    less flashy but still genuinely useful for tight, silence-between-
+    hits modern metal tone (djent/metalcore-style palm-mute chugs).
+    Web Audio's native `DynamicsCompressorNode` only compresses *above* a
+    threshold — there's no native node that mutes *below* one. Buildable
+    fully natively though, reusing the exact envelope-follower idiom
+    `audio/graph.ts`'s `createVocodeFilter` already has (rectify via a
+    `WaveShaperNode` abs-value curve + smooth via a lowpass
+    `BiquadFilterNode`, same `ABS_CURVE`/`VOCODE_ENVELOPE_LOWPASS_HZ`
+    machinery, reusable as-is): the difference is what happens to that
+    envelope signal before it reaches the output gain's own `AudioParam`.
+    Instead of feeding the raw envelope straight in (proportional,
+    additive — what the vocode pedal wants), reshape it through a SECOND
+    `WaveShaperNode` first — a sigmoid/smoothstep curve that maps envelope
+    values below the threshold to ~0 and above it to ~1 — before
+    connecting that into the target gain's `AudioParam`. That curve's own
+    steepness is the gate's attack character; the existing lowpass's own
+    cutoff is naturally its release/hold time, no separate timer needed.
+    Fully native, no worklet. Only fall back to a small worklet (rough
+    shape: track envelope state, compare to a threshold, ramp a gain
+    value with proper attack/hold/release timing) if the WaveShaper-curve
+    approximation doesn't sound tight/fast enough by ear — same
+    escalation path `bitcrush`'s own bit-depth-vs-sample-rate split
+    demonstrates (native first, worklet only for the piece that actually
+    needs per-sample state).
+
 ## Next: a doom/industrial/drone sound palette
 
 The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,
