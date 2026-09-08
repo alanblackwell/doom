@@ -9,6 +9,7 @@
 // geometry/rendering, parallel to controlSpecs.ts/pads.ts/knobs.ts).
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
+import { PROCESSOR_KINDS } from '../audio/graph';
 import type { InteractionState } from './interaction';
 import type { Point, Rect } from './layout';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
@@ -169,11 +170,26 @@ function drawDockIcon(ctx: CanvasRenderingContext2D, entity: Entity, rect: Rect,
   const top = rect.y - rect.height / 2;
 
   ctx.save();
-  ctx.fillStyle = shadeColor(baseColor, 0.85);
-  ctx.fillRect(left, top, rect.width, rect.height);
-  ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
-  ctx.lineWidth = selected ? 2 : 1;
-  ctx.strokeRect(left, top, rect.width, rect.height);
+  // A filter/pedal (PROCESSOR_KINDS, audio/graph.ts — overdrive/growl/
+  // vocode/...) has no sound of its own, only whatever's routed through
+  // it, so it's drawn "open" — a colored border with a translucent-black
+  // fill (not the kind's own solid color) — rather than as a solid block
+  // like a sound source, the same "empty until something's dropped in"
+  // distinction ui/render.ts's own box drawing already makes for these on
+  // the main canvas, just carried into the dock's own iconography.
+  if (PROCESSOR_KINDS.has(entity.kind)) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — deliberately dark enough that white label text stays legible over any background image
+    ctx.fillRect(left, top, rect.width, rect.height);
+    ctx.strokeStyle = selected ? ACCENT : baseColor;
+    ctx.lineWidth = selected ? 2 : 1.5;
+    ctx.strokeRect(left, top, rect.width, rect.height);
+  } else {
+    ctx.fillStyle = shadeColor(baseColor, 0.85);
+    ctx.fillRect(left, top, rect.width, rect.height);
+    ctx.strokeStyle = selected ? ACCENT : 'rgba(0, 0, 0, 0.6)';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(left, top, rect.width, rect.height);
+  }
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.font = '9px monospace';
