@@ -50,6 +50,17 @@ import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
 import type { SavedTexture } from './textures';
 import { drawTextureEditor } from './textureEditor';
+import {
+  dangerGlowOpacity,
+  doomLeverAnchor,
+  drawDoomLeverGauge,
+  drawDoomLeverRivet,
+  drawDoomLeverRod,
+  gaugeAlpha,
+  leverLengthFraction,
+  DOOM_LEVER_GAUGE_RADIUS,
+  DOOM_LEVER_LENGTH,
+} from './doomLever';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
 // resting at its center (see drawControls), a little lighter than the
@@ -296,6 +307,42 @@ function drawControls(
     ctx.fillText(`${spec.label} ${formatControlValue(currentValue)}`, track.x - 12, track.top - 6);
     ctx.restore();
   }
+}
+
+// The doom lever (ui/doomLever.ts) — every type:'source' entity (which
+// already covers filter/pedal kinds too, see PROCESSOR_KINDS's own
+// reasoning) gets a rivet at the center of its own bottom edge, always
+// visible, that expands on click into a pressure gauge plus a long
+// cylindrical lever swinging around that rivet as a pivot. Called from
+// renderFrame()'s final overlay pass, same reasoning as drawControls right
+// above — drawn on top of every box so it's never occluded by whatever's
+// nested/dropped into a filter beneath it. Draw order: gauge (bezel/face/
+// danger band/needle, together) -> external lever rod -> rivet on top of
+// everything, per the spec's own "gauge appears underneath the rivet head,
+// with the rivet at its centre."
+function drawEntityDoomLever(
+  ctx: CanvasRenderingContext2D,
+  entity: Entity,
+  bounds: Rect,
+  interaction: InteractionState,
+  now: number
+): void {
+  if (entity.type !== 'source') return;
+
+  const pivot = doomLeverAnchor(bounds);
+  const isExpanded = interaction.doomLeverExpanded.has(entity.id);
+  const transitionAt = interaction.doomLeverTransitionAt.get(entity.id);
+  const angle = entity.params.doomLeverAngle ?? 0;
+
+  const alpha = gaugeAlpha(isExpanded, transitionAt, now);
+  if (alpha > 0.01) {
+    const dangerGlow = dangerGlowOpacity(entity.id, angle, now);
+    drawDoomLeverGauge(ctx, pivot, DOOM_LEVER_GAUGE_RADIUS, angle, dangerGlow, alpha);
+    const length = DOOM_LEVER_LENGTH * leverLengthFraction(isExpanded, transitionAt, now);
+    drawDoomLeverRod(ctx, pivot, angle, DOOM_LEVER_GAUGE_RADIUS, length);
+  }
+
+  drawDoomLeverRivet(ctx, pivot);
 }
 
 // Center trigger pad for one-shot instruments (audio/graph.ts's
@@ -1071,6 +1118,7 @@ export function renderFrame(
         : bounds;
     drawControls(ctx, graph, entity, drawAt, interaction);
     drawPad(ctx, entity, drawAt, interaction, now);
+    drawEntityDoomLever(ctx, entity, drawAt, interaction, now);
   }
 
   // Internal-feature organelles (ui/organelle.ts) — a porthole inset in the

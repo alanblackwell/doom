@@ -22,6 +22,15 @@ import {
 import { absolutePosition, descendantIds, effectiveBounds, hitTest, toRelative } from './layout';
 import type { DragContext, Point, Rect } from './layout';
 import { controlsFor, hitTestControl, trackGeometry, valueFraction, valueFromTrackPosition } from './controls';
+import {
+  DOOM_LEVER_GAUGE_RADIUS,
+  DOOM_LEVER_LENGTH,
+  doomLeverAnchor,
+  gaugeAngleToward,
+  isWithinLeverRod,
+  isWithinRivet,
+  leverLengthFraction,
+} from './doomLever';
 import type { ControlHit, ControlSpec, Track } from './controls';
 import { isWithinPad } from './pads';
 import { hitTestWireHandle, withinControlBody } from './knobs';
@@ -337,6 +346,33 @@ export interface InteractionState {
   // for that drag.
   portholePress: { entity: Entity; startPoint: Point } | null;
 
+  // Which entities currently have their doom lever (ui/doomLever.ts)
+  // expanded — rivet-only vs. gauge+lever visible. Transient UI state, not
+  // an audio-relevant param (unlike doomLeverAngle, which lives in
+  // entity.params like every other live-controllable value), so it's a Set
+  // here rather than another entity.params flag — same reasoning as every
+  // organelle's own `entity.expanded` field, just per-entity-source instead
+  // of per-feature-popup.
+  doomLeverExpanded: Set<string>;
+  // entityId -> performance.now() at the moment its doom lever last toggled
+  // expand/collapse — ui/doomLever.ts's leverLengthFraction/gaugeAlpha read
+  // this to animate the growth/shrink transition. A Map, not a single slot,
+  // so multiple entities' doom levers can be independently mid-animation at
+  // once — same "concurrent per-entity animations" reasoning as
+  // triggerFlashes below.
+  doomLeverTransitionAt: Map<string, number>;
+  // A rivet pressed but not yet resolved into either a click (toggle
+  // expand/collapse on release without crossing DRAG_START_THRESHOLD) or a
+  // drag (starts rotating the lever, only meaningful once this entity's
+  // lever is already expanded — see pointermove's own handling). Same
+  // click-vs-drag deferral shape as portholePress above.
+  doomLeverPress: { entityId: string; startPoint: Point } | null;
+  // Set while the lever/needle is actively being rotated by a live drag —
+  // either grabbed directly (pressing the rod itself) or promoted from
+  // doomLeverPress once a press on the rivet crosses the drag threshold
+  // while already expanded.
+  draggingDoomLever: { entityId: string } | null;
+
   // Set while dragging a new wire out from a knob's wire-start handle.
   wiringFrom: { entityId: string; sourcePort?: number } | null;
   wireDragPoint: Point | null; // live rubber-band endpoint, following the pointer
@@ -595,6 +631,10 @@ export function createInteractionState(): InteractionState {
     triggerFlashes: new Map(),
     lastPointerPoint: null,
     portholePress: null,
+    doomLeverExpanded: new Set(),
+    doomLeverTransitionAt: new Map(),
+    doomLeverPress: null,
+    draggingDoomLever: null,
     wiringFrom: null,
     wireDragPoint: null,
     wireHoverTarget: null,
@@ -862,6 +902,50 @@ function withinBounds(p: Point, bounds: Rect, margin: number): boolean {
     p.y >= bounds.y - bounds.height / 2 - margin &&
     p.y <= bounds.y + bounds.height / 2 + margin
   );
+}
+
+// The doom lever's own rivet/lever hit-test (ui/doomLever.ts) — checked for
+// every type:'source' entity uniformly (a pedal/filter kind is still
+// architecturally a Source here, same PROCESSOR_KINDS reasoning as
+// hitTestControl's own docs). The rivet is always hittable; the rod
+// (external lever + internal gauge needle, one continuous grab zone) only
+// once that entity's own lever is expanded — there's nothing to grab yet
+// otherwise. Returns which entity and whether the hit landed on the
+// rod specifically (a rotate-drag should start immediately) vs. the rivet
+// itself (deferred to a click/drag distinction — see doomLeverPress).
+function hitTestDoomLever(
+  graph: EntityGraph,
+  state: InteractionState,
+  point: Point,
+  now: number
+): { entityId: string; onRod: boolean } | null {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'source' || entity.docked) continue;
+    const bounds = effectiveBounds(graph, entity);
+    const pivot = doomLeverAnchor(bounds);
+    if (isWithinRivet(pivot, point)) return { entityId: entity.id, onRod: false };
+    if (!state.doomLeverExpanded.has(entity.id)) continue;
+    const angle = entity.params.doomLeverAngle ?? 0;
+    const length = DOOM_LEVER_LENGTH * leverLengthFraction(true, state.doomLeverTransitionAt.get(entity.id), now);
+    // One continuous rod, pivot to tip — covers both the short needle
+    // segment inside the gauge face and the external lever segment beyond
+    // its rim, so grabbing anywhere along either reads as "grab the lever."
+    if (isWithinLeverRod(pivot, angle, 0, DOOM_LEVER_GAUGE_RADIUS + length, point)) {
+      return { entityId: entity.id, onRod: true };
+    }
+  }
+  return null;
+}
+
+// Snaps `entityId`'s doomLeverAngle to point directly at `point` from its
+// own rivet pivot — shared by every place a rotate-drag needs to apply the
+// live pointer position (initial grab and every subsequent move).
+function applyDoomLeverAngle(graph: EntityGraph, entityId: string, point: Point): void {
+  const entity = graph.get(entityId);
+  if (!entity) return;
+  const bounds = effectiveBounds(graph, entity);
+  const pivot = doomLeverAnchor(bounds);
+  entity.params.doomLeverAngle = gaugeAngleToward(pivot, point);
 }
 
 export function attachInteraction(
@@ -1799,6 +1883,23 @@ export function attachInteraction(
       return;
     }
 
+    // The doom lever (ui/doomLever.ts) — every source/filter's own rivet,
+    // and (once expanded) its rod. Checked right after control dots, same
+    // "small interactive decoration before the plain box" priority; no
+    // positional conflict with them either way (dots sit at the box's own
+    // left edge via DOT_OUTSET, the rivet at its bottom-center).
+    const doomLeverHit = hitTestDoomLever(graph, state, point, performance.now());
+    if (doomLeverHit) {
+      canvas.setPointerCapture(e.pointerId);
+      if (doomLeverHit.onRod) {
+        state.draggingDoomLever = { entityId: doomLeverHit.entityId };
+        applyDoomLeverAngle(graph, doomLeverHit.entityId, point);
+      } else {
+        state.doomLeverPress = { entityId: doomLeverHit.entityId, startPoint: point };
+      }
+      return;
+    }
+
     // A docked instrument's icon (ui/dock.ts) — checked before the normal
     // canvas hitTest below since the dock panel visually sits on top of
     // everything else. Pressing it can only ever lead to a drag (undocking,
@@ -1890,6 +1991,27 @@ export function attachInteraction(
     // loop runs continuously (ui/main.ts's rAF loop) whether or not the
     // pointer is actually moving right now.
     state.lastPointerPoint = point;
+
+    if (state.draggingDoomLever) {
+      applyDoomLeverAngle(graph, state.draggingDoomLever.entityId, point);
+      return;
+    }
+
+    if (state.doomLeverPress) {
+      const { entityId, startPoint } = state.doomLeverPress;
+      if (Math.hypot(point.x - startPoint.x, point.y - startPoint.y) < DRAG_START_THRESHOLD) return;
+      // Past the threshold — no longer a pending click (see endPress's
+      // matching branch). Only promotes to an actual rotate-drag if this
+      // entity's lever is already expanded; otherwise (still collapsed,
+      // nothing to grab yet) this just cancels the pending click, same
+      // "drag from here does nothing further" shape as portholePress above.
+      state.doomLeverPress = null;
+      if (state.doomLeverExpanded.has(entityId)) {
+        state.draggingDoomLever = { entityId };
+        applyDoomLeverAngle(graph, entityId, point);
+      }
+      return;
+    }
 
     if (state.portholePress) {
       const { entity, startPoint } = state.portholePress;
@@ -2398,6 +2520,30 @@ export function attachInteraction(
   });
 
   function endPress(e: PointerEvent): void {
+    if (state.draggingDoomLever) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.draggingDoomLever = null;
+      return;
+    }
+
+    if (state.doomLeverPress) {
+      // Never dragged past the threshold (pointermove's own doomLeverPress
+      // branch would have cleared this otherwise) — a plain click on the
+      // rivet, so it toggles expand/collapse now, recording this moment so
+      // ui/render.ts's leverLengthFraction/gaugeAlpha can animate the
+      // transition from here.
+      canvas.releasePointerCapture(e.pointerId);
+      const { entityId } = state.doomLeverPress;
+      if (state.doomLeverExpanded.has(entityId)) {
+        state.doomLeverExpanded.delete(entityId);
+      } else {
+        state.doomLeverExpanded.add(entityId);
+      }
+      state.doomLeverTransitionAt.set(entityId, performance.now());
+      state.doomLeverPress = null;
+      return;
+    }
+
     if (state.portholePress) {
       // Never dragged past the threshold (pointermove's own portholePress
       // branch would have cleared this otherwise) — a plain click, so it
