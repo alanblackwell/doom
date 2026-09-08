@@ -17,15 +17,12 @@ export interface ControlSpec {
 
 // Per-kind control list — a kind not listed here gets no dots at all.
 const CONTROL_SPECS: Record<string, ControlSpec[]> = {
-  bass: [
-    { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    // Sub-bass/low-bass territory — deliberately a narrower, lower range
-    // than the bow's, matching what this voice is actually for.
-    { param: 'frequency', label: 'pitch', min: 20, max: 150, color: '#5aa0c8' },
-  ],
+  // pitch (formerly a 'frequency' dot here) is now driven by the doom lever
+  // (ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS) instead of its own slider —
+  // see that module's own header.
+  bass: [{ param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' }],
   bow: [
     { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    { param: 'frequency', label: 'pitch', min: 40, max: 500, color: '#5aa0c8' },
     // STK's own reference implementation only really behaves in ~0.03-0.25
     // (see dsp/rust/src/lib.rs) — range goes a bit past that for headroom.
     { param: 'bowVelocity', label: 'bow speed', min: 0, max: 0.3, color: '#7ec850' },
@@ -42,7 +39,6 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
   // buzzier chainsaw/grinder territory rather than a cello's.
 grind: [
   { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-  { param: 'frequency', label: 'pitch', min: 20, max: 80, color: '#5aa0c8' },
   { param: 'grind', label: 'grind', min: 0, max: 1, color: '#c85a5a' },
 ],
 overdrive: [
@@ -116,7 +112,6 @@ overdrive: [
   // concept.
   vocode: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
-    { param: 'targetPitch', label: 'target pitch', min: 20, max: 800, color: '#5aa0c8' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
   // A ring modulator (audio/graph.ts's 'ringmod' case) — multiplies rather
@@ -126,19 +121,19 @@ overdrive: [
   // than sounds on its own; mix reuses growl's own dry/wet teal.
   ringmod: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
-    { param: 'frequency', label: 'carrier', min: 1, max: 2000, color: '#5aa0c8' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
   // A bitcrusher (audio/graph.ts's 'bitcrush' case) — sample-rate
   // reduction (dsp/worklets/bitcrush-processor.js) plus bit-depth
   // reduction (a native WaveShaper curve), the other pillar of noise/
   // industrial digital harshness alongside ringmod above. bits reuses
-  // overdrive/fuzz's own "how hard/crunchy is it" drive orange; rate
-  // reuses their tone purple, since it's a similarly cutoff-like
-  // frequency-domain dial; mix reuses growl's own dry/wet teal.
+  // overdrive/fuzz's own "how hard/crunchy is it" drive orange; mix
+  // reuses growl's own dry/wet teal. rate no longer has its own dot —
+  // it's doom-lever-driven now (see ui/doomLever.ts's
+  // DOOM_LEVER_PITCH_TARGETS), same "the lever replaces the slider"
+  // treatment as bass/bow/grind/etc.'s own pitch dots.
   bitcrush: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
-    { param: 'rate', label: 'sample rate', min: 200, max: 20000, color: '#c85ac8' },
     { param: 'bits', label: 'bit depth', min: 1, max: 16, color: '#e0883c' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
@@ -155,8 +150,6 @@ overdrive: [
   ],
   kick: [
     { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
-    // Same blue as bass/bow's pitch — same concept, deliberately consistent.
-    { param: 'pitch', label: 'pitch', min: 30, max: 100, color: '#5aa0c8' },
     // Same purple-blue as reverb's decay — punchy (short) vs. boomy (long).
     { param: 'decay', label: 'decay', min: 0.1, max: 1.5, color: '#8a7ec8' },
     { param: 'click', label: 'click', min: 0, max: 1, color: '#a0d8e0' },
@@ -166,7 +159,6 @@ overdrive: [
   // pluck it. Bass-guitar pitch range, matching 'bass' above.
   pluck: [
     { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    { param: 'pitch', label: 'pitch', min: 20, max: 200, color: '#5aa0c8' },
     // Same purple-blue as kick/reverb's decay — how fast the string dies out.
     { param: 'damping', label: 'damping', min: 0, max: 1, color: '#8a7ec8' },
     // Same magenta as overdrive/reverb's tone — brightness of the pluck's
@@ -179,7 +171,6 @@ overdrive: [
   // knob 'pluck' doesn't expose.
   metal: [
     { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
-    { param: 'pitch', label: 'pitch', min: 60, max: 400, color: '#5aa0c8' },
     { param: 'damping', label: 'damping', min: 0, max: 1, color: '#8a7ec8' },
     { param: 'response', label: 'response', min: 0, max: 1, color: '#c85ac8' },
     // Reuses bow pressure's red — "intensity/risk knob," same convention as
@@ -198,15 +189,12 @@ overdrive: [
   ],
   // A dropped-in audio file (ui/sampleDrop.ts, audio/graph.ts's 'sample'
   // case) — a TRIGGERED_KINDS one-shot like kick/pluck/metal above, not a
-  // drone: click its pad to play it from the start. speed reuses pitch's
-  // blue since it's the same "playback rate" knob a turntable/tape player
-  // has — raising it audibly raises pitch too, same physical coupling.
-  // Bottom end goes well below "half speed" (0.1x) so a normal recording
-  // drags down into doom/drone territory — deep, slow, pitched-down.
-  sample: [
-    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
-    { param: 'speed', label: 'speed', min: 0.1, max: 4, color: '#5aa0c8' },
-  ],
+  // drone: click its pad to play it from the start. speed (playback rate,
+  // "raising it audibly raises pitch too") is now driven by the doom lever
+  // instead of its own slider — see ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS,
+  // whose 'sample' entry goes all the way down to 0.01x at the lever's own
+  // doomy end, far below what this dot's old 0.1x floor allowed.
+  sample: [{ param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' }],
   // A knob's own value — reuses the same dot+slider mechanism as every
   // other parameter (see ui/controls.ts), rather than needing bespoke
   // interaction code. Color matches the knob's rotating indicator (see

@@ -21,10 +21,21 @@ import {
 } from '../audio/graph';
 import { absolutePosition, descendantIds, effectiveBounds, hitTest, toRelative } from './layout';
 import type { DragContext, Point, Rect } from './layout';
-import { controlsFor, hitTestControl, trackGeometry, valueFraction, valueFromTrackPosition } from './controls';
+import {
+  controlsFor,
+  hitTestControl,
+  hitTestDoomLeverDrop,
+  trackGeometry,
+  valueFraction,
+  valueFromTrackPosition,
+} from './controls';
 import {
   DOOM_LEVER_GAUGE_RADIUS,
   DOOM_LEVER_LENGTH,
+  DOOM_LEVER_MAX_ANGLE,
+  DOOM_LEVER_MIN_ANGLE,
+  DOOM_LEVER_PITCH_TARGETS,
+  doomLeverAngleToValue,
   doomLeverAnchor,
   gaugeAngleToward,
   isWithinLeverRod,
@@ -674,8 +685,18 @@ export function createInteractionState(): InteractionState {
 export function applyControlValue(graph: EntityGraph, entityId: string, param: string, value: number): void {
   const entity = graph.get(entityId);
   if (!entity) return;
-  entity.params[param] = value;
-  getControlSetter(entityId, param)?.(value);
+
+  // 'doomLeverAngle' has no real registered control setter of its own (see
+  // ui/doomLever.ts's header) — setDoomLeverAngle both writes it into
+  // entity.params (so render.ts's live read keeps working) AND applies this
+  // entity's own pitch mapping, if it has one. Every OTHER param keeps the
+  // plain params-write + control-setter path this function has always used.
+  if (param === 'doomLeverAngle') {
+    setDoomLeverAngle(graph, entityId, value);
+  } else {
+    entity.params[param] = value;
+    getControlSetter(entityId, param)?.(value);
+  }
 
   // Fan this same value out to anything wired from this (entityId, param) —
   // a knob's own value dot changing is exactly what should drive its wires.
@@ -688,16 +709,52 @@ export function applyControlValue(graph: EntityGraph, entityId: string, param: s
   for (const wire of getWiresFrom(entityId)) {
     if (wire.sourceParam !== param) continue;
     const sourceSpec = controlsFor(entity.kind).find((s) => s.param === param);
-    const targetSpec = controlsFor(graph.get(wire.targetEntityId)?.kind ?? '').find(
-      (s) => s.param === wire.targetParam
-    );
-    if (!sourceSpec || !targetSpec) continue;
+    if (!sourceSpec) continue;
+    // 'doomLeverAngle' is deliberately not a real ControlSpec (the rivet
+    // isn't drawn via the generic per-kind dot column — see
+    // ui/controls.ts's hitTestDoomLeverDrop/controlDotAbsolutePosition), so
+    // controlsFor(...) can never find it; use its fixed gauge-degree range
+    // directly instead of a spec lookup for that one target param.
+    let targetMin: number;
+    let targetMax: number;
+    if (wire.targetParam === 'doomLeverAngle') {
+      targetMin = DOOM_LEVER_MIN_ANGLE;
+      targetMax = DOOM_LEVER_MAX_ANGLE;
+    } else {
+      const targetSpec = controlsFor(graph.get(wire.targetEntityId)?.kind ?? '').find(
+        (s) => s.param === wire.targetParam
+      );
+      if (!targetSpec) continue;
+      targetMin = targetSpec.min;
+      targetMax = targetSpec.max;
+    }
     // Normalize against the SOURCE's own range first — value isn't always
     // already a 0-1 fraction (a knob's is, by construction, but e.g. a
     // clock's bpm is 20-300) — then remap that fraction onto the target's
     // range, same as wireOpacity's mapping in ui/render.ts.
-    const mapped = targetSpec.min + valueFraction(sourceSpec, value) * (targetSpec.max - targetSpec.min);
+    const mapped = targetMin + valueFraction(sourceSpec, value) * (targetMax - targetMin);
     applyControlValue(graph, wire.targetEntityId, wire.targetParam, mapped);
+  }
+}
+
+// entity.params.doomLeverAngle's one true setter — both the manual
+// drag-the-lever gesture (applyDoomLeverAngle below) and an external wire
+// dropped onto the rivet (via applyControlValue's own special case above)
+// go through this, so "if the lever is visible, the dial and lever should
+// move as the control value changes" (render.ts reads entity.params.doomLeverAngle
+// live every frame) and the actual pitch mapping stay in lock-step no matter
+// which path changed the angle. Deliberately does NOT touch entity.params
+// at all for a kind with no DOOM_LEVER_PITCH_TARGETS entry (e.g. growl,
+// grain, every filter pedal) — the lever still moves visually for those, it
+// just isn't wired to anything yet, exactly as specified.
+function setDoomLeverAngle(graph: EntityGraph, entityId: string, angleDeg: number): void {
+  const entity = graph.get(entityId);
+  if (!entity) return;
+  entity.params.doomLeverAngle = angleDeg;
+  const mapping = DOOM_LEVER_PITCH_TARGETS[entity.kind];
+  if (mapping) {
+    const value = doomLeverAngleToValue(angleDeg, mapping.minValue, mapping.maxValue);
+    applyControlValue(graph, entityId, mapping.param, value);
   }
 }
 
@@ -939,13 +996,16 @@ function hitTestDoomLever(
 
 // Snaps `entityId`'s doomLeverAngle to point directly at `point` from its
 // own rivet pivot — shared by every place a rotate-drag needs to apply the
-// live pointer position (initial grab and every subsequent move).
+// live pointer position (initial grab and every subsequent move). Routed
+// through setDoomLeverAngle (not a direct entity.params write) so a manual
+// drag applies this entity's own pitch mapping exactly like an incoming
+// wire does — see setDoomLeverAngle's own comment.
 function applyDoomLeverAngle(graph: EntityGraph, entityId: string, point: Point): void {
   const entity = graph.get(entityId);
   if (!entity) return;
   const bounds = effectiveBounds(graph, entity);
   const pivot = doomLeverAnchor(bounds);
-  entity.params.doomLeverAngle = gaugeAngleToward(pivot, point);
+  setDoomLeverAngle(graph, entityId, gaugeAngleToward(pivot, point));
 }
 
 export function attachInteraction(
@@ -2360,7 +2420,11 @@ export function attachInteraction(
       // hitTestFeatureDot covers an open envelope popup's connection dots
       // (ui/organelle.ts) — outside the generic per-kind column hitTestControl
       // otherwise handles, but the same ControlHit shape either way.
-      const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point);
+      // hitTestDoomLeverDrop covers the rivet — "a connection point for
+      // dropping control lines" per the doom lever's own spec, deliberately
+      // not a real ControlSpec so it isn't part of hitTestControl's own
+      // per-kind column scan.
+      const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point) ?? hitTestDoomLeverDrop(graph, point);
       // A wire can't target its own source (self-connection is meaningless)
       // or any other control entity's dot — knobs are sources only for now,
       // never targets, which is also what keeps applyControlValue's
@@ -2904,7 +2968,10 @@ export function attachInteraction(
       }
     }
 
-    const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point);
+    // hitTestDoomLeverDrop alongside the other two so a wire terminating at
+    // the rivet can be right-click-removed the same way any other control
+    // dot's wire can.
+    const hit = hitTestControl(graph, point) ?? hitTestFeatureDot(graph, point) ?? hitTestDoomLeverDrop(graph, point);
     if (hit) {
       e.preventDefault();
       removeWireTo(hit.entityId, hit.spec.param);

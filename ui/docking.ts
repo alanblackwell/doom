@@ -37,6 +37,12 @@ export function dockEntity(graph: EntityGraph, entity: Entity): void {
   for (const spec of controlsFor(entity.kind)) {
     removeWireTo(entity.id, spec.param);
   }
+  // The doom lever's own rivet (ui/doomLever.ts) is deliberately not one of
+  // controlsFor(entity.kind)'s specs (see ui/controls.ts's
+  // hitTestDoomLeverDrop) — clean it up explicitly, same reasoning as every
+  // other control-dot wire above: a docked entity has no visible rivet for
+  // a wire to still be landing on.
+  removeWireTo(entity.id, 'doomLeverAngle');
   removeEventWiresTo(entity.id);
   // Any internal-feature popup (ui/organelle.ts) has nothing to anchor to
   // once its owner is off-canvas — close it rather than leaving it stuck

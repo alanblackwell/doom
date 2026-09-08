@@ -35,7 +35,17 @@ import type { DragContext, Point, Rect } from './layout';
 import { ownerOf, popupRectFor, closeButtonPosition, drawTooltip, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { getControlSetter } from '../audio/graph';
 import { controlsFor } from './controlSpecs';
+import { DOOM_LEVER_PITCH_TARGETS } from './doomLever';
 import { ACCENT } from './palette';
+
+// bass/grind/metal's own tuning organelles all list their pitch/frequency
+// param as a coreKey (factoryFor below), on the assumption it's still a real
+// ControlSpec in controlsFor(voiceKind) — true before the doom lever shipped,
+// no longer true now that it's one of the 9 pitch-colored entries that dot
+// removed in favor of DOOM_LEVER_PITCH_TARGETS (ui/doomLever.ts). Same
+// pitch-blue this row always had, matching every other pitch control-dot
+// this codebase ever drew before that removal.
+const DOOM_LEVER_PITCH_COLOR = '#5aa0c8';
 
 export interface TuningParam {
   value: number; // current factory default — what a fresh instance seeds from
@@ -185,13 +195,21 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
   function factoryFor(key: string): RowFactory {
     if (isCoreKey(key)) {
       const spec = controlsFor(config.voiceKind).find((s) => s.param === key);
+      // No live ControlSpec for this core key — true for every voice's own
+      // former pitch/frequency dot now that the doom lever owns it (see this
+      // file's own header import comment). Fall back to the same range the
+      // lever itself now drives that param across, rather than the
+      // generic 0..1/yellow default below, which would render as a
+      // nonsensical slider.
+      const pitchFallback =
+        DOOM_LEVER_PITCH_TARGETS[config.voiceKind]?.param === key ? DOOM_LEVER_PITCH_TARGETS[config.voiceKind] : undefined;
       return {
         label: spec?.label ?? key,
-        min: spec?.min ?? 0,
-        max: spec?.max ?? 1,
+        min: spec?.min ?? pitchFallback?.minValue ?? 0,
+        max: spec?.max ?? pitchFallback?.maxValue ?? 1,
         step: config.coreStep[key] ?? 0.01,
-        color: spec?.color ?? '#e0c840',
-        defaultValue: spec?.min ?? 0,
+        color: spec?.color ?? (pitchFallback ? DOOM_LEVER_PITCH_COLOR : '#e0c840'),
+        defaultValue: spec?.min ?? pitchFallback?.minValue ?? 0,
         description: config.coreDescriptions[key] ?? '',
         hardMax: config.hardMax?.[key],
       };

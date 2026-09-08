@@ -21,6 +21,7 @@ import {
   CONTROL_DOT_OUTER_RADIUS,
   CONTROL_DOT_RADIUS,
   CONTROL_DOT_DROP_RADIUS,
+  DOOM_LEVER_CONTROL_SPEC,
 } from './controls';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { knobIndicatorAngle, wireHandlePosition, WIRE_BUMP_RADIUS } from './knobs';
@@ -60,6 +61,8 @@ import {
   leverLengthFraction,
   DOOM_LEVER_GAUGE_RADIUS,
   DOOM_LEVER_LENGTH,
+  DOOM_LEVER_MAX_ANGLE,
+  DOOM_LEVER_MIN_ANGLE,
 } from './doomLever';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
@@ -659,10 +662,19 @@ function wireOpacity(
   param: string
 ): number {
   const entity = graph.get(entityId);
-  const spec = entity && controlsFor(entity.kind).find((s) => s.param === param);
-  if (!entity || !spec) return MAX_WIRE_OPACITY;
+  if (!entity) return MAX_WIRE_OPACITY;
+  // 'doomLeverAngle' isn't a real ControlSpec (see ui/controls.ts's
+  // hitTestDoomLeverDrop/controlDotAbsolutePosition) — use its own fixed
+  // gauge-degree range directly instead of the controlsFor lookup below,
+  // which would otherwise never find it and just fall back to full opacity.
+  const range: { min: number; max: number } | undefined =
+    param === 'doomLeverAngle'
+      ? { min: DOOM_LEVER_MIN_ANGLE, max: DOOM_LEVER_MAX_ANGLE }
+      : controlsFor(entity.kind).find((s) => s.param === param);
+  if (!range) return MAX_WIRE_OPACITY;
   if (!isControlActive(interaction, entityId, param)) return MIN_WIRE_OPACITY;
-  const fraction = valueFraction(spec, entity.params[param] ?? spec.min);
+  const currentValue = entity.params[param] ?? range.min;
+  const fraction = Math.min(1, Math.max(0, (currentValue - range.min) / (range.max - range.min)));
   return MIN_WIRE_OPACITY + fraction * (MAX_WIRE_OPACITY - MIN_WIRE_OPACITY);
 }
 
@@ -733,7 +745,14 @@ function drawWires(
     if (!endpoints) continue;
 
     const target = graph.get(wire.targetEntityId)!;
-    const spec = controlsFor(target.kind).find((s) => s.param === wire.targetParam);
+    // 'doomLeverAngle' isn't a real ControlSpec (see ui/controls.ts's
+    // hitTestDoomLeverDrop) — use its own synthetic one so a wire into the
+    // rivet draws in its own brass color instead of falling back to plain
+    // white/grey.
+    const spec =
+      wire.targetParam === 'doomLeverAngle'
+        ? DOOM_LEVER_CONTROL_SPEC
+        : controlsFor(target.kind).find((s) => s.param === wire.targetParam);
     const opacity = wireOpacity(graph, interaction, wire.sourceEntityId, wire.sourceParam);
     const from = translate(endpoints.from, wire.sourceEntityId);
     const to = translate(endpoints.to, wire.targetEntityId);

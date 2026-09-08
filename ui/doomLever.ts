@@ -66,6 +66,64 @@ export function isDangerAngle(deg: number): boolean {
   return deg <= DOOM_LEVER_DANGER_MAX_ANGLE;
 }
 
+// --- Pitch mapping ---------------------------------------------------------
+//
+// By default, the doom lever REPLACES every voice's own pitch/frequency
+// control-dot (see ui/controlSpecs.ts — the 9 entries that used to carry
+// color '#5aa0c8', the codebase's own "this is a pitch" convention, are
+// gone now) rather than sitting alongside it. -135deg (the low end, also the
+// danger zone — see isDangerAngle above) maps to a fixed, near-inaudible
+// sub-bass floor; +135deg maps to that voice's own original top-of-range
+// value (the same `max` its removed ControlSpec used to have). Log-
+// interpolated, not linear — a linear map would spend nearly the entire
+// swing inaudibly close to the low end, since these ranges span more than
+// an octave or two.
+//
+// Deliberately plain data/functions with no EntityGraph/wiring knowledge
+// (same "graph-agnostic" reasoning as this module's own header) — the
+// graph-aware glue that actually calls doomLeverAngleToValue and pushes the
+// result into entity.params/the audio engine lives in ui/interaction.ts's
+// setDoomLeverAngle, alongside applyControlValue.
+export interface DoomLeverPitchTarget {
+  param: string; // the entity.params key this drives (matches an audio/graph.ts registerControls key)
+  minValue: number; // value at -135deg (the doomy/danger end)
+  maxValue: number; // value at +135deg — the voice's own former ControlSpec max
+}
+
+export const DOOM_LEVER_PITCH_TARGETS: Record<string, DoomLeverPitchTarget> = {
+  bass: { param: 'frequency', minValue: 5, maxValue: 150 },
+  bow: { param: 'frequency', minValue: 5, maxValue: 500 },
+  grind: { param: 'frequency', minValue: 5, maxValue: 80 },
+  kick: { param: 'pitch', minValue: 5, maxValue: 100 },
+  pluck: { param: 'pitch', minValue: 5, maxValue: 200 },
+  metal: { param: 'pitch', minValue: 5, maxValue: 400 },
+  vocode: { param: 'targetPitch', minValue: 5, maxValue: 800 },
+  ringmod: { param: 'frequency', minValue: 5, maxValue: 2000 },
+  // Not a frequency at all — a playback-rate multiplier — but the same
+  // "raising it audibly raises pitch too" physical coupling ui/controlSpecs.ts's
+  // old 'sample' comment already noted, so it gets the same log-mapped
+  // treatment, just with unitless bounds instead of Hz. 0.01x is deep enough
+  // into "inaudibly slow" that a normal recording reads as a near-frozen
+  // drone rather than a recognizably slowed-down copy of itself.
+  sample: { param: 'speed', minValue: 0.01, maxValue: 4 },
+  // Not a pitch either, but the same "the lever swings from a wrecked/
+  // doomy extreme up to the original clean setting" shape applies — a
+  // crushed sample rate is the bitcrusher's own equivalent of "sub-bass
+  // and inaudible," just via aliasing/digital artifacting instead of a
+  // literal low pitch. Reuses the removed ControlSpec's own former
+  // min/max unchanged (200-20000) rather than picking a new extreme, since
+  // nothing here calls for a more/less aggressive floor than it already had.
+  bitcrush: { param: 'rate', minValue: 200, maxValue: 20000 },
+};
+
+// Log-interpolated angle -> value, clamped to the valid gauge-degree range
+// first so a caller passing an already-clamped or not-yet-clamped angle
+// behaves identically either way.
+export function doomLeverAngleToValue(angleDeg: number, minValue: number, maxValue: number): number {
+  const t = (clampGaugeAngle(angleDeg) - DOOM_LEVER_MIN_ANGLE) / (DOOM_LEVER_MAX_ANGLE - DOOM_LEVER_MIN_ANGLE);
+  return minValue * Math.pow(maxValue / minValue, t);
+}
+
 // Gauge-degrees -> canvas radians (canvas: 0 = pointing along +x/right,
 // increasing = clockwise since y is down) — g=0 (up) maps to -90deg/-pi/2,
 // exactly what ctx.arc/rotate expect. Exported so render.ts's rod/needle

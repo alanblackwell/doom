@@ -13,6 +13,7 @@ import { controlsFor, dotPosition, CONTROL_HIT_RADIUS, CONTROL_TRACK_LENGTH } fr
 import type { ControlSpec } from './controlSpecs';
 import { isControlEntity, knobValueDotPosition } from './knobs';
 import { featureDotAbsolutePosition } from './organelle';
+import { DOOM_LEVER_MAX_ANGLE, DOOM_LEVER_MIN_ANGLE, doomLeverAnchor, isWithinRivet } from './doomLever';
 
 // A knob's own dot sits at its body's center (see knobs.ts), not at
 // controlSpecs.ts's generic per-kind column position — every other kind
@@ -137,8 +138,47 @@ export function controlDotAbsolutePosition(
   // delegate entirely to ui/organelle.ts, which resolves it from the
   // OWNER's bounds instead.
   if (entity.type === 'feature') return featureDotAbsolutePosition(graph, entity, param, drag);
+  // The rivet's own anchor — deliberately not in controlsFor(entity.kind)
+  // (see hitTestDoomLeverDrop's own comment below), so the generic lookup
+  // just past this would never find it.
+  if (param === 'doomLeverAngle') return doomLeverAnchor(effectiveBounds(graph, entity, drag));
   const specs = controlsFor(entity.kind);
   const index = specs.findIndex((s) => s.param === param);
   if (index === -1) return null;
   return dotPositionFor(entity, effectiveBounds(graph, entity, drag), index);
+}
+
+// A synthetic ControlSpec for the doom lever's own rivet — deliberately NOT
+// part of controlSpecs.ts's CONTROL_SPECS/controlsFor, since the rivet isn't
+// drawn via the generic per-kind dot column (ui/doomLever.ts has its own
+// bespoke rendering); this just gives wiring code the same {param, label,
+// min, max, color} shape every other wire endpoint already expects. min/max
+// are the lever's own gauge-degree range (ui/doomLever.ts), so an incoming
+// wire's generic linear source-fraction -> target-range remap (see
+// ui/interaction.ts's applyControlValue) lands the angle correctly without
+// that function needing its own doomLeverAngle-specific formula.
+export const DOOM_LEVER_CONTROL_SPEC: ControlSpec = {
+  param: 'doomLeverAngle',
+  label: 'doom lever',
+  min: DOOM_LEVER_MIN_ANGLE,
+  max: DOOM_LEVER_MAX_ANGLE,
+  color: '#c9a558', // the lever's own brass, so a wire into it reads as "this," not just another generic dot
+};
+
+// The rivet as a wire drop target — "the rivet head can be treated as a
+// connection point for dropping control lines," per the doom lever's own
+// spec. Checked as its own pass (not folded into hitTestControl above)
+// since it isn't part of controlsFor's per-kind list at all; every
+// type: 'source' entity gets one, docked or not-yet-expanded included (the
+// rivet itself is always visible/wireable even collapsed, same as the
+// click-to-expand gesture works on it either way).
+export function hitTestDoomLeverDrop(graph: EntityGraph, point: Point, drag?: DragContext): ControlHit | null {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'source' || entity.docked) continue;
+    const pivot = doomLeverAnchor(effectiveBounds(graph, entity, drag));
+    if (isWithinRivet(pivot, point)) {
+      return { entityId: entity.id, spec: DOOM_LEVER_CONTROL_SPEC, dot: pivot };
+    }
+  }
+  return null;
 }
