@@ -44,6 +44,7 @@ import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
 import { drawGrainTunerPopup } from './grainTuner';
+import { drawVocodeTunerPopup, endVocodeTunerFrame } from './vocodeTuner';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
@@ -1211,6 +1212,8 @@ export function renderFrame(
             ? { key: interaction.grainTunerSliderDrag.key, target: interaction.grainTunerSliderDrag.target as 'min' | 'max' }
             : null;
         drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
+      } else if (feature.kind === 'vocodeTuner') {
+        drawVocodeTunerPopup(ctx, graph, feature, owner, drag);
       } else {
         const activeHandle =
           interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
@@ -1251,6 +1254,12 @@ export function renderFrame(
   drawTextureEditor(ctx, canvas, graph);
 
   endSamplerFrame();
+  // Same "per-frame sweep regardless of expanded state" idiom as
+  // endSamplerFrame above — this is what actually detects a vocode tuner
+  // popup opening/closing and starts/stops its live analyser/audition taps
+  // (ui/vocodeTuner.ts's own header explains why it needs this rather than
+  // a direct open/close hook).
+  endVocodeTunerFrame(graph);
 }
 
 function drawDraggedSubtree(

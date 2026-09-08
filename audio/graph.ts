@@ -21,6 +21,12 @@ import { GRAIN_TUNING, GRAIN_TUNING_KEYS, startGrainVoice } from './grainPlayer'
 import type { GrainVoiceControls } from './grainPlayer';
 import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
 import { METAL_TUNING, METAL_TUNING_KEYS } from './metalTuning';
+import { startVocodeVoice } from './vocodePlayer';
+import type { VocodeVoiceControls } from './vocodePlayer';
+import { watchSound } from './nodeCapture';
+import type { LevelWatcher } from './nodeCapture';
+import { estimateF0, extractFormants } from '../ui/pitchAnalysis';
+import type { Formant } from '../ui/pitchAnalysis';
 import type { Entity, EntityGraph } from './entityGraph';
 
 interface EntityNodes {
@@ -124,6 +130,99 @@ const grainVoices = new Map<string, GrainVoiceControls>();
 
 export function getGrainVoice(entityId: string): GrainVoiceControls | undefined {
   return grainVoices.get(entityId);
+}
+
+// The live 'vocode' voice instance for each entity, same registry shape as
+// grainVoices above — cleared on rebuildEntity too. Read by
+// ui/vocodeTuner.ts (its own re-analyze/live-drag calls push straight
+// through analyzeAndApplyVocode below rather than touching this map
+// directly).
+const vocodeVoices = new Map<string, VocodeVoiceControls>();
+
+export function getVocodeVoice(entityId: string): VocodeVoiceControls | undefined {
+  return vocodeVoices.get(entityId);
+}
+
+// A watcher waiting for a freshly-built 'vocode' pedal's contained source to
+// start sounding for the very first time, so createVocodeFilter's own
+// "auto-prime once" trigger can fire — see that function's own comment.
+// Kept here (rather than a local variable inside createVocodeFilter) only
+// so rebuildEntity can stop a still-pending one before it ever fires,
+// same "don't leak a live watcher/timer across a rebuild" reasoning as
+// grainVoices' own header comment.
+const vocodeAutoPrimeWatchers = new Map<string, LevelWatcher>();
+
+// Large enough for at least ~2 full periods of a 20Hz drone fundamental
+// (8192 samples / 44.1kHz =~ 185ms) so estimateF0's autocorrelation has
+// enough context at the low end of a plausible drone range, and gives a
+// reasonable ~5.4Hz-per-bin resolution for extractFormants' own use of the
+// same snapshot's frequency-domain data.
+const VOCODE_ANALYSER_FFT_SIZE = 8192;
+
+// One-shot analysis snapshot: taps `entity`'s own input mixer with a
+// transient AnalyserNode (no AudioBuffer, nothing kept afterward — see
+// ui/pitchAnalysis.ts's own header for why), estimates f0 (unless
+// `f0Override` is given — ui/vocodeTuner.ts passes its own by-ear-corrected
+// value here instead of trusting autocorrelation), extracts a formant bank
+// from the same snapshot, and pushes both straight into the live voice.
+// Serves three callers: createVocodeFilter's own auto-prime watcher below,
+// ui/vocodeTuner.ts's manual re-analyze button (no override — a fresh
+// autocorrelation guess), and that same organelle's live marker-drag apply
+// (with an override). `entity.params.f0` is written on every call — a
+// bespoke, non-control-dot field on the pedal's own params (same "extra
+// per-instance state lives in params too" idiom as GRIND_TUNING's own
+// non-control-dot keys) — so ui/vocodeTuner.ts can read back the currently-
+// locked f0 to seed its marker when it opens, without this module needing
+// to expose any separate registry for it.
+export function analyzeAndApplyVocode(
+  entity: Entity,
+  f0Override?: number,
+  onDone?: (result: { f0: number; formants: Formant[] }) => void
+): void {
+  const nodes = nodesByEntity.get(entity.id);
+  const voice = vocodeVoices.get(entity.id);
+  if (!nodes || !voice) return;
+  const ctx = getAudioContext();
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = VOCODE_ANALYSER_FFT_SIZE;
+  analyser.smoothingTimeConstant = 0; // a one-shot snapshot, not a live meter — no temporal smoothing to bias it
+  nodes.input.connect(analyser);
+
+  // A freshly-created AnalyserNode's own ring buffer starts out entirely
+  // zero-initialized and only fills with real signal once the audio thread
+  // has actually processed render quanta through it — reading immediately,
+  // on this same synchronous tick, would see nothing but that zero-fill
+  // (a perfectly flat spectrum has no local maxima at all, so
+  // extractFormants would return an empty formant bank every time — the
+  // bug this comment replaces). Wait for one full fftSize's worth of real
+  // audio time before reading, same "give the audio graph a render
+  // round-trip" reasoning as audio/nodeCapture.ts's own startNodeCapture.
+  const fillDelayMs = (analyser.fftSize / ctx.sampleRate) * 1000 + 20;
+  setTimeout(() => {
+    // The entity/voice may have gone away by the time this fires (rebuilt,
+    // deleted, redocked) — re-resolve rather than trusting the closure's
+    // now-possibly-stale references.
+    const liveNodes = nodesByEntity.get(entity.id);
+    const liveVoice = vocodeVoices.get(entity.id);
+    if (!liveNodes || !liveVoice) {
+      nodes.input.disconnect(analyser);
+      return;
+    }
+
+    const timeDomain = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(timeDomain);
+    const f0 = f0Override ?? estimateF0(timeDomain, ctx.sampleRate);
+
+    const magnitudeDb = new Float32Array(analyser.frequencyBinCount);
+    analyser.getFloatFrequencyData(magnitudeDb);
+    const formants = extractFormants(magnitudeDb, ctx.sampleRate, analyser.fftSize, f0);
+
+    liveNodes.input.disconnect(analyser);
+    liveVoice.setFormants(formants);
+    entity.params.f0 = f0;
+    onDone?.({ f0, formants });
+  }, fillDelayMs);
 }
 
 // A single note's worth of one-off overrides for a triggered voice —
@@ -1012,7 +1111,7 @@ function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
 // Kinds that process `input` into `output` rather than just mixing it
 // through — exported so the renderer can mark these visually as sink+source
 // ("pedal") entities rather than plain sources/containers.
-export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl']);
+export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl', 'vocode']);
 
 // Classic WaveShaperNode distortion curve (the one widely cited from
 // Kevin Ennis's WebAudio overdrive example) — soft-to-hard clipping
@@ -1242,6 +1341,8 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
     // unwanted mid-performance.
     case 'growl':
       return createGrowlFilter(entity, input);
+    case 'vocode':
+      return createVocodeFilter(entity, input);
     default:
       return null;
   }
@@ -1343,6 +1444,109 @@ function createGrowlFilter(entity: Entity, input: GainNode): AudioNode {
         growlNode.port.postMessage({ type: 'reset' });
       }
     },
+    mix: (value) => {
+      const m = Math.min(1, Math.max(0, value));
+      dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
+      wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
+    },
+  });
+
+  return outLevel;
+}
+
+const VOCODE_ENVELOPE_LOWPASS_HZ = 15;
+const VOCODE_ENVELOPE_SCALE = 3; // tuned by ear — brings the rectified/smoothed input up near outputGate's own 0..1 working range
+
+// Fixed abs-value rectifying curve for createVocodeFilter's own envelope
+// follower below — unlike makeOverdriveCurve/makeFuzzCurve above, this
+// isn't parameterized by any per-instance amount, so it's just built once.
+const ABS_CURVE = (() => {
+  const samples = 256;
+  const curve = new Float32Array(samples);
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2) / samples - 1;
+    curve[i] = Math.abs(x);
+  }
+  return curve;
+})();
+
+// A pitch-shifting "vocode" filter — NOT a direct filter on the contained
+// input's own waveform. See audio/vocodePlayer.ts's own header for the
+// full source-filter/resynthesis reasoning: a continuous oscillator drives
+// a fixed formant filter bank, both built/owned by that module. What IS
+// built from the live `input` here is (a) a one-shot analysis trigger,
+// auto-primed the first time it starts sounding, and (b) a continuous
+// envelope follower, so the resynthesized drone tracks whether the
+// contained source is currently sounding rather than running on regardless
+// once primed.
+function createVocodeFilter(entity: Entity, input: GainNode): AudioNode {
+  const ctx = getAudioContext();
+
+  const voice = startVocodeVoice({
+    targetPitch: entity.params.targetPitch ?? 110,
+  });
+  vocodeVoices.set(entity.id, voice);
+
+  // Envelope follower: rectify (abs-value WaveShaper) + smooth (a slow
+  // lowpass) the live input, then connect that signal straight into
+  // voice.outputGate's own gain AudioParam — connecting an audio-rate
+  // signal into an AudioParam sums with its base .value, same idiom
+  // createModulatedDelay below uses for its own LFO. outputGate's base
+  // value is 0 (see startVocodeVoice's own comment), so the resynthesized
+  // output's level is driven almost entirely by this envelope rather than
+  // running open-loop regardless of whether anything's actually playing.
+  const rectifier = ctx.createWaveShaper();
+  rectifier.curve = ABS_CURVE;
+  const envelopeSmoother = ctx.createBiquadFilter();
+  envelopeSmoother.type = 'lowpass';
+  envelopeSmoother.frequency.value = VOCODE_ENVELOPE_LOWPASS_HZ;
+  const envelopeScale = ctx.createGain();
+  envelopeScale.gain.value = VOCODE_ENVELOPE_SCALE;
+
+  input.connect(rectifier);
+  rectifier.connect(envelopeSmoother);
+  envelopeSmoother.connect(envelopeScale);
+  envelopeScale.connect(voice.outputGate.gain);
+
+  // Auto-prime: the first time the contained input actually sounds, take
+  // one analysis snapshot (analyzeAndApplyVocode above) and lock it in — a
+  // ONE-SHOT trigger, not a continuous tracker. The watcher stops itself
+  // right after firing; ui/vocodeTuner.ts's manual re-analyze button is the
+  // way to re-prime later (e.g. after swapping in a different contained
+  // source, which this auto-trigger — deliberately — won't notice).
+  const watcher = watchSound(input, (sounding) => {
+    if (!sounding) return;
+    vocodeAutoPrimeWatchers.get(entity.id)?.stop();
+    vocodeAutoPrimeWatchers.delete(entity.id);
+    analyzeAndApplyVocode(entity);
+  });
+  vocodeAutoPrimeWatchers.set(entity.id, watcher);
+
+  // Dry/wet mix, then a post-mix level — same shape (and same reasoning)
+  // as createGrowlFilter's own dry/wet/mixBus/outLevel above: `level`
+  // needs to scale the pedal's WHOLE audible output, dry included, not
+  // just the resynthesized voice — a level knob that only touched the wet
+  // path would appear to do nothing at mix=0 (fully dry), which reads as
+  // broken rather than as "level only affects the wet signal."
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const mix = Math.min(1, Math.max(0, entity.params.mix ?? 0.85));
+  dry.gain.value = 1 - mix;
+  wet.gain.value = mix;
+
+  const mixBus = ctx.createGain();
+  const outLevel = ctx.createGain();
+  outLevel.gain.value = entity.params.level ?? 0.7;
+
+  input.connect(dry);
+  dry.connect(mixBus);
+  voice.outputGate.connect(wet);
+  wet.connect(mixBus);
+  mixBus.connect(outLevel);
+
+  registerControls(entity.id, {
+    level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    targetPitch: (value) => voice.set('targetPitch', value),
     mix: (value) => {
       const m = Math.min(1, Math.max(0, value));
       dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
@@ -1637,5 +1841,11 @@ export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
   // top of the fresh one createGenerator's own 'grain' case starts below.
   grainVoices.get(entity.id)?.stop();
   grainVoices.delete(entity.id);
+  // Same reasoning, for a 'vocode' pedal's own oscillator plus (if it
+  // never fired) its still-pending auto-prime watcher.
+  vocodeVoices.get(entity.id)?.stop();
+  vocodeVoices.delete(entity.id);
+  vocodeAutoPrimeWatchers.get(entity.id)?.stop();
+  vocodeAutoPrimeWatchers.delete(entity.id);
   activateEntity(entity, graph);
 }

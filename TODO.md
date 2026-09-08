@@ -151,6 +151,32 @@ Placeholders for larger features to elaborate on when we get to each one.
    capture regardless of where it was clicked); a later per-point
    bandpass-by-height idea was discussed but deliberately deferred.
 
+10. **Vocode pitch-shift pedal** (`audio/vocodePlayer.ts`, `ui/pitchAnalysis.ts`,
+    `ui/vocodeTuner.ts`, `audio/graph.ts`'s `vocode` case) — a routable pedal
+    (drag any drone source into it, same containment-as-wiring convention as
+    `overdrive`/`growl`) that resynthesizes its contained source at a new,
+    independently controlled pitch while keeping its timbre. Deliberately
+    NOT real-time pitch tracking, and NOT PSOLA/grain-based: the input's
+    fundamental (f0) is estimated once via autocorrelation and locked
+    (auto-primed the first time the contained source starts sounding), a
+    formant filter bank is extracted from the same snapshot via cepstral
+    liftering (`ui/pitchAnalysis.ts`'s `extractFormants`, reusing
+    `ui/spectrogram.ts`'s own FFT), and a continuous `OscillatorNode` at
+    `targetPitch` drives that fixed bank — a source-filter/vocoder model,
+    not a direct filter on the input's own waveform. An envelope follower
+    (rectify + lowpass the live input, feed straight into the output gain's
+    own AudioParam) keeps the resynthesized output tracking whether the
+    contained source is actually sounding. No WASM needed — unlike `growl`,
+    a parallel bank of non-feedback bandpass filters has no stability
+    problem to solve. `ui/vocodeTuner.ts` is a by-ear f0-correction
+    organelle (for when autocorrelation picks the wrong fundamental on a
+    noisy/harmonically complex drone): a live spectrum histogram plus a
+    draggable frequency marker, mixing a reference sine tone against the
+    pedal's own dry input while open. Deliberately keeps no captured audio
+    at all — every tap is transient, torn down the instant the popup
+    closes; only the corrected f0 number (the pedal's own `params.f0`)
+    survives, unlike `ui/grainSampler.ts`'s captured-and-kept spectrogram.
+
 ## Next: a doom/industrial/drone sound palette
 
 The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,

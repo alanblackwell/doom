@@ -106,6 +106,19 @@ overdrive: [
     // own muted red, so it doesn't read as just another tone/character dial.
     { param: 'kill', label: 'kill', min: 0, max: 1, color: '#e04a3c' },
   ],
+  // A pitch-shifting resynthesis pedal (audio/vocodePlayer.ts,
+  // audio/graph.ts's 'vocode' case): locks a one-shot f0/formant estimate
+  // from whatever's contained inside it (ui/pitchAnalysis.ts,
+  // ui/vocodeTuner.ts's own by-ear correction organelle), then continuously
+  // resynthesizes at targetPitch through that fixed formant bank, dry/wet
+  // mixed with the untouched contained source. targetPitch reuses bass/
+  // bow/grind's own "pitch" blue; mix reuses growl's own dry/wet teal, same
+  // concept.
+  vocode: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'targetPitch', label: 'target pitch', min: 20, max: 800, color: '#5aa0c8' },
+    { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
+  ],
   // A grain-cloud voice reading from a captured sample (audio/grainPlayer.ts,
   // audio/graph.ts's 'grain' case; ui/grainSampler.ts's popup is where the
   // capture and its point markers actually live — this voice has no

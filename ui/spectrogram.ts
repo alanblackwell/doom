@@ -30,8 +30,12 @@ const WINDOW = hannWindow(FFT_SIZE);
 
 // In-place radix-2 Cooley-Tukey FFT over separate real/imaginary arrays
 // (both length `size`, a power of two) — a one-shot offline analysis has no
-// need for anything fancier (SIMD, real-input optimizations, ...).
-function fft(re: Float32Array, im: Float32Array): void {
+// need for anything fancier (SIMD, real-input optimizations, ...). Exported
+// for ui/pitchAnalysis.ts's own cepstral analysis (real cepstrum = inverse
+// FFT of the log-magnitude spectrum, via the standard conjugate trick: this
+// same forward transform run on conjugated input, conjugated again after —
+// see that module's own comment), rather than duplicating an FFT there.
+export function fft(re: Float32Array, im: Float32Array): void {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;

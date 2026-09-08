@@ -415,6 +415,57 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// A pitch-shifting resynthesis pedal (audio/vocodePlayer.ts,
+// audio/graph.ts's 'vocode' case): drag any drone source in here and it
+// locks a one-shot f0/formant estimate from it (auto-primed the first time
+// the contained source actually sounds), then continuously resynthesizes
+// at `targetPitch` through that fixed formant bank — same timbre,
+// different pitch, tracking whether the contained source is currently
+// sounding via an envelope follower rather than droning open-loop. `mix`
+// blends that resynthesized voice back in with the untouched contained
+// source, same dry/wet/level shape as growl-1's own. Empty (nothing docked
+// in) until a source is dropped in, same convention as overdrive-1/
+// reverb-1 above.
+graph.add({
+  id: 'vocode-1',
+  type: 'source',
+  kind: 'vocode',
+  parentId: null,
+  children: [],
+  params: { level: 0.7, targetPitch: 110, mix: 0.85 },
+  x: 1340,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 30,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// vocode-1's own by-ear f0-correction organelle (EntityType 'feature', kind
+// 'vocodeTuner' — ui/vocodeTuner.ts): a live spectrum histogram plus a
+// draggable frequency marker, for when autocorrelation picks the wrong
+// fundamental on a noisy/harmonically complex drone — mixes a reference
+// sine tone with the pedal's own dry input while open, for by-ear tuning.
+// Keeps no captured audio; only the corrected f0 (vocode-1's own
+// params.f0) survives once the popup closes. x/y/width/height/seed are
+// unused for a feature entity, same as every other feature in this file.
+graph.add({
+  id: 'vocode-1-tuner',
+  type: 'feature',
+  kind: 'vocodeTuner',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 31,
+  docked: false,
+  ownerId: 'vocode-1',
+  expanded: false,
+});
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
 // any control dot on another entity. Drag from its small round bump

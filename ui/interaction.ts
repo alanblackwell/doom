@@ -145,6 +145,14 @@ import {
   toggleGrainTunerExposed,
 } from './grainTuner';
 import {
+  hitTestVocodeTunerPopup,
+  pressVocodeTunerHandle,
+  reanalyzeVocodeTuner,
+  releaseVocodeTunerHandle,
+  setVocodeTunerMarker,
+  vocodeTunerHzAtPoint,
+} from './vocodeTuner';
+import {
   applySequencerNoteSnap,
   applySequencerResize,
   attackDecayHandlesCoincide,
@@ -420,6 +428,11 @@ export interface InteractionState {
   metalTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
   // Same shape again, for an open grain-tuning popup (ui/grainTuner.ts).
   grainTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
+  // The vocode pedal's own f0-tuner popup (ui/vocodeTuner.ts) has just one
+  // draggable handle (the frequency marker), not a value/min/max trio, so
+  // this only needs to remember which feature entity's popup is being
+  // dragged.
+  vocodeMarkerDrag: { entityId: string } | null;
 
   // The sequencer feature (ui/sequencer.ts) whose ruler is currently being
   // dragged to scrub the playhead, if any — same "jump to the click,
@@ -596,6 +609,7 @@ export function createInteractionState(): InteractionState {
     bassTunerSliderDrag: null,
     metalTunerSliderDrag: null,
     grainTunerSliderDrag: null,
+    vocodeMarkerDrag: null,
     scrubbingSequencerId: null,
     resizingSequencer: null,
     sequencerHScrollDrag: null,
@@ -1187,6 +1201,33 @@ export function attachInteraction(
           break;
         case 'copy':
           copyGrainTuning(graph, grainTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open vocode f0-tuner popup (ui/vocodeTuner.ts) — one draggable
+    // handle (the frequency marker) instead of the value/min/max trio the
+    // tuning-constant popups above have, plus a re-analyze button rather
+    // than a checkbox/copy pair.
+    const vocodeTunerHit = hitTestVocodeTunerPopup(graph, point);
+    if (vocodeTunerHit) {
+      switch (vocodeTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(vocodeTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'marker':
+          canvas.setPointerCapture(e.pointerId);
+          setVocodeTunerMarker(graph, vocodeTunerHit.entityId, vocodeTunerHit.hz);
+          pressVocodeTunerHandle(vocodeTunerHit.entityId);
+          state.vocodeMarkerDrag = { entityId: vocodeTunerHit.entityId };
+          break;
+        case 'reanalyze':
+          reanalyzeVocodeTuner(graph, vocodeTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
@@ -2147,6 +2188,13 @@ export function attachInteraction(
       return;
     }
 
+    if (state.vocodeMarkerDrag) {
+      const { entityId } = state.vocodeMarkerDrag;
+      const hz = vocodeTunerHzAtPoint(graph, entityId, point);
+      if (hz !== null) setVocodeTunerMarker(graph, entityId, hz);
+      return;
+    }
+
     if (state.wiringFrom) {
       state.wireDragPoint = point;
       const source = graph.get(state.wiringFrom.entityId);
@@ -2519,6 +2567,13 @@ export function attachInteraction(
     if (state.grainTunerSliderDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.grainTunerSliderDrag = null;
+      return;
+    }
+
+    if (state.vocodeMarkerDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      releaseVocodeTunerHandle(state.vocodeMarkerDrag.entityId);
+      state.vocodeMarkerDrag = null;
       return;
     }
 
