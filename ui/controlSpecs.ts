@@ -137,6 +137,21 @@ overdrive: [
     { param: 'bits', label: 'bit depth', min: 1, max: 16, color: '#e0883c' },
     { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
   ],
+  // A noise gate (audio/graph.ts's 'noisegate' case,
+  // dsp/worklets/noisegate-processor.js) — mutes below threshold rather
+  // than compressing above one, the tight silence-between-hits character
+  // modern metal production wants. attack/release/hold are by-ear tunable
+  // through ui/noisegateTuner.ts's own tuning organelle
+  // (audio/noisegateTuning.ts's NOISEGATE_TUNING, reusing
+  // ui/tuningOrganelle.ts same as grind/bass/metal/grain/vocode) but have
+  // no control-dot of their own yet. mix reuses growl's own dry/wet teal;
+  // threshold gets its own new "cutoff/floor" grey-teal, distinct from
+  // every other pedal's own hues.
+  noisegate: [
+    { param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' },
+    { param: 'threshold', label: 'threshold', min: 0, max: 0.3, color: '#5a7a8a' },
+    { param: 'mix', label: 'mix', min: 0, max: 1, color: '#4ab8a8' },
+  ],
   // A grain-cloud voice reading from a captured sample (audio/grainPlayer.ts,
   // audio/graph.ts's 'grain' case; ui/grainSampler.ts's popup is where the
   // capture and its point markers actually live — this voice has no

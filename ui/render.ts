@@ -53,6 +53,7 @@ import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
 import { drawGrainTunerPopup } from './grainTuner';
+import { drawNoisegateTunerPopup } from './noisegateTuner';
 import { drawVocodeTunerPopup, endVocodeTunerFrame } from './vocodeTuner';
 import { drawSynthConfigPopup, drawWaveGlyph } from './synthConfig';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
@@ -1396,6 +1397,14 @@ export function renderFrame(
             ? { key: interaction.grainTunerSliderDrag.key, target: interaction.grainTunerSliderDrag.target as 'min' | 'max' }
             : null;
         drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
+      } else if (feature.kind === 'noisegateTuning') {
+        const noisegateCaretDrag =
+          interaction.noisegateTunerSliderDrag &&
+          interaction.noisegateTunerSliderDrag.entityId === feature.id &&
+          interaction.noisegateTunerSliderDrag.target !== 'value'
+            ? { key: interaction.noisegateTunerSliderDrag.key, target: interaction.noisegateTunerSliderDrag.target as 'min' | 'max' }
+            : null;
+        drawNoisegateTunerPopup(ctx, graph, feature, owner, now, noisegateCaretDrag, interaction.lastPointerPoint, drag);
       } else if (feature.kind === 'vocodeTuner') {
         drawVocodeTunerPopup(ctx, graph, feature, owner, drag);
       } else if (feature.kind === 'synthConfig') {

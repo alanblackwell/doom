@@ -514,6 +514,51 @@ graph.add({
   ownerId: null,
   expanded: false,
 });
+// A noise gate (audio/graph.ts's 'noisegate' case,
+// dsp/worklets/noisegate-processor.js): mutes whatever's dropped in below
+// `threshold` rather than compressing above one — the tight, silence-
+// between-hits character modern metal production wants (djent/metalcore-
+// style palm-mute chugs). Empty until a source is dropped in, same
+// convention as overdrive-1/reverb-1 above.
+graph.add({
+  id: 'noisegate-1',
+  type: 'source',
+  kind: 'noisegate',
+  parentId: null,
+  children: [],
+  params: { level: 0.8, threshold: 0.05, mix: 1 },
+  x: 2180,
+  y: 380,
+  width: 64,
+  height: 44,
+  seed: 36,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// noisegate-1's own tuning organelle (EntityType 'feature', kind
+// 'noisegateTuning' — ui/noisegateTuner.ts): a by-ear tuning panel for the
+// worklet's own attack/release/hold constants (audio/noisegateTuning.ts's
+// NOISEGATE_TUNING), with a Copy button that turns the current tuning into
+// ready-to-paste source text — same organelle pattern as grind-1-tuning/
+// bass-1-tuning. x/y/width/height/seed are unused for a feature entity,
+// same as every other feature in this file.
+graph.add({
+  id: 'noisegate-1-tuning',
+  type: 'feature',
+  kind: 'noisegateTuning',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 37,
+  docked: false,
+  ownerId: 'noisegate-1',
+  expanded: false,
+});
 // A Control entity (type: 'control'), not a source — no audio node of its
 // own (audio/graph.ts skips it entirely), just a value that can be wired to
 // any control dot on another entity. Drag from its small round bump

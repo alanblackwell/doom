@@ -21,6 +21,7 @@ import { GRAIN_TUNING, GRAIN_TUNING_KEYS, startGrainVoice } from './grainPlayer'
 import type { GrainVoiceControls } from './grainPlayer';
 import { BASS_TUNING, BASS_TUNING_KEYS } from './bassTuning';
 import { METAL_TUNING, METAL_TUNING_KEYS } from './metalTuning';
+import { NOISEGATE_TUNING, NOISEGATE_TUNING_KEYS } from './noisegateTuning';
 import { startVocodeVoice } from './vocodePlayer';
 import type { VocodeVoiceControls } from './vocodePlayer';
 import { startVocodeGranularVoice } from './vocodeGranularPlayer';
@@ -522,7 +523,7 @@ export async function initAudioEngine(): Promise<void> {
   const ctx = getAudioContext();
 
   const wasmUrl = new URL('../dsp/rust/pkg/doom_dsp.wasm', import.meta.url);
-  const [, , , , , , , wasmModule] = await Promise.all([
+  const [, , , , , , , , wasmModule] = await Promise.all([
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/noise-processor.js', import.meta.url)
     ),
@@ -549,6 +550,12 @@ export async function initAudioEngine(): Promise<void> {
     // either.
     ctx.audioWorklet.addModule(
       new URL('../dsp/worklets/bitcrush-processor.js', import.meta.url)
+    ),
+    // Also plain JS, no WASM — see dsp/worklets/noisegate-processor.js's
+    // own header comment on why its attack/hold/release state machine
+    // doesn't need it either.
+    ctx.audioWorklet.addModule(
+      new URL('../dsp/worklets/noisegate-processor.js', import.meta.url)
     ),
     WebAssembly.compileStreaming(fetch(wasmUrl)),
   ]);
@@ -1601,7 +1608,7 @@ function makeNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
 // Kinds that process `input` into `output` rather than just mixing it
 // through — exported so the renderer can mark these visually as sink+source
 // ("pedal") entities rather than plain sources/containers.
-export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl', 'vocode', 'ringmod', 'bitcrush']);
+export const PROCESSOR_KINDS = new Set(['overdrive', 'reverb', 'chorus', 'flanger', 'fuzz', 'growl', 'vocode', 'ringmod', 'bitcrush', 'noisegate']);
 
 // Classic WaveShaperNode distortion curve (the one widely cited from
 // Kevin Ennis's WebAudio overdrive example) — soft-to-hard clipping
@@ -1843,6 +1850,8 @@ function createProcessor(entity: Entity, input: GainNode): AudioNode | null {
       return createRingModFilter(entity, input);
     case 'bitcrush':
       return createBitcrushFilter(entity, input);
+    case 'noisegate':
+      return createNoisegateFilter(entity, input);
     default:
       return null;
   }
@@ -2229,6 +2238,92 @@ function createBitcrushFilter(entity: Entity, input: GainNode): AudioNode {
       wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
     },
   });
+
+  return outLevel;
+}
+
+// Forwards each NOISEGATE_TUNING key to its own worklet message type — same
+// TUNING_MESSAGE_TYPE-lookup-plus-generic-loop idiom the 'bass' case above
+// uses for BASS_TUNING_MESSAGE_TYPE, just targeting
+// dsp/worklets/noisegate-processor.js's own onmessage switch instead of a
+// WASM bass_set_*/growl_set_* export.
+const NOISEGATE_TUNING_MESSAGE_TYPE: Record<string, string> = {
+  attack: 'setAttack',
+  release: 'setRelease',
+  hold: 'setHold',
+};
+
+// A noise gate: mutes the input BELOW a threshold rather than compressing
+// it above one (which is all the native DynamicsCompressorNode can do) —
+// the tight, silence-between-hits character modern metal production wants
+// (djent/metalcore-style palm-mute chugs). The actual detector/attack/
+// hold/release state machine lives entirely in
+// dsp/worklets/noisegate-processor.js (see that file's own header for why
+// it needs a worklet — independent attack/release timing a single native
+// lowpass envelope follower can't express) — this function is just the
+// pedal-shape wiring (dry/wet/mixBus/outLevel) and control forwarding
+// around it, same shape as every other pedal here.
+function createNoisegateFilter(entity: Entity, input: GainNode): AudioNode {
+  const ctx = getAudioContext();
+
+  // Every NOISEGATE_TUNING key seeds this instance's own worklet
+  // constructor state, whether or not it currently has a control-dot —
+  // same "tunable regardless of exposed" model as the 'grind'/'bass'
+  // cases' own tuning constants.
+  const gateInitial: Record<string, number> = {};
+  for (const key of NOISEGATE_TUNING_KEYS) {
+    gateInitial[key] = entity.params[key] ?? NOISEGATE_TUNING[key].value;
+  }
+  const gate = new AudioWorkletNode(ctx, 'noisegate-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+    processorOptions: {
+      threshold: entity.params.threshold ?? 0.05,
+      attack: gateInitial.attack,
+      release: gateInitial.release,
+      hold: gateInitial.hold,
+    },
+  });
+  input.connect(gate);
+
+  // Dry/wet mix, then a post-mix level — same shape as createGrowlFilter's
+  // own dry/wet/mixBus/outLevel. Mixing dry back in here isn't just
+  // pedal-shape-for-its-own-sake: blending a tightly gated copy with the
+  // untouched original (mix < 1) is a genuine parallel-gating technique,
+  // not merely a diluted gate — default mix is 1 (a normal, fully-gated
+  // pedal) since that's the expected starting behavior.
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const mix = Math.min(1, Math.max(0, entity.params.mix ?? 1));
+  dry.gain.value = 1 - mix;
+  wet.gain.value = mix;
+
+  const mixBus = ctx.createGain();
+  const outLevel = ctx.createGain();
+  outLevel.gain.value = entity.params.level ?? 0.8;
+
+  input.connect(dry);
+  dry.connect(mixBus);
+  gate.connect(wet);
+  wet.connect(mixBus);
+  mixBus.connect(outLevel);
+
+  const gateControls: Record<string, (value: number) => void> = {
+    level: (value) => outLevel.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+    threshold: (value) => gate.port.postMessage({ type: 'setThreshold', value }),
+    mix: (value) => {
+      const m = Math.min(1, Math.max(0, value));
+      dry.gain.setTargetAtTime(1 - m, ctx.currentTime, 0.01);
+      wet.gain.setTargetAtTime(m, ctx.currentTime, 0.01);
+    },
+  };
+  // Registered for EVERY tuning key regardless of its own `exposed` flag —
+  // same reasoning as every other tuning-organelle-backed voice/pedal here.
+  for (const key of NOISEGATE_TUNING_KEYS) {
+    gateControls[key] = (value) => gate.port.postMessage({ type: NOISEGATE_TUNING_MESSAGE_TYPE[key], value });
+  }
+  registerControls(entity.id, gateControls);
 
   return outLevel;
 }

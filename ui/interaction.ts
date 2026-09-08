@@ -163,6 +163,16 @@ import {
   toggleGrainTunerExposed,
 } from './grainTuner';
 import {
+  beginNoisegateTunerMaxDrag,
+  copyNoisegateTuning,
+  hitTestNoisegateTunerPopup,
+  noisegateTunerRawValueAtPoint,
+  setNoisegateTunerMax,
+  setNoisegateTunerMin,
+  setNoisegateTunerValue,
+  toggleNoisegateTunerExposed,
+} from './noisegateTuner';
+import {
   cycleVocodeMode,
   hitTestVocodeTunerPopup,
   pressVocodeTunerHandle,
@@ -499,6 +509,9 @@ export interface InteractionState {
   metalTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
   // Same shape again, for an open grain-tuning popup (ui/grainTuner.ts).
   grainTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
+  // Same shape again, for an open noise-gate-tuning popup
+  // (ui/noisegateTuner.ts).
+  noisegateTunerSliderDrag: { entityId: string; key: string; target: 'value' | 'min' | 'max' } | null;
   // The vocode pedal's own f0-tuner popup (ui/vocodeTuner.ts) has just one
   // draggable handle (the frequency marker), not a value/min/max trio, so
   // this only needs to remember which feature entity's popup is being
@@ -689,6 +702,7 @@ export function createInteractionState(): InteractionState {
     bassTunerSliderDrag: null,
     metalTunerSliderDrag: null,
     grainTunerSliderDrag: null,
+    noisegateTunerSliderDrag: null,
     vocodeMarkerDrag: null,
     synthConfigSliderDrag: null,
     scrubbingSequencerId: null,
@@ -1471,6 +1485,44 @@ export function attachInteraction(
           break;
         case 'copy':
           copyGrainTuning(graph, grainTunerHit.entityId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open noise-gate-tuning popup (ui/noisegateTuner.ts) — same shape
+    // as the grind/bass/metal/grain-tuning popups just above.
+    const noisegateTunerHit = hitTestNoisegateTunerPopup(graph, point);
+    if (noisegateTunerHit) {
+      switch (noisegateTunerHit.kind) {
+        case 'close': {
+          const feature = graph.get(noisegateTunerHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'checkbox':
+          toggleNoisegateTunerExposed(noisegateTunerHit.entityId, noisegateTunerHit.key);
+          break;
+        case 'slider':
+          canvas.setPointerCapture(e.pointerId);
+          setNoisegateTunerValue(graph, noisegateTunerHit.entityId, noisegateTunerHit.key, noisegateTunerHit.value);
+          state.noisegateTunerSliderDrag = { entityId: noisegateTunerHit.entityId, key: noisegateTunerHit.key, target: 'value' };
+          break;
+        case 'minCaret':
+          canvas.setPointerCapture(e.pointerId);
+          setNoisegateTunerMin(graph, noisegateTunerHit.entityId, noisegateTunerHit.key, noisegateTunerHit.value);
+          state.noisegateTunerSliderDrag = { entityId: noisegateTunerHit.entityId, key: noisegateTunerHit.key, target: 'min' };
+          break;
+        case 'maxCaret':
+          canvas.setPointerCapture(e.pointerId);
+          beginNoisegateTunerMaxDrag(noisegateTunerHit.entityId, noisegateTunerHit.key);
+          setNoisegateTunerMax(graph, noisegateTunerHit.entityId, noisegateTunerHit.key, noisegateTunerHit.value);
+          state.noisegateTunerSliderDrag = { entityId: noisegateTunerHit.entityId, key: noisegateTunerHit.key, target: 'max' };
+          break;
+        case 'copy':
+          copyNoisegateTuning(graph, noisegateTunerHit.entityId);
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/sampler popups' own catch-all.
@@ -2564,6 +2616,17 @@ export function attachInteraction(
       return;
     }
 
+    if (state.noisegateTunerSliderDrag) {
+      const { entityId, key, target } = state.noisegateTunerSliderDrag;
+      const value = noisegateTunerRawValueAtPoint(graph, entityId, key, point);
+      if (value !== null) {
+        if (target === 'value') setNoisegateTunerValue(graph, entityId, key, value);
+        else if (target === 'min') setNoisegateTunerMin(graph, entityId, key, value);
+        else setNoisegateTunerMax(graph, entityId, key, value);
+      }
+      return;
+    }
+
     if (state.vocodeMarkerDrag) {
       const { entityId } = state.vocodeMarkerDrag;
       const hz = vocodeTunerHzAtPoint(graph, entityId, point);
@@ -2980,6 +3043,12 @@ export function attachInteraction(
     if (state.grainTunerSliderDrag) {
       canvas.releasePointerCapture(e.pointerId);
       state.grainTunerSliderDrag = null;
+      return;
+    }
+
+    if (state.noisegateTunerSliderDrag) {
+      canvas.releasePointerCapture(e.pointerId);
+      state.noisegateTunerSliderDrag = null;
       return;
     }
 

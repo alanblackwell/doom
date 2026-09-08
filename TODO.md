@@ -234,32 +234,32 @@ Placeholders for larger features to elaborate on when we get to each one.
     earns its keep). Signal order: decimate first, then quantize, same as
     a real lo-fi sampler's own ADC path.
 
-13. **Noise gate** (not yet built) — the third genre-relevant effect
-    identified alongside `ringmod`/`bitcrush` above, deferred since it's
-    less flashy but still genuinely useful for tight, silence-between-
-    hits modern metal tone (djent/metalcore-style palm-mute chugs).
-    Web Audio's native `DynamicsCompressorNode` only compresses *above* a
-    threshold — there's no native node that mutes *below* one. Buildable
-    fully natively though, reusing the exact envelope-follower idiom
-    `audio/graph.ts`'s `createVocodeFilter` already has (rectify via a
-    `WaveShaperNode` abs-value curve + smooth via a lowpass
-    `BiquadFilterNode`, same `ABS_CURVE`/`VOCODE_ENVELOPE_LOWPASS_HZ`
-    machinery, reusable as-is): the difference is what happens to that
-    envelope signal before it reaches the output gain's own `AudioParam`.
-    Instead of feeding the raw envelope straight in (proportional,
-    additive — what the vocode pedal wants), reshape it through a SECOND
-    `WaveShaperNode` first — a sigmoid/smoothstep curve that maps envelope
-    values below the threshold to ~0 and above it to ~1 — before
-    connecting that into the target gain's `AudioParam`. That curve's own
-    steepness is the gate's attack character; the existing lowpass's own
-    cutoff is naturally its release/hold time, no separate timer needed.
-    Fully native, no worklet. Only fall back to a small worklet (rough
-    shape: track envelope state, compare to a threshold, ramp a gain
-    value with proper attack/hold/release timing) if the WaveShaper-curve
-    approximation doesn't sound tight/fast enough by ear — same
-    escalation path `bitcrush`'s own bit-depth-vs-sample-rate split
-    demonstrates (native first, worklet only for the piece that actually
-    needs per-sample state).
+13. **Noise gate** (`audio/graph.ts`'s `noisegate` case,
+    `createNoisegateFilter`, `dsp/worklets/noisegate-processor.js`) — the
+    third genre-relevant effect identified alongside `ringmod`/`bitcrush`
+    above, for tight, silence-between-hits modern metal tone (djent/
+    metalcore-style palm-mute chugs). Web Audio's native
+    `DynamicsCompressorNode` only compresses *above* a threshold — there's
+    no native node that mutes *below* one. Built as a small worklet rather
+    than the fully-native WaveShaper-curve approximation first sketched
+    here, once it became clear a proper gate genuinely needs INDEPENDENT
+    attack/release timing (fast open, slower close) that a single native
+    lowpass envelope follower can't express (it responds at the same rate
+    both directions) — same "native first, worklet only for the piece
+    that actually needs per-sample state" escalation path `bitcrush`'s own
+    bit-depth-vs-sample-rate split demonstrates, just landing on the
+    worklet side this time. The worklet's own per-sample state machine:
+    a lightly-smoothed rectified envelope compared against `threshold`,
+    a `hold` counter (keeps the gate from chattering on a signal hovering
+    right at the threshold), and a linear ramp of the gate multiplier
+    toward 0 or 1 at independent `attack`/`release` rates — plain JS, no
+    WASM, same exception `capture-processor.js`/`bitcrush-processor.js`
+    already established. `level`/`threshold`/`mix` are control-dots
+    (`ui/controlSpecs.ts`'s `noisegate` entry, `mix` a genuine parallel-
+    gating blend, not just pedal-shape-for-its-own-sake); `attack`/
+    `release`/`hold` are by-ear tunable through `ui/noisegateTuner.ts`'s
+    own tuning organelle (`audio/noisegateTuning.ts`'s `NOISEGATE_TUNING`,
+    reusing `ui/tuningOrganelle.ts` same as grind/bass/metal/grain/vocode).
 
 ## Next: a doom/industrial/drone sound palette
 
