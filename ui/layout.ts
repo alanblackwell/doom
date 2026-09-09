@@ -244,6 +244,25 @@ export function hitTest(
   return null;
 }
 
+// Every box's position in the same z-order hitTest itself searches
+// (topmost = highest index) — used by ui/interaction.ts's pointerdown to
+// decide whether a box currently drawn IN FRONT of a DIFFERENT module's own
+// open organelle popup (ui/render.ts's drawEntity/drawOwnFeatures, which
+// draws each module's own popups interleaved at its position in this same
+// order — see that pair's own header) should intercept a click there
+// instead of falling through to that now-visually-hidden popup. A feature
+// (organelle) entity itself never appears here (flattenInDrawOrder walks
+// topLevel()/childrenOf(), which both exclude type 'feature' — see
+// EntityGraph's own comments) — callers compare a popup's OWNER's index
+// instead, since a popup always draws immediately at its owner's position.
+export function drawOrderIndex(graph: EntityGraph): Map<string, number> {
+  const order: Entity[] = [];
+  flattenInDrawOrder(graph, graph.topLevel(), order);
+  const index = new Map<string, number>();
+  order.forEach((entity, i) => index.set(entity.id, i));
+  return index;
+}
+
 // Converts an absolute point into `parentId`'s local coordinate space (or
 // leaves it absolute if parentId is null) — used when finalizing a drop.
 export function toRelative(graph: EntityGraph, parentId: string | null, point: Point): Point {

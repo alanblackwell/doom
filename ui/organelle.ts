@@ -95,6 +95,8 @@ const DOT_COLUMN_INSET = 18; // from the popup's left edge
 const DOT_SPACING = 22;
 const DOT_BOTTOM_INSET = 22; // from the popup's bottom edge, where index 0 sits
 
+const POPUP_STACK_GAP = 12; // vertical gap between stacked popups from the same owner, when more than one is open at once
+
 // Anchored to the porthole's current position, growing up and to the right
 // from it — not draggable/repositionable in this version, and not clamped
 // to the viewport, so a porthole very near the canvas's own edge can run a
@@ -103,6 +105,24 @@ const DOT_BOTTOM_INSET = 22; // from the popup's bottom edge, where index 0 sits
 // ui/melody.ts's grand-staff editor, much bigger than the envelope's curve)
 // can reuse the same anchoring math — popupRect below is just this called
 // with the envelope's own fixed size.
+//
+// When more than one of `owner`'s features is open (expanded) at once,
+// their popups STACK rather than each independently anchoring off its own
+// porthole position — portholePosition's own per-feature stagger
+// (PORTHOLE_STACK_GAP) is only a few px, far smaller than any popup's own
+// height, so without this they'd land almost entirely on top of each
+// other. The first expanded feature (by featuresOf's own insertion order —
+// the SAME order portholePosition already uses for its own stagger) keeps
+// exactly today's single-popup position, unchanged; each later one is
+// appended directly below the previous one's own bottom edge. Since that
+// edge already sits right at the porthole — itself near the owner's own
+// bottom-right corner — stacking a second (third, ...) popup there pushes
+// it below the owner's own box outline, and potentially off the bottom of
+// the visible canvas. That's an accepted tradeoff, not a bug to route
+// around: the owner can just be dragged to bring a low-stacked popup back
+// into view, same as any other off-screen placement. popupSizeFor (below)
+// is how this knows each OTHER kind's own popup height without every
+// organelle module needing to import every other one.
 export function popupRectFor(
   graph: EntityGraph,
   owner: Entity,
@@ -113,8 +133,20 @@ export function popupRectFor(
 ): Rect {
   const porthole = portholePosition(graph, owner, drag, feature);
   const left = porthole.x + POPUP_OFFSET_X;
-  const bottom = porthole.y - POPUP_OFFSET_Y;
-  const top = bottom - height;
+  const singleBottom = porthole.y - POPUP_OFFSET_Y;
+
+  let top = singleBottom - height;
+  if (feature) {
+    const expanded = graph.featuresOf(owner.id).filter((f) => f.expanded);
+    const stackIndex = expanded.indexOf(feature);
+    if (stackIndex > 0) {
+      let y = singleBottom;
+      for (let i = 1; i < stackIndex; i++) {
+        y += POPUP_STACK_GAP + popupSizeFor(expanded[i].kind).height;
+      }
+      top = y + POPUP_STACK_GAP;
+    }
+  }
   return { x: left + width / 2, y: top + height / 2, width, height };
 }
 

@@ -14,7 +14,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { ownerOf, popupRectFor, closeButtonPosition, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { getEntityNodes, analyzeAndApplyVocode, setVocodeMode } from '../audio/graph';
 import { getAudioContext } from '../audio/context';
 import { getMasterChain } from '../audio/master';
@@ -22,6 +22,10 @@ import { ACCENT } from './palette';
 
 export const VOCODE_TUNER_POPUP_WIDTH = 320;
 export const VOCODE_TUNER_POPUP_HEIGHT = 210;
+// So ui/organelle.ts's own popupRectFor can stack this popup against a
+// sibling feature's on the same owner — see registerFeaturePopupSize's own
+// comment.
+registerFeaturePopupSize('vocodeTuner', VOCODE_TUNER_POPUP_WIDTH, VOCODE_TUNER_POPUP_HEIGHT);
 const PADDING = 10;
 const HIST_HEIGHT = 110;
 const AXIS_HEIGHT = 26; // draggable band below the bars, where the marker caret lives

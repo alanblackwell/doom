@@ -177,6 +177,18 @@ export class EntityGraph {
   // structurally. A Map has no in-place reorder, so a top-level move is a
   // delete-then-reinsert; a nested move just re-pushes onto the parent's
   // children array.
+  //
+  // Also raises `id`'s own feature-type organelles (ui/organelle.ts) —
+  // ui/render.ts's controls/porthole/popup passes all iterate `all()`
+  // directly rather than the box-level topLevel()/childrenOf() nesting
+  // this function otherwise reorders, so without this, raising a module's
+  // own BOX would leave its already-open popup drawn (and hit-tested) at
+  // its old stacking position, no longer visually attached to its now-
+  // topmost owner. featuresOf's own return order is preserved (each is
+  // raised in turn, so later ones simply end up after earlier ones, same
+  // relative order as before) — only the whole cluster's position among
+  // every OTHER entity/feature changes. A feature has no features of its
+  // own, so this recursion always terminates in exactly one extra level.
   bringToFront(id: string): void {
     const entity = this.entities.get(id);
     if (!entity) return;
@@ -190,6 +202,10 @@ export class EntityGraph {
     } else {
       this.entities.delete(id);
       this.entities.set(id, entity);
+    }
+
+    for (const feature of this.featuresOf(id)) {
+      this.bringToFront(feature.id);
     }
   }
 }

@@ -15,7 +15,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { ownerOf, popupRectFor, closeButtonPosition, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { registerSampleBuffer } from '../audio/graph';
 import { getAudioContext } from '../audio/context';
 import {
@@ -32,6 +32,10 @@ import { ACCENT } from './palette';
 
 export const SAMPLER_POPUP_WIDTH = 300;
 export const SAMPLER_POPUP_HEIGHT = 190;
+// So ui/organelle.ts's own popupRectFor can stack this popup against a
+// sibling feature's on the same owner — see registerFeaturePopupSize's own
+// comment.
+registerFeaturePopupSize('sampler', SAMPLER_POPUP_WIDTH, SAMPLER_POPUP_HEIGHT);
 const PADDING = 10;
 const ROW_HEIGHT = 20;
 const MARKER_HIT_RADIUS = 8;
@@ -217,6 +221,37 @@ export function commitTrim(ownerId: string, state: SamplerState, edge: 'start' |
   auditionClip(state.recordedBuffer, state.trimStart, state.trimEnd, edge);
 }
 
+// A file dragged straight from the OS onto this popup (ui/sampleDrop.ts's
+// own drop handler, which decodes it and calls this instead of its usual
+// "spawn a new 'sample' entity" path — see that module's own drop handler)
+// — an already-decoded buffer arrives here directly, so unlike
+// toggleRecord's own stop-branch there's no live mic monitor to stop-and-
+// decode, just whatever monitor might already happen to be running (armed
+// from an earlier device-list open) to tear down instead, since a dropped
+// file supersedes mic monitoring. Otherwise replicates that same branch's
+// "fresh take arrived" sequence — untrimmed start, commitTrim as the
+// initial trim (registers the playback buffer AND an exportable WAV,
+// auditions it) — so a dropped file behaves exactly like a finished
+// recording from here on. `fileName` seeds the name field (extension
+// stripped, same as a typed name — exportFileName re-appends .wav) so the
+// export filename reflects what was actually dropped rather than
+// defaulting to "recording.wav".
+export function loadSamplerFile(ownerId: string, featureEntityId: string, buffer: AudioBuffer, fileName: string): void {
+  const state = samplerStateFor(featureEntityId);
+  state.recording = null;
+  state.monitor?.stop();
+  state.monitor = null;
+  state.deviceListOpen = false;
+  state.lastError = null;
+  state.recordedBuffer = buffer;
+  state.trimStart = 0;
+  state.trimEnd = buffer.duration;
+  state.status = 'idle';
+  state.recordingPeaks = [];
+  state.name = fileName.replace(/\.[^./]+$/, '');
+  commitTrim(ownerId, state, 'end');
+}
+
 // Idle/already-recorded -> arm monitoring (if not already) and start a fresh
 // recording, discarding any previous take immediately (see below); recording
 // -> stop, decode, and commit the whole thing as the initial trim (as if the
@@ -273,6 +308,27 @@ interface SamplerLayout {
 
 export function samplerPopupRect(graph: EntityGraph, owner: Entity, drag?: DragContext): Rect {
   return popupRectFor(graph, owner, SAMPLER_POPUP_WIDTH, SAMPLER_POPUP_HEIGHT, drag);
+}
+
+// The feature entity id whose open popup's interior contains `point` — same
+// "whole interior is the drop target" idiom as ui/grainSampler.ts's own
+// grainSamplerDropTargetAt/ui/beatMatcher.ts's own beatMatcherDropTargetAt,
+// used by ui/sampleDrop.ts to route an OS file dropped onto an
+// already-open sampler popup to loadSamplerFile instead of falling through
+// to spawning a stray 'sample' entity underneath it.
+export function samplerDropTargetAt(graph: EntityGraph, point: Point, drag?: DragContext): string | null {
+  for (const entity of graph.all()) {
+    if (entity.type !== 'feature' || entity.kind !== 'sampler' || !entity.expanded) continue;
+    const owner = ownerOf(graph, entity);
+    if (!owner) continue;
+    const popup = samplerPopupRect(graph, owner, drag);
+    const left = popup.x - popup.width / 2;
+    const top = popup.y - popup.height / 2;
+    if (point.x >= left && point.x <= left + popup.width && point.y >= top && point.y <= top + popup.height) {
+      return entity.id;
+    }
+  }
+  return null;
 }
 
 function layoutFor(popup: Rect): SamplerLayout {

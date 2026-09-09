@@ -64,7 +64,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { gridStepSeconds, ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { gridStepSeconds, ownerOf, popupRectFor, closeButtonPosition, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import type { HandleKind } from './organelle';
 import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import { getEntityNodes } from '../audio/graph';
@@ -107,6 +107,10 @@ export const BEAT_MATCHER_POPUP_HEIGHT =
   RULER_HEIGHT +
   H_SCROLLBAR_HEIGHT +
   BOTTOM_PADDING;
+// So ui/organelle.ts's own popupRectFor can stack this popup against a
+// sibling feature's on the same owner — see registerFeaturePopupSize's own
+// comment.
+registerFeaturePopupSize('beatMatcher', BEAT_MATCHER_POPUP_WIDTH, BEAT_MATCHER_POPUP_HEIGHT);
 // Room on the right for the zoom axis-handle (flush against the plot
 // area), same spot ui/sequencer.ts reserves RIGHT_MARGIN for (its own
 // per-channel connectors share that margin too, which this track has no
@@ -509,6 +513,57 @@ export function setBeatMatcherSource(featureEntityId: string, sourceEntityId: st
   state.confirmedPointSeconds = null;
   state.selectionLoop = false;
   armBeatMatcher(featureEntityId);
+}
+
+// A file dragged straight from the OS onto this popup while it's open
+// (ui/sampleDrop.ts's own drop handler, which decodes it and calls this
+// instead of its usual "spawn a new 'sample' entity" path — see that
+// module's own drop handler) — an already-decoded buffer arrives here
+// directly, so unlike setBeatMatcherSource above there's no live source to
+// reference or watchSound for. Replicates finishBeatMatcherCapture's own
+// "fresh buffer arrived" side effects (onset suggestions, view/transport/
+// selection reset) since this reaches the exact same 'paused'-with-a-
+// capture end state, just without ever having been armed/recording. No
+// `graph`/owner lookup needed — unlike ui/grainSampler.ts's own
+// loadGrainFile, nothing here pushes the buffer into a separate live-voice
+// registry; audio/beatMatcherPlayer.ts reads state.capturedBuffer directly
+// off this same state object every poll.
+export function loadBeatMatcherFile(featureEntityId: string, buffer: AudioBuffer): void {
+  const state = beatMatcherStateFor(featureEntityId);
+  stopWatcher(state);
+  if (state.recording) {
+    state.recording.stop();
+    state.recording = null;
+  }
+  state.sourceEntityId = null; // nothing live to reference — see this function's own header
+  state.capturedBuffer = buffer;
+  const spectrogramData = computeSpectrogram(buffer);
+  state.spectrogramData = spectrogramData;
+  state.spectrogramImage = renderSpectrogramImage(spectrogramData);
+  const features = computeOnsetFeatures(spectrogramData);
+  state.onsetFeatures = features;
+  state.onsetCandidateSeconds = pickOnsetCandidates(features);
+  state.liveSpectrogram = null;
+  state.notes = [];
+  state.zoomSeconds = clampZoomSeconds(state, buffer.duration);
+  state.scrollSeconds = 0;
+  state.playing = false;
+  state.playStartCtxTime = null;
+  state.pausedAtSeconds = 0;
+  state.startSeconds = 0;
+  state.endSeconds = buffer.duration;
+  state.loopAtEnd = false;
+  state.autoScrollSuspended = false;
+  state.playbackSpeed = 1;
+  state.selectionStartSeconds = null;
+  state.selectionEndSeconds = null;
+  state.selectionMarginBeforeSeconds = null;
+  state.selectionMarginAfterSeconds = null;
+  state.currentPointSeconds = null;
+  state.confirmedPointSeconds = null;
+  state.selectionLoop = false;
+  state.infoOverlayOpen = false;
+  state.status = 'paused';
 }
 
 // The record button's behavior depends entirely on current status — see
@@ -3127,7 +3182,7 @@ function drawInlineCaptureInfo(
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(source ? `source: ${source.label ?? source.kind}` : 'drag an audio source here to begin', left, rowTop + 13);
+  ctx.fillText(source ? `source: ${source.label ?? source.kind}` : 'drag a source, or a file, here to begin', left, rowTop + 13);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
   const statusText = captureStatusText(state);

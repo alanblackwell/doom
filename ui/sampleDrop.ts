@@ -4,11 +4,30 @@
 // HTML5 drag-and-drop (dragover/drop DOM events on the canvas element),
 // a wholly separate mechanism from ui/interaction.ts's own PointerEvent-
 // driven canvas drag, so it doesn't touch or conflict with that state.
+//
+// Two exceptions to "always creates a new 'sample' entity":
+//   - a drop landing inside an OPEN grain-editor/beat-matcher/sampler popup
+//     (ui/grainSampler.ts's 'grainEditor' feature, ui/beatMatcher.ts's
+//     'beatMatcher' feature, ui/sampler.ts's 'sampler' feature — the same
+//     popups a dragged-in-app source, or in the sampler's case a live mic
+//     take, can already land on) decodes the file and hands it straight to
+//     that popup's own capture instead, via loadGrainFile/
+//     loadBeatMatcherFile/loadSamplerFile — same idea as dropping an
+//     in-app source onto it, just sourced from the OS instead of the canvas.
+//   - a drop landing on the *box* of an entity that OWNS one of those
+//     features, while that feature's popup is still closed, opens the
+//     popup first (same as clicking its porthole) and then does the same
+//     thing — see openLoadableFeature below.
 
-import type { EntityGraph } from '../audio/entityGraph';
+import type { Entity, EntityGraph } from '../audio/entityGraph';
 import { getAudioContext } from '../audio/context';
 import { activateEntity, registerSampleBuffer } from '../audio/graph';
 import { applyPositionToMix } from './stereoMix';
+import { hitTest } from './layout';
+import { ownerOf } from './organelle';
+import { grainSamplerDropTargetAt, loadGrainFile } from './grainSampler';
+import { beatMatcherDropTargetAt, loadBeatMatcherFile } from './beatMatcher';
+import { samplerDropTargetAt, loadSamplerFile } from './sampler';
 
 const BOX_WIDTH = 110;
 const BOX_HEIGHT = 70; // matches kick-1/pluck-1's TRIGGERED_KINDS box size in ui/main.ts
@@ -67,6 +86,54 @@ export function registerLoadedSampleFile(entityId: string, file: LoadedSampleFil
 export function renameLoadedSampleFile(entityId: string, fileName: string): void {
   const existing = loadedSampleFiles.get(entityId);
   if (existing) loadedSampleFiles.set(entityId, { ...existing, fileName });
+}
+
+// Shared by the grain-editor/beat-matcher/sampler popup-drop branches
+// below: picks the first audio-looking file out of a (possibly multi-file)
+// drop, decodes it, and hands the result (plus the File itself, for
+// ui/sampler.ts's own loadSamplerFile, which wants the original name) to
+// whichever popup's own loader `onLoaded` is — same decodeAudioData step
+// addSampleEntity below uses for a canvas drop, just without an entity/
+// registerSampleBuffer/archive side of things to also set up, since the
+// popup being dropped onto already has its own home for the decoded buffer.
+function loadFirstAudioFile(files: FileList, targetLabel: string, onLoaded: (buffer: AudioBuffer, file: File) => void): void {
+  const file = Array.from(files).find(looksLikeAudioFile);
+  if (!file) return;
+  file
+    .arrayBuffer()
+    .then((arrayBuffer) => getAudioContext().decodeAudioData(arrayBuffer))
+    .then((buffer) => onLoaded(buffer, file))
+    .catch((err) => {
+      console.error(`Failed to load dropped audio file "${file.name}" into the ${targetLabel} popup:`, err);
+    });
+}
+
+// Routes a drop's file into whichever loadable feature `feature` is —
+// shared by both "already open" and "just opened by openLoadableFeature"
+// branches in the drop handler below, so the kind dispatch only lives once.
+function loadFileIntoFeature(graph: EntityGraph, files: FileList, feature: Entity): void {
+  if (feature.kind === 'grainEditor') {
+    loadFirstAudioFile(files, 'grain', (buffer) => loadGrainFile(graph, feature.id, buffer));
+  } else if (feature.kind === 'beatMatcher') {
+    loadFirstAudioFile(files, 'beat-matcher', (buffer) => loadBeatMatcherFile(feature.id, buffer));
+  } else if (feature.kind === 'sampler') {
+    const owner = ownerOf(graph, feature);
+    if (!owner) return;
+    loadFirstAudioFile(files, 'sampler', (buffer, file) => loadSamplerFile(owner.id, feature.id, buffer, file.name));
+  }
+}
+
+// The grainEditor/beatMatcher/sampler feature `entity` owns, if any —
+// opened (same effect as clicking its porthole) so a file dropped directly
+// on the entity's own BOX, rather than an already-open popup, has
+// somewhere to land.
+function openLoadableFeature(graph: EntityGraph, entity: Entity): Entity | null {
+  const feature = graph
+    .featuresOf(entity.id)
+    .find((f) => f.kind === 'grainEditor' || f.kind === 'beatMatcher' || f.kind === 'sampler');
+  if (!feature) return null;
+  feature.expanded = true;
+  return feature;
 }
 
 async function addSampleEntity(
@@ -139,6 +206,31 @@ export function attachSampleDrop(canvas: HTMLCanvasElement, graph: EntityGraph):
 
     const rect = canvas.getBoundingClientRect();
     let point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+    // Landing inside an ALREADY-OPEN grain-editor/beat-matcher/sampler
+    // popup takes over the whole drop — each holds one capture at a time,
+    // so (same as dropping a single in-app source onto it) only the first
+    // audio file in a multi-file drop is used; the rest are silently
+    // ignored rather than also spawning 'sample' entities underneath it.
+    const openTargetId =
+      grainSamplerDropTargetAt(graph, point) ?? beatMatcherDropTargetAt(graph, point) ?? samplerDropTargetAt(graph, point);
+    if (openTargetId) {
+      const feature = graph.get(openTargetId);
+      if (feature) loadFileIntoFeature(graph, files, feature);
+      return;
+    }
+
+    // Landing on the BOX of an entity that owns one of those same features
+    // — grain-1, beat-matcher-1, sampler-1 — while its popup is still
+    // closed opens the popup (same as clicking its porthole) and routes
+    // the file the same way, so there's no need to open the organelle by
+    // hand first just to drop a file onto it.
+    const hitEntity = hitTest(graph, point, new Set());
+    const openedFeature = hitEntity ? openLoadableFeature(graph, hitEntity) : null;
+    if (openedFeature) {
+      loadFileIntoFeature(graph, files, openedFeature);
+      return;
+    }
 
     for (const file of Array.from(files)) {
       if (!looksLikeAudioFile(file)) continue;

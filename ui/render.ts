@@ -161,7 +161,8 @@ function drawEntity(
   depth: number,
   interaction: InteractionState,
   now: number,
-  drag: DragContext | undefined
+  drag: DragContext | undefined,
+  canvas: HTMLCanvasElement
 ): void {
   // The dragged entity is drawn separately, as an overlay, so it visually
   // lifts above the whole tree instead of staying nested where it started.
@@ -212,14 +213,219 @@ function drawEntity(
     });
   }
 
-  // Controls are NOT drawn here — they render in a separate final pass in
-  // renderFrame(), on top of every box including the drag overlay. Drawing
-  // them inline (as before) meant anything dropped into a filter, or drawn
+  for (const child of graph.childrenOf(entity.id)) {
+    drawEntity(ctx, graph, child, depth + 1, interaction, now, drag, canvas);
+  }
+
+  // This entity's own controls/pad/doom-lever, and (below) its own
+  // organelles — both drawn here, after its own box AND after recursing
+  // into its children, not inline right after the box above. Drawing them
+  // inline there (as before) meant anything dropped into a filter, or drawn
   // after it in the normal tree order, could visually cover its own control
   // dots/slider even though the box had grown to make room underneath.
+  // Both used to be separate, later, global passes over graph.all() instead
+  // — necessary back when every popup drew as one late, unconditional layer
+  // over every box regardless of z-order (and controls a similar single
+  // layer over every box, under every popup) — see drawOwnFeatures's own
+  // header for why that's no longer what's wanted: a later (more "front")
+  // module must be able to visually cover an earlier module's own controls
+  // and open organelles, the same way it already covers that module's box.
+  drawControls(ctx, graph, entity, bounds, interaction);
+  drawPad(ctx, entity, bounds, interaction, now);
+  drawEntityDoomLever(ctx, entity, bounds, interaction, now);
 
-  for (const child of graph.childrenOf(entity.id)) {
-    drawEntity(ctx, graph, child, depth + 1, interaction, now, drag);
+  drawOwnFeatures(ctx, graph, entity, interaction, now, drag, canvas);
+}
+
+// Draws `owner`'s own feature organelles (ui/organelle.ts) — every porthole
+// (collapsed bump inset in the box) first, then every expanded popup, same
+// two-sub-pass split as this used to be as a global pass (see the removed
+// comment this replaced): within ONE owner's own features, a porthole must
+// never sit on top of that owner's own popup purely because of
+// graph.featuresOf's iteration order. Called from drawEntity (for a normal,
+// non-dragged owner, interleaved into the same recursive z-order walk as
+// every box) and from drawDraggedSubtree (for the live-dragged owner and
+// its whole subtree, translated) — never both for the same owner in the
+// same frame, since drawEntity returns early for anything inside the
+// dragged subtree.
+function drawOwnFeatures(
+  ctx: CanvasRenderingContext2D,
+  graph: EntityGraph,
+  owner: Entity,
+  interaction: InteractionState,
+  now: number,
+  drag: DragContext | undefined,
+  canvas: HTMLCanvasElement
+): void {
+  if (owner.docked) return; // nothing to anchor an organelle to while parked in the dock
+
+  const features = graph.featuresOf(owner.id);
+
+  for (const feature of features) {
+    if (feature.expanded) continue;
+    // Drawn regardless of THIS feature's own expanded state — see
+    // ui/organelle.ts's hitTestPorthole, generalized so it stays a live,
+    // visible affordance (close on click; for a beat-matcher, also a wire
+    // jack) even once its own popup is open, not just while collapsed.
+    drawPorthole(ctx, graph, feature, owner, drag);
+  }
+
+  for (const feature of features) {
+    if (!feature.expanded) continue;
+    if (feature.kind === 'melody') {
+      // A live horizontal item drag (ui/interaction.ts's melodyPress)
+      // renders that one item at the raw pointer x rather than its
+      // snapped slot — see ui/melody.ts's MelodyDragOverride for why. If
+      // the pointer is hovering a same-pitch note (mergeTarget), that
+      // note has frozen in place instead of reordering (reorderDuringDrag),
+      // so the dragged item's own visual snaps onto ITS position instead
+      // of the raw pointer — reading as "sitting on top of" the target.
+      const press = interaction.melodyPress;
+      let dragOverride: { item: MelodyItem; x: number } | null = null;
+      if (press && press.entityId === feature.id && press.dragging && press.axis === 'x') {
+        const x = press.mergeTarget
+          ? (itemScreenX(graph, feature.id, press.mergeTarget, drag) ?? press.currentPointer.x)
+          : press.currentPointer.x;
+        dragOverride = { item: press.item, x };
+      }
+      drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
+    } else if (feature.kind === 'sampler') {
+      drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
+    } else if (feature.kind === 'grainEditor') {
+      drawGrainSamplerPopup(ctx, graph, feature, owner, interaction.hoverGrainId === feature.id, drag);
+    } else if (feature.kind === 'sequencer') {
+      const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
+      const resizing = interaction.resizingSequencer?.entityId === feature.id;
+      const noteDrag = interaction.sequencerNoteDrag;
+      let noteSnap: NoteSnapIndicator | null = null;
+      if (noteDrag && noteDrag.entityId === feature.id && noteDrag.snap.snapCandidateSeconds !== null) {
+        noteSnap = {
+          candidateSeconds: noteDrag.snap.snapCandidateSeconds,
+          channelIndex: noteDrag.channelIndex,
+          snapped: noteDrag.snap.snapped,
+          holdFraction: noteSnapHoldFraction(noteDrag.snap, now),
+        };
+      }
+      const envelopeDrag = interaction.sequencerEnvelopeDrag;
+      const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
+      const cursorDragging = interaction.scrubbingSequencerId === feature.id;
+      // The note currently being drag-moved, if any — dragSequencerNoteAcross
+      // (ui/sequencer.ts) lets it travel over other notes in transit, so
+      // drawSequencerNote shrinks its rendered height slightly to keep its
+      // own edges visually distinct from whatever it's passing over.
+      const movingNoteId =
+        noteDrag && noteDrag.entityId === feature.id && noteDrag.mode === 'move' ? noteDrag.noteId : null;
+      drawSequencerPopup(
+        ctx,
+        graph,
+        feature,
+        owner,
+        now,
+        draggingAxis,
+        resizing,
+        noteSnap,
+        activeEnvelopeHandle,
+        cursorDragging,
+        movingNoteId,
+        drag
+      );
+    } else if (feature.kind === 'beatMatcher') {
+      const beatMatcherEnvelopeDrag = interaction.beatMatcherEnvelopeDrag;
+      const activeBeatMatcherEnvelopeHandle =
+        beatMatcherEnvelopeDrag && beatMatcherEnvelopeDrag.entityId === feature.id ? beatMatcherEnvelopeDrag.handle : null;
+      const beatMatcherNoteDrag = interaction.beatMatcherNoteDrag;
+      let beatMatcherNoteSnap: BeatMatcherNoteSnapIndicator | null = null;
+      if (
+        beatMatcherNoteDrag &&
+        beatMatcherNoteDrag.entityId === feature.id &&
+        beatMatcherNoteDrag.snap.snapCandidateSeconds !== null
+      ) {
+        beatMatcherNoteSnap = {
+          candidateSeconds: beatMatcherNoteDrag.snap.snapCandidateSeconds,
+          snapped: beatMatcherNoteDrag.snap.snapped,
+          holdFraction: beatMatcherNoteSnapHoldFraction(beatMatcherNoteDrag.snap, now),
+        };
+      }
+      // The note currently being drag-moved, if any — dragBeatMatcherNoteAcross
+      // (ui/beatMatcher.ts) lets it travel over other notes in transit, so
+      // drawBeatMatcherNote shrinks its rendered height slightly to keep its
+      // own edges visually distinct from whatever it's passing over. Same
+      // idea as ui/sequencer.ts's own movingNoteId just above.
+      const beatMatcherMovingNoteId =
+        beatMatcherNoteDrag && beatMatcherNoteDrag.entityId === feature.id && beatMatcherNoteDrag.mode === 'move'
+          ? beatMatcherNoteDrag.noteId
+          : null;
+      drawBeatMatcherPopup(
+        ctx,
+        graph,
+        feature,
+        owner,
+        interaction.hoverBeatMatcherId === feature.id,
+        interaction.draggingTimeAxis?.entityId === feature.id,
+        activeBeatMatcherEnvelopeHandle,
+        beatMatcherNoteSnap,
+        beatMatcherMovingNoteId,
+        now,
+        drag
+      );
+    } else if (feature.kind === 'grindTuning') {
+      const grindCaretDrag =
+        interaction.grindTunerSliderDrag &&
+        interaction.grindTunerSliderDrag.entityId === feature.id &&
+        interaction.grindTunerSliderDrag.target !== 'value'
+          ? { key: interaction.grindTunerSliderDrag.key, target: interaction.grindTunerSliderDrag.target as 'min' | 'max' }
+          : null;
+      drawGrindTunerPopup(ctx, graph, feature, owner, now, grindCaretDrag, interaction.lastPointerPoint, drag);
+    } else if (feature.kind === 'bassTuning') {
+      const bassCaretDrag =
+        interaction.bassTunerSliderDrag &&
+        interaction.bassTunerSliderDrag.entityId === feature.id &&
+        interaction.bassTunerSliderDrag.target !== 'value'
+          ? { key: interaction.bassTunerSliderDrag.key, target: interaction.bassTunerSliderDrag.target as 'min' | 'max' }
+          : null;
+      drawBassTunerPopup(ctx, graph, feature, owner, now, bassCaretDrag, interaction.lastPointerPoint, drag);
+    } else if (feature.kind === 'metalTuning') {
+      const metalCaretDrag =
+        interaction.metalTunerSliderDrag &&
+        interaction.metalTunerSliderDrag.entityId === feature.id &&
+        interaction.metalTunerSliderDrag.target !== 'value'
+          ? { key: interaction.metalTunerSliderDrag.key, target: interaction.metalTunerSliderDrag.target as 'min' | 'max' }
+          : null;
+      drawMetalTunerPopup(ctx, graph, feature, owner, now, metalCaretDrag, interaction.lastPointerPoint, drag);
+    } else if (feature.kind === 'grainTuning') {
+      const grainCaretDrag =
+        interaction.grainTunerSliderDrag &&
+        interaction.grainTunerSliderDrag.entityId === feature.id &&
+        interaction.grainTunerSliderDrag.target !== 'value'
+          ? { key: interaction.grainTunerSliderDrag.key, target: interaction.grainTunerSliderDrag.target as 'min' | 'max' }
+          : null;
+      drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
+    } else if (feature.kind === 'noisegateTuning') {
+      const noisegateCaretDrag =
+        interaction.noisegateTunerSliderDrag &&
+        interaction.noisegateTunerSliderDrag.entityId === feature.id &&
+        interaction.noisegateTunerSliderDrag.target !== 'value'
+          ? { key: interaction.noisegateTunerSliderDrag.key, target: interaction.noisegateTunerSliderDrag.target as 'min' | 'max' }
+          : null;
+      drawNoisegateTunerPopup(ctx, graph, feature, owner, now, noisegateCaretDrag, interaction.lastPointerPoint, drag);
+    } else if (feature.kind === 'vocodeTuner') {
+      drawVocodeTunerPopup(ctx, graph, feature, owner, drag);
+    } else if (feature.kind === 'synthConfig') {
+      const activeDepthDrag =
+        interaction.synthConfigSliderDrag && interaction.synthConfigSliderDrag.entityId === feature.id
+          ? interaction.synthConfigSliderDrag.param
+          : null;
+      const wireDropTarget =
+        interaction.wireHoverTarget && interaction.wireHoverTarget.entityId === feature.id
+          ? interaction.wireHoverTarget.spec.param
+          : null;
+      drawSynthConfigPopup(ctx, graph, feature, owner, activeDepthDrag, wireDropTarget, drag);
+    } else {
+      const activeHandle =
+        interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
+      const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
+      drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
+    }
   }
 }
 
@@ -1200,7 +1406,7 @@ export function renderFrame(
   }
 
   for (const entity of graph.topLevel()) {
-    drawEntity(ctx, graph, entity, 0, interaction, now, drag);
+    drawEntity(ctx, graph, entity, 0, interaction, now, drag, canvas);
   }
 
   // Dragged entity (and, if it's a container, its whole subtree — children
@@ -1226,13 +1432,12 @@ export function renderFrame(
     }
   }
 
-  // Controls and trigger pads render last of all, on top of every box
-  // including the drag overlay above — "pop-up controls always float above
-  // all other content." The dragged entity itself shows neither (nothing
-  // else about it renders inline either while it's flying), but a child
-  // riding along with a dragged container still needs its own controls/pad
-  // translated by the same delta, or they'd stay drawn at its pre-drag
-  // position.
+  // A dragged container's own descendants ride along with it rather than
+  // being left behind at their pre-drag position — needed below by
+  // drawWires (a wire's endpoint tracks the live drag too, not just the
+  // eventual dropped position) since drawEntity's own recursion skips the
+  // whole dragged subtree entirely (see drawDraggedSubtree, which redraws
+  // it — box, controls, organelles all included — translated by dragDelta).
   const draggedSubtreeIds = interaction.draggingId
     ? descendantIds(graph, interaction.draggingId)
     : new Set<string>();
@@ -1243,201 +1448,20 @@ export function renderFrame(
   // eventual dropped position.
   drawWires(ctx, graph, interaction, drag, dragDelta, draggedSubtreeIds, now);
 
-  for (const entity of graph.all()) {
-    if (entity.id === interaction.draggingId) continue;
-    if (entity.docked) continue; // no controls/pad while parked in the dock — see ui/dock.ts
-    if (entity.type === 'feature') continue; // drawn in its own pass below, anchored to its owner
+  // Every other visible layer — box, controls/pad, organelle portholes and
+  // popups — is drawn inline, interleaved per owner, by drawEntity/
+  // drawOwnFeatures above (and by drawDraggedSubtree below for the
+  // live-dragged subtree) — see drawOwnFeatures's own header for why that
+  // replaced what used to be separate global graph.all() passes: a later
+  // (more "front") module must be able to visually cover an earlier
+  // module's controls and open organelles, the same way it already covers
+  // that module's box.
 
-    const bounds = effectiveBounds(graph, entity, drag);
-    const drawAt =
-      dragDelta && draggedSubtreeIds.has(entity.id)
-        ? { ...bounds, x: bounds.x + dragDelta.x, y: bounds.y + dragDelta.y }
-        : bounds;
-    drawControls(ctx, graph, entity, drawAt, interaction);
-    drawPad(ctx, entity, drawAt, interaction, now);
-    drawEntityDoomLever(ctx, entity, drawAt, interaction, now);
-  }
-
-  // Internal-feature organelles (ui/organelle.ts) — a porthole inset in the
-  // owner's box while collapsed, or a popup floating over the canvas while
-  // expanded. Skipped, same as controls/pads above, while the owner itself
-  // is mid-drag (nothing about a dragged entity renders inline while it's
-  // flying) or docked (nothing to anchor to).
-  for (const feature of graph.all()) {
-    if (feature.type !== 'feature') continue;
-    const owner = feature.ownerId ? graph.get(feature.ownerId) : undefined;
-    if (!owner || owner.docked || owner.id === interaction.draggingId) continue;
-
-    if (feature.expanded) {
-      if (feature.kind === 'melody') {
-        // A live horizontal item drag (ui/interaction.ts's melodyPress)
-        // renders that one item at the raw pointer x rather than its
-        // snapped slot — see ui/melody.ts's MelodyDragOverride for why. If
-        // the pointer is hovering a same-pitch note (mergeTarget), that
-        // note has frozen in place instead of reordering (reorderDuringDrag),
-        // so the dragged item's own visual snaps onto ITS position instead
-        // of the raw pointer — reading as "sitting on top of" the target.
-        const press = interaction.melodyPress;
-        let dragOverride: { item: MelodyItem; x: number } | null = null;
-        if (press && press.entityId === feature.id && press.dragging && press.axis === 'x') {
-          const x = press.mergeTarget
-            ? (itemScreenX(graph, feature.id, press.mergeTarget, drag) ?? press.currentPointer.x)
-            : press.currentPointer.x;
-          dragOverride = { item: press.item, x };
-        }
-        drawMelodyPopup(ctx, graph, feature, owner, dragOverride, drag);
-      } else if (feature.kind === 'sampler') {
-        drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
-      } else if (feature.kind === 'grainEditor') {
-        drawGrainSamplerPopup(ctx, graph, feature, owner, drag);
-      } else if (feature.kind === 'sequencer') {
-        const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
-        const resizing = interaction.resizingSequencer?.entityId === feature.id;
-        const noteDrag = interaction.sequencerNoteDrag;
-        let noteSnap: NoteSnapIndicator | null = null;
-        if (noteDrag && noteDrag.entityId === feature.id && noteDrag.snap.snapCandidateSeconds !== null) {
-          noteSnap = {
-            candidateSeconds: noteDrag.snap.snapCandidateSeconds,
-            channelIndex: noteDrag.channelIndex,
-            snapped: noteDrag.snap.snapped,
-            holdFraction: noteSnapHoldFraction(noteDrag.snap, now),
-          };
-        }
-        const envelopeDrag = interaction.sequencerEnvelopeDrag;
-        const activeEnvelopeHandle = envelopeDrag && envelopeDrag.entityId === feature.id ? envelopeDrag.handle : null;
-        const cursorDragging = interaction.scrubbingSequencerId === feature.id;
-        // The note currently being drag-moved, if any — dragSequencerNoteAcross
-        // (ui/sequencer.ts) lets it travel over other notes in transit, so
-        // drawSequencerNote shrinks its rendered height slightly to keep its
-        // own edges visually distinct from whatever it's passing over.
-        const movingNoteId =
-          noteDrag && noteDrag.entityId === feature.id && noteDrag.mode === 'move' ? noteDrag.noteId : null;
-        drawSequencerPopup(
-          ctx,
-          graph,
-          feature,
-          owner,
-          now,
-          draggingAxis,
-          resizing,
-          noteSnap,
-          activeEnvelopeHandle,
-          cursorDragging,
-          movingNoteId,
-          drag
-        );
-      } else if (feature.kind === 'beatMatcher') {
-        const beatMatcherEnvelopeDrag = interaction.beatMatcherEnvelopeDrag;
-        const activeBeatMatcherEnvelopeHandle =
-          beatMatcherEnvelopeDrag && beatMatcherEnvelopeDrag.entityId === feature.id ? beatMatcherEnvelopeDrag.handle : null;
-        const beatMatcherNoteDrag = interaction.beatMatcherNoteDrag;
-        let beatMatcherNoteSnap: BeatMatcherNoteSnapIndicator | null = null;
-        if (
-          beatMatcherNoteDrag &&
-          beatMatcherNoteDrag.entityId === feature.id &&
-          beatMatcherNoteDrag.snap.snapCandidateSeconds !== null
-        ) {
-          beatMatcherNoteSnap = {
-            candidateSeconds: beatMatcherNoteDrag.snap.snapCandidateSeconds,
-            snapped: beatMatcherNoteDrag.snap.snapped,
-            holdFraction: beatMatcherNoteSnapHoldFraction(beatMatcherNoteDrag.snap, now),
-          };
-        }
-        // The note currently being drag-moved, if any — dragBeatMatcherNoteAcross
-        // (ui/beatMatcher.ts) lets it travel over other notes in transit, so
-        // drawBeatMatcherNote shrinks its rendered height slightly to keep its
-        // own edges visually distinct from whatever it's passing over. Same
-        // idea as ui/sequencer.ts's own movingNoteId just above.
-        const beatMatcherMovingNoteId =
-          beatMatcherNoteDrag && beatMatcherNoteDrag.entityId === feature.id && beatMatcherNoteDrag.mode === 'move'
-            ? beatMatcherNoteDrag.noteId
-            : null;
-        drawBeatMatcherPopup(
-          ctx,
-          graph,
-          feature,
-          owner,
-          interaction.hoverBeatMatcherId === feature.id,
-          interaction.draggingTimeAxis?.entityId === feature.id,
-          activeBeatMatcherEnvelopeHandle,
-          beatMatcherNoteSnap,
-          beatMatcherMovingNoteId,
-          now,
-          drag
-        );
-      } else if (feature.kind === 'grindTuning') {
-        const grindCaretDrag =
-          interaction.grindTunerSliderDrag &&
-          interaction.grindTunerSliderDrag.entityId === feature.id &&
-          interaction.grindTunerSliderDrag.target !== 'value'
-            ? { key: interaction.grindTunerSliderDrag.key, target: interaction.grindTunerSliderDrag.target as 'min' | 'max' }
-            : null;
-        drawGrindTunerPopup(ctx, graph, feature, owner, now, grindCaretDrag, interaction.lastPointerPoint, drag);
-      } else if (feature.kind === 'bassTuning') {
-        const bassCaretDrag =
-          interaction.bassTunerSliderDrag &&
-          interaction.bassTunerSliderDrag.entityId === feature.id &&
-          interaction.bassTunerSliderDrag.target !== 'value'
-            ? { key: interaction.bassTunerSliderDrag.key, target: interaction.bassTunerSliderDrag.target as 'min' | 'max' }
-            : null;
-        drawBassTunerPopup(ctx, graph, feature, owner, now, bassCaretDrag, interaction.lastPointerPoint, drag);
-      } else if (feature.kind === 'metalTuning') {
-        const metalCaretDrag =
-          interaction.metalTunerSliderDrag &&
-          interaction.metalTunerSliderDrag.entityId === feature.id &&
-          interaction.metalTunerSliderDrag.target !== 'value'
-            ? { key: interaction.metalTunerSliderDrag.key, target: interaction.metalTunerSliderDrag.target as 'min' | 'max' }
-            : null;
-        drawMetalTunerPopup(ctx, graph, feature, owner, now, metalCaretDrag, interaction.lastPointerPoint, drag);
-      } else if (feature.kind === 'grainTuning') {
-        const grainCaretDrag =
-          interaction.grainTunerSliderDrag &&
-          interaction.grainTunerSliderDrag.entityId === feature.id &&
-          interaction.grainTunerSliderDrag.target !== 'value'
-            ? { key: interaction.grainTunerSliderDrag.key, target: interaction.grainTunerSliderDrag.target as 'min' | 'max' }
-            : null;
-        drawGrainTunerPopup(ctx, graph, feature, owner, now, grainCaretDrag, interaction.lastPointerPoint, drag);
-      } else if (feature.kind === 'noisegateTuning') {
-        const noisegateCaretDrag =
-          interaction.noisegateTunerSliderDrag &&
-          interaction.noisegateTunerSliderDrag.entityId === feature.id &&
-          interaction.noisegateTunerSliderDrag.target !== 'value'
-            ? { key: interaction.noisegateTunerSliderDrag.key, target: interaction.noisegateTunerSliderDrag.target as 'min' | 'max' }
-            : null;
-        drawNoisegateTunerPopup(ctx, graph, feature, owner, now, noisegateCaretDrag, interaction.lastPointerPoint, drag);
-      } else if (feature.kind === 'vocodeTuner') {
-        drawVocodeTunerPopup(ctx, graph, feature, owner, drag);
-      } else if (feature.kind === 'synthConfig') {
-        const activeDepthDrag =
-          interaction.synthConfigSliderDrag && interaction.synthConfigSliderDrag.entityId === feature.id
-            ? interaction.synthConfigSliderDrag.param
-            : null;
-        const wireDropTarget =
-          interaction.wireHoverTarget && interaction.wireHoverTarget.entityId === feature.id
-            ? interaction.wireHoverTarget.spec.param
-            : null;
-        drawSynthConfigPopup(ctx, graph, feature, owner, activeDepthDrag, wireDropTarget, drag);
-      } else {
-        const activeHandle =
-          interaction.draggingHandle?.entityId === feature.id ? interaction.draggingHandle.handle : null;
-        const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
-        drawPopup(ctx, graph, feature, owner, formatControlValue, activeHandle, draggingAxis, now, drag);
-      }
-    }
-
-    // The porthole/bump is drawn regardless of expanded state now — see
-    // ui/organelle.ts's hitTestPorthole, generalized so this stays a live,
-    // visible affordance (close on click; for a beat-matcher, also a wire
-    // jack) even once the popup is open, not just while collapsed.
-    drawPorthole(ctx, graph, feature, owner, drag);
-  }
-
-  // Drawn last of all the canvas content — see this variable's own comment
-  // above for why the draw is deferred to here rather than happening
-  // alongside the delta computation: it needs to land on top of expanded
-  // feature popups (organelles), not underneath them.
+  // Drawn last of all the canvas content — on top of every box AND every
+  // organelle popup, including ones belonging to other modules, so the
+  // user can always see exactly where a drag is headed.
   if (dragDelta && draggedEntityForDraw) {
-    drawDraggedSubtree(ctx, graph, draggedEntityForDraw, dragDelta, 0, true, drag);
+    drawDraggedSubtree(ctx, graph, draggedEntityForDraw, dragDelta, 0, true, drag, interaction, now, canvas);
   }
 
   // A wash over everything drawn on the canvas so far (entities, wires,
@@ -1472,7 +1496,10 @@ function drawDraggedSubtree(
   delta: { x: number; y: number },
   depth: number,
   isRoot: boolean,
-  drag: DragContext | undefined
+  drag: DragContext | undefined,
+  interaction: InteractionState,
+  now: number,
+  canvas: HTMLCanvasElement
 ): void {
   const bounds = effectiveBounds(graph, entity, drag);
   const scale = isRoot ? 1.06 : 1;
@@ -1495,6 +1522,31 @@ function drawDraggedSubtree(
     });
   }
   for (const child of graph.childrenOf(entity.id)) {
-    drawDraggedSubtree(ctx, graph, child, delta, depth + 1, false, drag);
+    drawDraggedSubtree(ctx, graph, child, delta, depth + 1, false, drag, interaction, now, canvas);
   }
+
+  // This entity's own controls/pad/doom-lever, translated (not scaled) by
+  // the same delta as its box — a child riding along with a dragged
+  // container still needs these, or they'd stay drawn at its pre-drag
+  // position. The root itself shows none: nothing else about the entity
+  // actually being dragged renders inline either while it's flying (see
+  // drawBox's own `selected`/`lifted` treatment above, which is its only
+  // visual distinction while airborne).
+  if (!isRoot) {
+    const translatedBounds = { ...bounds, x: bounds.x + delta.x, y: bounds.y + delta.y };
+    drawControls(ctx, graph, entity, translatedBounds, interaction);
+    drawPad(ctx, entity, translatedBounds, interaction, now);
+    drawEntityDoomLever(ctx, entity, translatedBounds, interaction, now);
+  }
+
+  // This entity's own organelles (ui/organelle.ts), translated by the same
+  // delta as its box — see drawOwnFeatures's own header. Every entity in
+  // the dragged subtree is skipped entirely by the normal drawEntity walk
+  // (it returns early the moment it reaches the dragged root), so this is
+  // the only place any of them — root or a riding-along descendant — gets
+  // its own organelles drawn at all while the drag is in progress.
+  ctx.save();
+  ctx.translate(delta.x, delta.y);
+  drawOwnFeatures(ctx, graph, entity, interaction, now, drag, canvas);
+  ctx.restore();
 }

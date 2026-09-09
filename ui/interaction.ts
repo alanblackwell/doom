@@ -22,7 +22,7 @@ import {
   PROCESSOR_KINDS,
   TRIGGERED_KINDS,
 } from '../audio/graph';
-import { absolutePosition, descendantIds, effectiveBounds, hitTest, toRelative } from './layout';
+import { absolutePosition, descendantIds, drawOrderIndex, effectiveBounds, hitTest, toRelative } from './layout';
 import type { DragContext, Point, Rect } from './layout';
 import {
   controlsFor,
@@ -1147,6 +1147,62 @@ function applyDoomLeverAngle(graph: EntityGraph, entityId: string, point: Point)
   setDoomLeverAngle(graph, entityId, gaugeAngleToward(pivot, point));
 }
 
+// Brings the MODULE owning a feature (organelle) to the front of the
+// visual stack — called from every one of the popup/porthole hit-test
+// blocks below, right after a click is found to land within one, so
+// clicking an organelle that's currently drawn behind another one raises
+// it (and, per EntityGraph.bringToFront's own comment, its own popup)
+// regardless of which control inside the popup was actually clicked
+// (close/slider/marker/background/...). `featureEntityId` is the feature's
+// own id — every popup hit result already carries this as `entityId`, and
+// hitTestPorthole's own result (a bare Entity, not a hit-object) is
+// already the feature entity itself, so `.id` works there too.
+function raiseFeatureOwner(graph: EntityGraph, featureEntityId: string): void {
+  const feature = graph.get(featureEntityId);
+  const owner = feature ? ownerOf(graph, feature) : undefined;
+  if (owner) graph.bringToFront(owner.id);
+}
+
+// True when a DIFFERENT module's box currently renders in front of this
+// feature's own popup at `point` — see ui/render.ts's drawEntity/
+// drawOwnFeatures, which now draws each module's own organelle popups
+// interleaved at that module's own position in the z-order, rather than as
+// one unconditional layer over every box. Guards each of the popup
+// hit-test blocks below: a click that visually lands on that other,
+// now-covering box must resolve to IT, not fall through to a popup that's
+// no longer actually on top there. Scoped to a genuinely DIFFERENT module —
+// same top-level cluster (the popup's own owner, or a box nested inside/
+// containing it) never counts, so a module's own popup keeps behaving
+// exactly as before: always drawn (and clickable) above its own box and
+// its own children, regardless of z-order among OTHER modules.
+function popupIsCoveredByBox(graph: EntityGraph, point: Point, featureEntityId: string): boolean {
+  const feature = graph.get(featureEntityId);
+  const owner = feature ? ownerOf(graph, feature) : undefined;
+  if (!owner) return false;
+
+  const boxHit = hitTest(graph, point, new Set());
+  if (!boxHit) return false;
+
+  const ownerRoot = topLevelRootId(graph, owner.id);
+  if (topLevelRootId(graph, boxHit.id) === ownerRoot) return false;
+
+  const index = drawOrderIndex(graph);
+  const boxIndex = index.get(boxHit.id);
+  const ownerIndex = index.get(owner.id);
+  if (boxIndex === undefined || ownerIndex === undefined) return false;
+  return boxIndex > ownerIndex;
+}
+
+function topLevelRootId(graph: EntityGraph, id: string): string {
+  let current = graph.get(id);
+  while (current?.parentId) {
+    const parent = graph.get(current.parentId);
+    if (!parent) break;
+    current = parent;
+  }
+  return current ? current.id : id;
+}
+
 export function attachInteraction(
   canvas: HTMLCanvasElement,
   graph: EntityGraph,
@@ -1208,7 +1264,8 @@ export function attachInteraction(
     // first since it's a distinct feature kind with its own hit-testing
     // (organelle.ts's hitTestPopup only handles kind 'envelope').
     const melodyHit = hitTestMelodyPopup(graph, point);
-    if (melodyHit) {
+    if (melodyHit && !popupIsCoveredByBox(graph, point, melodyHit.entityId)) {
+      raiseFeatureOwner(graph, melodyHit.entityId);
       deselectNote(); // a press elsewhere always clears the sequencer's own note selection
       deselectBeatMatcherNote(); // ...and the beat-matcher's own, same reasoning
       const melody = melodyStateFor(melodyHit.entityId);
@@ -1261,7 +1318,8 @@ export function attachInteraction(
     // An open sampler popup (ui/sampler.ts) sits visually on top of
     // everything else too, same reasoning as the melody popup above.
     const samplerHit = hitTestSamplerPopup(graph, point);
-    if (samplerHit) {
+    if (samplerHit && !popupIsCoveredByBox(graph, point, samplerHit.entityId)) {
+      raiseFeatureOwner(graph, samplerHit.entityId);
       deselectNote(); // a press elsewhere always clears the sequencer's own note selection
       deselectBeatMatcherNote(); // ...and the beat-matcher's own, same reasoning
       switch (samplerHit.kind) {
@@ -1306,7 +1364,8 @@ export function attachInteraction(
     // of everything else too, same reasoning as the melody/sampler popups
     // above.
     const grainHit = hitTestGrainSamplerPopup(graph, point);
-    if (grainHit) {
+    if (grainHit && !popupIsCoveredByBox(graph, point, grainHit.entityId)) {
+      raiseFeatureOwner(graph, grainHit.entityId);
       switch (grainHit.kind) {
         case 'close': {
           const feature = graph.get(grainHit.entityId);
@@ -1343,7 +1402,8 @@ export function attachInteraction(
     // everything else too, same reasoning as the melody/sampler popups
     // above.
     const grindTunerHit = hitTestGrindTunerPopup(graph, point);
-    if (grindTunerHit) {
+    if (grindTunerHit && !popupIsCoveredByBox(graph, point, grindTunerHit.entityId)) {
+      raiseFeatureOwner(graph, grindTunerHit.entityId);
       switch (grindTunerHit.kind) {
         case 'close': {
           const feature = graph.get(grindTunerHit.entityId);
@@ -1381,7 +1441,8 @@ export function attachInteraction(
     // An open bass-tuning popup (ui/bassTuner.ts) — same shape as the
     // grind-tuning popup just above.
     const bassTunerHit = hitTestBassTunerPopup(graph, point);
-    if (bassTunerHit) {
+    if (bassTunerHit && !popupIsCoveredByBox(graph, point, bassTunerHit.entityId)) {
+      raiseFeatureOwner(graph, bassTunerHit.entityId);
       switch (bassTunerHit.kind) {
         case 'close': {
           const feature = graph.get(bassTunerHit.entityId);
@@ -1419,7 +1480,8 @@ export function attachInteraction(
     // An open metal-tuning popup (ui/metalTuner.ts) — same shape as the
     // grind/bass-tuning popups just above.
     const metalTunerHit = hitTestMetalTunerPopup(graph, point);
-    if (metalTunerHit) {
+    if (metalTunerHit && !popupIsCoveredByBox(graph, point, metalTunerHit.entityId)) {
+      raiseFeatureOwner(graph, metalTunerHit.entityId);
       switch (metalTunerHit.kind) {
         case 'close': {
           const feature = graph.get(metalTunerHit.entityId);
@@ -1457,7 +1519,8 @@ export function attachInteraction(
     // An open grain-tuning popup (ui/grainTuner.ts) — same shape as the
     // grind/bass/metal-tuning popups just above.
     const grainTunerHit = hitTestGrainTunerPopup(graph, point);
-    if (grainTunerHit) {
+    if (grainTunerHit && !popupIsCoveredByBox(graph, point, grainTunerHit.entityId)) {
+      raiseFeatureOwner(graph, grainTunerHit.entityId);
       switch (grainTunerHit.kind) {
         case 'close': {
           const feature = graph.get(grainTunerHit.entityId);
@@ -1495,7 +1558,8 @@ export function attachInteraction(
     // An open noise-gate-tuning popup (ui/noisegateTuner.ts) — same shape
     // as the grind/bass/metal/grain-tuning popups just above.
     const noisegateTunerHit = hitTestNoisegateTunerPopup(graph, point);
-    if (noisegateTunerHit) {
+    if (noisegateTunerHit && !popupIsCoveredByBox(graph, point, noisegateTunerHit.entityId)) {
+      raiseFeatureOwner(graph, noisegateTunerHit.entityId);
       switch (noisegateTunerHit.kind) {
         case 'close': {
           const feature = graph.get(noisegateTunerHit.entityId);
@@ -1535,7 +1599,8 @@ export function attachInteraction(
     // tuning-constant popups above have, plus a re-analyze button rather
     // than a checkbox/copy pair.
     const vocodeTunerHit = hitTestVocodeTunerPopup(graph, point);
-    if (vocodeTunerHit) {
+    if (vocodeTunerHit && !popupIsCoveredByBox(graph, point, vocodeTunerHit.entityId)) {
+      raiseFeatureOwner(graph, vocodeTunerHit.entityId);
       switch (vocodeTunerHit.kind) {
         case 'close': {
           const feature = graph.get(vocodeTunerHit.entityId);
@@ -1564,7 +1629,8 @@ export function attachInteraction(
     // waveform-blend + LFO-depth-port organelle. Same priority as every
     // other feature-kind popup above.
     const synthConfigHit = hitTestSynthConfigPopup(graph, point);
-    if (synthConfigHit) {
+    if (synthConfigHit && !popupIsCoveredByBox(graph, point, synthConfigHit.entityId)) {
+      raiseFeatureOwner(graph, synthConfigHit.entityId);
       switch (synthConfigHit.kind) {
         case 'close': {
           const feature = graph.get(synthConfigHit.entityId);
@@ -1603,7 +1669,8 @@ export function attachInteraction(
     // everything else too, same reasoning as the melody/sampler popups
     // above.
     const sequencerHit = hitTestSequencerPopup(graph, point);
-    if (sequencerHit) {
+    if (sequencerHit && !popupIsCoveredByBox(graph, point, sequencerHit.entityId)) {
+      raiseFeatureOwner(graph, sequencerHit.entityId);
       // Every case below re-selects its own note except these seven — for
       // anything else (transport, scrollbars, the end marker, empty lane
       // space, background), a press deselects whatever note was current.
@@ -1818,7 +1885,8 @@ export function attachInteraction(
     // sequencer above), but same "sits on top of everything, checked early"
     // treatment as every other feature popup here.
     const beatMatcherHit = hitTestBeatMatcherPopup(graph, point);
-    if (beatMatcherHit) {
+    if (beatMatcherHit && !popupIsCoveredByBox(graph, point, beatMatcherHit.entityId)) {
+      raiseFeatureOwner(graph, beatMatcherHit.entityId);
       // Every case below re-selects its own note (noteCreate included — a
       // beat-matcher note exists the instant it's created, unlike the
       // sequencer's own deferred-until-drag creation, so it can be selected
@@ -2080,7 +2148,8 @@ export function attachInteraction(
     // click anywhere inside it (its background included) must never fall
     // through to whatever entity happens to be underneath.
     const popupHit = hitTestPopup(graph, point);
-    if (popupHit) {
+    if (popupHit && !popupIsCoveredByBox(graph, point, popupHit.entityId)) {
+      raiseFeatureOwner(graph, popupHit.entityId);
       if (popupHit.kind === 'close') {
         const feature = graph.get(popupHit.entityId);
         if (feature) feature.expanded = false;
@@ -2190,12 +2259,23 @@ export function attachInteraction(
       return;
     }
 
+    // Whether this press landed on a play control or a value-setting pad —
+    // set by whichever branch below actually matches. A plain click
+    // elsewhere on the box (the `else` at the bottom of this function)
+    // brings the module to the front of the stack; one of these doesn't,
+    // matching "clicking the play control... doesn't need to bring it to
+    // the top" — the same exemption drag-threshold-crossing already gets
+    // via DRAG_START_THRESHOLD (a pad press that never turns into a drag
+    // never reaches that code either).
+    let firedPlayOrValueControl = false;
+
     // Trigger pads fire immediately on press, not release — a drum pad
     // reacts to touch, the way real percussion does. This doesn't replace
     // the normal select/drag handling below: pressing a pad both fires the
     // hit and can still become a drag if the pointer moves far enough, so
     // repositioning a triggered instrument from its own pad still works.
     if (TRIGGERED_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
+      firedPlayOrValueControl = true;
       if (isEntitySustained(hit.id)) {
         // Any click ends a sustain latch, not just another right-click —
         // see the contextmenu handler's own toggleSustain call for how one
@@ -2225,6 +2305,7 @@ export function attachInteraction(
         state.gatedId = hit.id;
       }
     } else if (CONTINUOUS_KINDS.has(hit.kind) && isWithinPad(effectiveBounds(graph, hit), point)) {
+      firedPlayOrValueControl = true;
       if (isEntitySustained(hit.id)) {
         // Same "any click ends it" as the TRIGGERED_KINDS branch above.
         toggleSustain(hit.id);
@@ -2258,20 +2339,31 @@ export function attachInteraction(
       // Same "fires on press, still draggable" reasoning as a trigger pad
       // above — a tap entity's whole body is its button (see
       // withinControlBody), not a smaller inset pad.
+      firedPlayOrValueControl = true;
       fireTap(graph, hit.id, state);
     } else if (hit.kind === 'sequencer' && isWithinPad(effectiveBounds(graph, hit), point)) {
       // The sequencer's own center button — a small inset pad, same as a
       // 'sample' source's own center button above, not the tap's
       // whole-body click (the rest of this control's circle stays a normal
       // drag handle, same as any other control's).
+      firedPlayOrValueControl = true;
       const feature = graph.featuresOf(hit.id).find((f) => f.kind === 'sequencer');
       if (feature) toggleSequencer(sequencerStateFor(feature.id));
     } else if (hit.kind === 'beatMatcher' && isWithinPad(effectiveBounds(graph, hit), point)) {
       // Same center-button treatment as the sequencer's own, immediately
       // above.
+      firedPlayOrValueControl = true;
       const feature = graph.featuresOf(hit.id).find((f) => f.kind === 'beatMatcher');
       if (feature) toggleBeatMatcherPlayback(feature.id);
     }
+
+    // A plain click anywhere else on the box brings it (and its own
+    // organelles — see EntityGraph.bringToFront's own comment) to the front
+    // of the stack immediately, not only once an actual drag threshold is
+    // crossed (see the matching graph.bringToFront call at drag-start in
+    // pointermove below, kept for the drag-without-a-prior-raise case, e.g.
+    // a press that starts exactly on this same frame).
+    if (!firedPlayOrValueControl) graph.bringToFront(hit.id);
 
     canvas.setPointerCapture(e.pointerId);
     pressId = hit.id;
@@ -2734,6 +2826,17 @@ export function attachInteraction(
       const dy = point.y - pressStart.y;
       if (Math.hypot(dx, dy) < DRAG_START_THRESHOLD) return;
       state.draggingId = pressId;
+      // Actually moving an entity's own position brings it (and any open
+      // organelle it owns — see EntityGraph.bringToFront's own comment) to
+      // the front of the visual stack — deliberately gated on the drag
+      // THRESHOLD just crossed here, not on the earlier press: a plain
+      // pad click that never turns into a drag never reaches this branch
+      // at all, so it doesn't raise anything, matching the "a play-control
+      // click shouldn't raise the module" ask. Wire-handle drags and
+      // control-dot value-drags are structurally separate state
+      // (wiringFrom/draggingControl) that never sets draggingId either, so
+      // they're excluded the same way, with no extra guard needed here.
+      graph.bringToFront(pressId);
       // Dragging the box again is what re-engages canvas-position-driven
       // volume after a manual slider override (see stereoMix.ts) — a no-op
       // for anything that was never overridden.
@@ -2880,6 +2983,16 @@ export function attachInteraction(
       // one this is equivalent to the old unconditional open.
       canvas.releasePointerCapture(e.pointerId);
       state.portholePress.entity.expanded = !state.portholePress.entity.expanded;
+      // Only when this OPENED the popup, not when it just closed one —
+      // raising a module for the pop-up it's about to show makes sense;
+      // raising it for one that's disappearing doesn't. Checked here,
+      // at the resolved click, rather than back at hitTestPorthole's own
+      // press-time detection, specifically so a press that turns into a
+      // wire drag instead (a beat-matcher's porthole doubles as its own
+      // event-output jack — see this block's own header comment) never
+      // reaches this at all, matching "attaching a wire... doesn't need
+      // to bring it to the top."
+      if (state.portholePress.entity.expanded) raiseFeatureOwner(graph, state.portholePress.entity.id);
       state.portholePress = null;
       return;
     }

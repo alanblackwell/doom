@@ -21,10 +21,20 @@
 // GrainPoint). A point's vertical position is currently cosmetic only — see
 // GrainPoint's own comment for why, and TODO.md for the deferred per-point
 // bandpass-by-height idea.
+//
+// A file dragged straight from the OS onto this same popup while it's open
+// (ui/sampleDrop.ts's own drop handler, which decodes it and calls
+// loadGrainFile below instead of its usual "spawn a new 'sample' entity"
+// path) is accepted the same way, just with no live source/watchSound
+// involved — it arrives as an already-decoded AudioBuffer and goes
+// straight to 'paused' with a capture in hand. decodeAudioData rejecting
+// an unrecognized file is left to surface as a console error there, same
+// as sampleDrop.ts's own canvas-drop failure handling — no separate
+// user-facing validation here.
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { ownerOf, popupRectFor, closeButtonPosition, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { ownerOf, popupRectFor, closeButtonPosition, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { getEntityNodes, getGrainVoice } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';
 import type { LevelWatcher, Recording } from '../audio/nodeCapture';
@@ -34,6 +44,10 @@ import type { GrainPoint } from '../audio/grainPlayer';
 
 export const GRAIN_POPUP_WIDTH = 320;
 export const GRAIN_POPUP_HEIGHT = 190;
+// So ui/organelle.ts's own popupRectFor can stack this popup against a
+// sibling feature's on the same owner (e.g. grain-1's own grainTuning) —
+// see registerFeaturePopupSize's own comment.
+registerFeaturePopupSize('grainEditor', GRAIN_POPUP_WIDTH, GRAIN_POPUP_HEIGHT);
 const PADDING = 10;
 const POINT_RADIUS = 5;
 const POINT_HIT_RADIUS = 9;
@@ -200,6 +214,40 @@ export function setGrainSource(graph: EntityGraph, featureEntityId: string, sour
   pushPointsToEngine(featureEntityId);
   getGrainVoice(ownerId)?.setBuffer(null);
   armGrainSampler(featureEntityId);
+}
+
+// A file dragged straight from the OS onto this popup while it's open
+// (ui/sampleDrop.ts, which decodes it and calls this instead of its own
+// usual "drop a new 'sample' entity on the canvas" path — see that
+// module's own drop handler) — an already-fully-decoded buffer arrives
+// here directly, so unlike setGrainSource above there's no live source to
+// reference or watchSound for: this goes straight to 'paused' with a
+// capture already in hand, same end state finishGrainCapture reaches, just
+// without ever having been 'armed'/'capturing'. Replaces whatever the
+// popup previously had (live-source or another file), same as dropping a
+// new in-app source over it would.
+export function loadGrainFile(graph: EntityGraph, featureEntityId: string, buffer: AudioBuffer): void {
+  const feature = graph.get(featureEntityId);
+  const owner = feature ? ownerOf(graph, feature) : undefined;
+  if (!owner) return;
+  const ownerId = owner.id;
+  grainVoiceOwnerId.set(featureEntityId, ownerId);
+  const state = grainSamplerStateFor(featureEntityId);
+  stopWatcher(state);
+  if (state.recording) {
+    state.recording.stop();
+    state.recording = null;
+  }
+  state.sourceEntityId = null; // nothing live to reference — see this function's own header
+  state.capturedBuffer = buffer;
+  state.spectrogramData = computeSpectrogram(buffer);
+  state.spectrogramImage = renderSpectrogramImage(state.spectrogramData);
+  state.liveSpectrogram = null;
+  state.points = [];
+  state.infoOverlayOpen = false;
+  pushPointsToEngine(featureEntityId);
+  getGrainVoice(ownerId)?.setBuffer(buffer);
+  state.status = 'paused';
 }
 
 // Same four-status behavior as ui/beatMatcher.ts's own
@@ -428,6 +476,12 @@ export function grainSamplerDropTargetAt(graph: EntityGraph, point: Point, drag?
 // --- Drawing -----------------------------------------------------------
 
 const PANEL_BG = 'rgba(22, 22, 22, 0.97)';
+// Same subtle wash idiom as ui/beatMatcher.ts's own DROP_ZONE_BG/_HOVER —
+// a dragged source/file passing over this popup is a valid "capture from
+// this" drop target (see ui/interaction.ts's hoverGrainId), so it needs the
+// same "about to accept a drop" visual cue that a filter's own containment
+// boundary already gets (ui/render.ts's drawBox dropTarget flag).
+const DROP_ZONE_BG_HOVER = 'rgba(255, 255, 255, 0.14)';
 const BAND_BG = 'rgba(0, 0, 0, 0.35)';
 const POINT_COLOR = 'rgba(232, 220, 192, 0.95)';
 const POINT_STROKE = 'rgba(0, 0, 0, 0.6)';
@@ -463,7 +517,7 @@ function drawRecordButton(ctx: CanvasRenderingContext2D, p: Point, status: Grain
 function statusText(state: GrainSamplerState): string {
   switch (state.status) {
     case 'idle':
-      return 'drag a source in to capture';
+      return 'drag a source, or a file, in to capture';
     case 'armed':
       return 'armed — waiting for sound…';
     case 'capturing':
@@ -478,6 +532,7 @@ export function drawGrainSamplerPopup(
   graph: EntityGraph,
   entity: Entity,
   owner: Entity,
+  isDropHover: boolean,
   drag?: DragContext
 ): void {
   const state = grainSamplerStateFor(entity.id);
@@ -517,6 +572,15 @@ export function drawGrainSamplerPopup(
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.stroke();
 
+  // A dragged source/file currently poised to become this popup's capture
+  // input (see the DROP_ZONE_BG_HOVER comment above) — drawn under the band
+  // frame/spectrogram/points below so it reads as a wash on the body rather
+  // than obscuring that content.
+  if (isDropHover) {
+    ctx.fillStyle = DROP_ZONE_BG_HOVER;
+    ctx.fillRect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
+  }
+
   drawBandFrame(ctx, layout.band);
   const b = bandBounds(layout.band);
 
@@ -532,7 +596,7 @@ export function drawGrainSamplerPopup(
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.fillText('drag a source in to capture', layout.band.x, layout.band.y);
+    ctx.fillText('drag a source, or a file, in to capture', layout.band.x, layout.band.y);
     ctx.restore();
   }
 

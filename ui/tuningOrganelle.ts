@@ -32,7 +32,7 @@
 
 import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
-import { ownerOf, popupRectFor, closeButtonPosition, drawTooltip, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
+import { ownerOf, popupRectFor, closeButtonPosition, drawTooltip, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import { getControlSetter } from '../audio/graph';
 import { controlsFor } from './controlSpecs';
 import { DOOM_LEVER_PITCH_TARGETS } from './doomLever';
@@ -230,6 +230,14 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
   function popupHeight(): number {
     return TITLE_HEIGHT + ALL_ROW_KEYS.length * ROW_HEIGHT + COPY_BUTTON_HEIGHT + PADDING * 2;
   }
+
+  // So ui/organelle.ts's own popupRectFor can stack this popup against a
+  // sibling feature's on the same owner (e.g. metal-1's envelope alongside
+  // this tuning organelle) — see registerFeaturePopupSize's own comment.
+  // popupHeight() is fixed once ALL_ROW_KEYS is known (config.coreKeys/
+  // config.tuning don't change after this call), so registering it once
+  // here, rather than every frame, is safe.
+  registerFeaturePopupSize(config.featureKind, POPUP_WIDTH, popupHeight());
 
   // `feature` (this organelle's own feature entity) is optional and only
   // matters when its owner has more than one feature (e.g. metal-1's
