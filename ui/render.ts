@@ -907,17 +907,25 @@ function drawTap(
 // drawBox's jittered rectangle, so it reads as "a control" at a glance the
 // same way they do. Unlike them, it's hollow rather than solid-filled — the
 // same "empty until something's dropped in" idea drawBox's own
-// isHollowContainer gives a PROCESSOR_KINDS pedal — and an OVAL rather than
-// a fixed-radius circle: at rest it's a plain circle (bounds.width ===
-// bounds.height, its own 30x30 default in ui/main.ts), but
-// ui/layout.ts's effectiveBounds grows width/height independently once a
-// control is dropped in and its own rate/amount dots need room, so the
-// ellipse stretches to keep fully enclosing that rather than staying a
-// fixed circle the contents would spill out of — the direct oval analog of
-// a pedal's own growing rectangle. No wire-output bump (ui/knobs.ts's
-// hitTestWireHandle already excludes this kind from the wire-drag-start hit
-// test that draws one) — it isn't a wire source, it just modifies whatever
-// control is nested inside it.
+// isHollowContainer gives a PROCESSOR_KINDS pedal — and a STADIUM (two
+// semicircles of the same radius joined by straight vertical sides) rather
+// than a fixed-radius circle: at rest, with nothing wrapped, the two
+// semicircles coincide and it reads as a plain circle (ui/layout.ts's
+// effectiveBounds gives an empty one bounds.width === bounds.height, its
+// own 30x30 default in ui/main.ts); once a control is dropped in, that same
+// function sizes the shared radius to hug just outside the wrapped
+// control's own circular boundary and separates the two centers, which is
+// what actually pulls the semicircles apart into vertical sides rather than
+// this function computing any of that itself — see effectiveBounds's own
+// header for why (a wire bump, this container's own rate/amount dots) are
+// left to poke past this tight boundary rather than being folded into it.
+// The gap this construction leaves above the wrapped control (exactly the
+// two sides' shared length, by that same construction) is a deliberate
+// "grab the container, not its contents" band — see effectiveBounds's own
+// comment on CONTROL_CONTAINER_HANDLE_LENGTH. No wire-output bump
+// (ui/knobs.ts's hitTestWireHandle already excludes this kind from the
+// wire-drag-start hit test that draws one) — it isn't a wire source, it
+// just modifies whatever control is nested inside it.
 function drawControlContainer(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
@@ -927,13 +935,27 @@ function drawControlContainer(
 ): void {
   const baseColor = KIND_COLORS[entity.kind] ?? DEFAULT_COLOR;
 
+  // Radius is always exactly half the box's width — effectiveBounds never
+  // pads left/right beyond it (see its own comment) — so it, and the two
+  // semicircle centers it implies, can be recovered from bounds alone
+  // without this function needing its own copy of that sizing logic.
+  const r = bounds.width / 2;
+  const top = bounds.y - bounds.height / 2;
+  const bottom = bounds.y + bounds.height / 2;
+  const topCenterY = top + r;
+  const bottomCenterY = bottom - r;
+
   ctx.save();
   ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
   ctx.shadowBlur = 6;
   ctx.shadowOffsetY = 2;
 
   ctx.beginPath();
-  ctx.ellipse(bounds.x, bounds.y, bounds.width / 2, bounds.height / 2, 0, 0, Math.PI * 2);
+  ctx.arc(bounds.x, topCenterY, r, Math.PI, 0, false); // top cap, left round to right
+  ctx.lineTo(bounds.x + r, bottomCenterY); // right side down
+  ctx.arc(bounds.x, bottomCenterY, r, 0, Math.PI, false); // bottom cap, right round to left
+  ctx.lineTo(bounds.x - r, topCenterY); // left side back up
+  ctx.closePath();
   ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — matches drawBox's own hollow-pedal fill
   ctx.fill();
   ctx.shadowColor = 'transparent';

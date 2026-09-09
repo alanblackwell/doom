@@ -37,6 +37,25 @@ export function absolutePosition(graph: EntityGraph, entity: Entity): Point {
 // boundary — the "fully within the border" margin, not just touching it.
 const CONTAINMENT_PADDING = 24;
 
+// Wander/jitter (CONTROL_CONTAINER_KINDS) draw as a "stadium" hugging their
+// single wrapped control — two semicircles of the same radius, joined by
+// straight vertical sides (see ui/render.ts's drawControlContainer for the
+// matching path) — rather than the flat-padding rectangle every other
+// container gets. CONTROL_CONTAINER_RADIUS_PAD is the slim buffer beyond
+// the wrapped control's own radius that sets that shared semicircle radius:
+// just enough that the bottom semicircle hugs close around the control
+// (and around anything that legitimately pokes past its edge — a wire bump,
+// this container's own rate/amount dots — is simply left to protrude past
+// this tight boundary rather than being folded into it, same as those
+// things already poke past every OTHER box's edge). CONTROL_CONTAINER_HANDLE_LENGTH
+// is both the length of the two connecting vertical sides and, by
+// construction (see effectiveBounds below), how far the top semicircle
+// floats above the control's own top edge — a dedicated empty band a click
+// always resolves to the container rather than the control (hitTest's
+// topmost-wins resolution: the control's own bounds don't reach up into it).
+const CONTROL_CONTAINER_RADIUS_PAD = 4;
+const CONTROL_CONTAINER_HANDLE_LENGTH = 28;
+
 // Live drag state for bounds computation, so containers can grow/shrink in
 // real time as a drag is still in progress rather than only snapping on
 // drop. Two independent effects, both driven from the same drag:
@@ -95,11 +114,53 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   let top = pos.y - size.height / 2;
   let bottom = pos.y + size.height / 2;
 
-  const grow = (b: Rect) => {
-    left = Math.min(left, b.x - b.width / 2 - CONTAINMENT_PADDING);
-    right = Math.max(right, b.x + b.width / 2 + CONTAINMENT_PADDING);
-    top = Math.min(top, b.y - b.height / 2 - CONTAINMENT_PADDING);
-    bottom = Math.max(bottom, b.y + b.height / 2 + CONTAINMENT_PADDING);
+  // Wander/jitter: the stadium hug (see CONTROL_CONTAINER_RADIUS_PAD's own
+  // comment above) entirely replaces the generic flat-padding-rectangle
+  // logic below, including the own-control-column reservation — this
+  // container's own rate/amount dots protrude past the tight capsule
+  // instead of being reserved room. Bypassed (falls through to the empty
+  // "own actualSize" box above, i.e. a plain circle) whenever nothing's
+  // currently wrapped: an empty wander/jitter and a mid-drag preview into
+  // one that's still empty are the two ways that happens.
+  if (CONTROL_CONTAINER_KINDS.has(entity.kind)) {
+    const wrapped: Rect[] = [];
+    for (const child of graph.childrenOf(entity.id)) {
+      if (drag && drag.excludeId === child.id) continue;
+      wrapped.push(effectiveBounds(graph, child, drag));
+    }
+    if (drag?.preview && drag.preview.intoId === entity.id) {
+      const dragged = drag.preview.entity;
+      const draggedOwnBounds = effectiveBounds(graph, dragged, drag);
+      const draggedActualPos = absolutePosition(graph, dragged);
+      const dx = drag.preview.liveAbsolute.x - draggedActualPos.x;
+      const dy = drag.preview.liveAbsolute.y - draggedActualPos.y;
+      wrapped.push({
+        x: draggedOwnBounds.x + dx,
+        y: draggedOwnBounds.y + dy,
+        width: draggedOwnBounds.width,
+        height: draggedOwnBounds.height,
+      });
+    }
+    for (const w of wrapped) {
+      const r = Math.max(w.width, w.height) / 2 + CONTROL_CONTAINER_RADIUS_PAD;
+      left = Math.min(left, w.x - r);
+      right = Math.max(right, w.x + r);
+      bottom = Math.max(bottom, w.y + r); // bottom semicircle centered on the control's own center — hugs its bottom edge
+      top = Math.min(top, w.y - CONTROL_CONTAINER_HANDLE_LENGTH - r); // top semicircle floats HANDLE_LENGTH above that
+    }
+    return {
+      x: (left + right) / 2,
+      y: (top + bottom) / 2,
+      width: right - left,
+      height: bottom - top,
+    };
+  }
+
+  const grow = (b: Rect, padding: number = CONTAINMENT_PADDING) => {
+    left = Math.min(left, b.x - b.width / 2 - padding);
+    right = Math.max(right, b.x + b.width / 2 + padding);
+    top = Math.min(top, b.y - b.height / 2 - padding);
+    bottom = Math.max(bottom, b.y + b.height / 2 + padding);
   };
 
   // Reserve the entity's own control column (see controlSpecs.ts) as part
@@ -118,7 +179,9 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // with nothing dropped into it yet — render.ts's drawControls hides its
   // dots for exactly the same "empty" condition, so there's nothing to
   // reserve room for there either; the box grows to reveal them the moment
-  // something's actually routed through it.
+  // something's actually routed through it. (CONTROL_CONTAINER_KINDS never
+  // reach here at all — the stadium-hug branch above returns first — so
+  // there's no "wander/jitter's own column" case to gate here any more.)
   // Also skipped for 'feature' entities (ui/organelle.ts) — they're never
   // walked into here at all in practice (they're not in anything's
   // `children`, see audio/entityGraph.ts's Entity.ownerId), but their own
@@ -126,13 +189,8 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // see controlSpecs.ts), so this guards against the reservation math
   // running against a feature's own unused x/y/width/height regardless.
   const specs = controlsFor(entity.kind);
-  const isContainerKind = PROCESSOR_KINDS.has(entity.kind) || CONTROL_CONTAINER_KINDS.has(entity.kind);
-  const isEmptyFilter = isContainerKind && graph.childrenOf(entity.id).length === 0;
-  // A control-container kind (wander/jitter) reserves its own column the
-  // same as a plain source — see this function's own header for the
-  // "control-type entities skip this" reasoning, which is about a KNOB's
-  // single center dot specifically, not every control-type entity.
-  const isPlainControl = entity.type === 'control' && !CONTROL_CONTAINER_KINDS.has(entity.kind);
+  const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
+  const isPlainControl = entity.type === 'control';
   if (specs.length > 0 && !isPlainControl && entity.type !== 'feature' && !isEmptyFilter) {
     const baseRect = { x: pos.x, y: pos.y, width: size.width, height: size.height };
     const bottomDot = dotPosition(baseRect, 0);
