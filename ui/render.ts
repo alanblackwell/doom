@@ -57,6 +57,7 @@ import { drawNoisegateTunerPopup } from './noisegateTuner';
 import { drawVocodeTunerPopup, endVocodeTunerFrame } from './vocodeTuner';
 import { drawSynthConfigPopup, drawWaveGlyph } from './synthConfig';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 import { positionModifier, viewportSize } from './stereoMix';
 import { drawAdjustedTexture, getTexture } from './textures';
 import type { SavedTexture } from './textures';
@@ -64,7 +65,9 @@ import { drawTextureEditor } from './textureEditor';
 import {
   dangerGlowOpacity,
   doomLeverAnchor,
+  doomLeverAngleToValue,
   drawDoomLeverGauge,
+  drawDoomLeverImage,
   drawDoomLeverRivet,
   drawDoomLeverRod,
   gaugeAlpha,
@@ -73,6 +76,7 @@ import {
   DOOM_LEVER_LENGTH,
   DOOM_LEVER_MAX_ANGLE,
   DOOM_LEVER_MIN_ANGLE,
+  DOOM_LEVER_PITCH_TARGETS,
 } from './doomLever';
 
 // A control dot's outer ring — quiet backdrop for the smaller colored dot
@@ -538,7 +542,7 @@ function drawControls(
     // DOT_OUTSET) rather than next to the thumb, which would run the text
     // into the box itself.
     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillText(`${spec.label} ${formatControlValue(currentValue)}`, track.x - 12, track.top - 6);
@@ -574,9 +578,15 @@ function drawEntityDoomLever(
   const alpha = gaugeAlpha(isExpanded, transitionAt, now);
   if (alpha > 0.01) {
     const dangerGlow = dangerGlowOpacity(entity.id, angle, now);
-    drawDoomLeverGauge(ctx, pivot, DOOM_LEVER_GAUGE_RADIUS, angle, dangerGlow, alpha);
+    const mapping = DOOM_LEVER_PITCH_TARGETS[entity.kind];
+    const valueLine = mapping
+      ? formatControlValue(doomLeverAngleToValue(angle, mapping.minValue, mapping.maxValue))
+      : undefined;
+    const unitLine = mapping ? (mapping.param === 'speed' ? 'x' : 'Hz') : undefined;
+    drawDoomLeverGauge(ctx, pivot, DOOM_LEVER_GAUGE_RADIUS, angle, dangerGlow, alpha, valueLine, unitLine);
     const length = DOOM_LEVER_LENGTH * leverLengthFraction(isExpanded, transitionAt, now);
     drawDoomLeverRod(ctx, pivot, angle, DOOM_LEVER_GAUGE_RADIUS, length);
+    drawDoomLeverImage(ctx, pivot, angle, DOOM_LEVER_GAUGE_RADIUS, length);
   }
 
   drawDoomLeverRivet(ctx, pivot);
@@ -789,7 +799,7 @@ export function drawBodyBulge(ctx: CanvasRenderingContext2D, bounds: Rect): void
 
 export function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, radius: number): void {
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '11px monospace';
+  ctx.font = `11px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.id, bounds.x, bounds.y + radius + 14);
@@ -839,7 +849,7 @@ function drawClock(
   // would otherwise cover the readout.
   ctx.save();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '11px monospace';
+  ctx.font = `11px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${bpm} BPM`, bounds.x, bounds.y + radius + 14);
@@ -864,7 +874,7 @@ function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, se
 
   ctx.save();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '11px monospace';
+  ctx.font = `11px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${rate.toFixed(1)} Hz`, bounds.x, bounds.y + radius + 14);
@@ -895,7 +905,7 @@ function drawTap(
 
   ctx.save();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(formatKeyLabel(getBoundKey(entity.id)), bounds.x, bounds.y);
@@ -972,7 +982,7 @@ function drawControlContainer(
   // (drawn separately, in renderFrame's overlay pass) sits once expanded.
   ctx.save();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, bounds.x, bounds.y + bounds.height / 2 + 14);
@@ -1270,7 +1280,7 @@ function drawBox(
 
   if (isHollowContainer) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(entity.kind, x - w / 2 + 8, y - h / 2 + 8);
@@ -1280,7 +1290,7 @@ function drawBox(
     // enough to tell voices apart at a glance. entity.label overrides this
     // for a kind where the kind name alone can't distinguish instances
     // (e.g. 'sample' — see audio/entityGraph.ts's Entity.label).
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';

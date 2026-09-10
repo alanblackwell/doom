@@ -23,6 +23,7 @@
 
 import type { Point, Rect } from './layout';
 import { shadeColor } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 // --- Geometry / sizing --------------------------------------------------
 
@@ -307,13 +308,18 @@ const DANGER_COLOR = DANGER_COLOR_BASE.map((c) => Math.min(255, Math.max(0, Math
   ', '
 );
 
+// The rivet's own dark recessed socket, where the dome meets the surface —
+// also doubles as the inner edge of the value-text band below (see
+// drawDoomLeverValueText), so the two never overlap.
+const RIVET_SOCKET_RADIUS = DOOM_LEVER_RIVET_RADIUS + 2.5;
+
 export function drawDoomLeverRivet(ctx: CanvasRenderingContext2D, center: Point): void {
   ctx.save();
 
   // A dark recessed socket where the dome meets the surface, so it reads as
   // sitting IN the box's own material rather than floating on top of it.
   ctx.beginPath();
-  ctx.arc(center.x, center.y, DOOM_LEVER_RIVET_RADIUS + 2.5, 0, Math.PI * 2);
+  ctx.arc(center.x, center.y, RIVET_SOCKET_RADIUS, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
   ctx.fill();
 
@@ -380,6 +386,79 @@ export function drawDoomLeverRod(
   ctx.restore();
 }
 
+// A decal overlaid on the external lever rod — a committed static asset
+// (public/images/doom-lever/, same "self-hosted at a fixed URL" convention
+// as public/fonts/bravura and public/fonts/fira-code), rather than anything
+// user-uploaded (that's ui/appearancePack.ts's separate skin-pack system).
+// A plain <img> — not FontFace-style readiness tracking — since drawImage on
+// a not-yet-loaded image is a harmless no-op per spec, and this is redrawn
+// every frame anyway, so the decal just fades in as soon as decoding
+// finishes with no promise/state to wire up.
+const LEVER_IMAGE_URL = '/images/doom-lever/doom-graphic.png';
+const leverImage = new Image();
+leverImage.src = LEVER_IMAGE_URL;
+
+const LEVER_IMAGE_WIDTH_FRACTION = 0.8; // decal's narrow dimension, as a fraction of the rod's own thickness
+
+// Centered along the FULL lever length (DOOM_LEVER_LENGTH), at a fixed
+// position and rotation that tracks `angleDeg` exactly like the rod itself
+// — `length` (the growth-animated current rod extent, not the full length)
+// only controls how much of that fixed decal is currently clipped into
+// view, so it's progressively revealed as the lever grows outward rather
+// than popping in all at once. No-ops before any length has grown, same as
+// drawDoomLeverRod, and before the image itself has decoded.
+export function drawDoomLeverImage(
+  ctx: CanvasRenderingContext2D,
+  center: Point,
+  angleDeg: number,
+  innerRadius: number,
+  length: number
+): void {
+  if (length <= 0.5) return;
+  if (!leverImage.complete || leverImage.naturalWidth === 0) return;
+
+  const half = DOOM_LEVER_ROD_THICKNESS / 2;
+  const x0 = innerRadius;
+  const x1 = innerRadius + length;
+  const capX = Math.max(x0, x1 - half);
+
+  ctx.save();
+  ctx.translate(center.x, center.y);
+  ctx.rotate(gaugeAngleToCanvasRadians(angleDeg));
+
+  // Clip to the rod's own current silhouette (identical path to
+  // drawDoomLeverRod's own fill) so the decal can never draw past whatever
+  // extent of rod is actually visible right now.
+  ctx.beginPath();
+  ctx.moveTo(x0, -half);
+  ctx.lineTo(capX, -half);
+  ctx.arc(capX, 0, half, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(x0, half);
+  ctx.closePath();
+  ctx.clip();
+
+  const isPortrait = leverImage.naturalHeight >= leverImage.naturalWidth;
+  const narrowPx = isPortrait ? leverImage.naturalWidth : leverImage.naturalHeight;
+  const longPx = isPortrait ? leverImage.naturalHeight : leverImage.naturalWidth;
+  const scale = (DOOM_LEVER_ROD_THICKNESS * LEVER_IMAGE_WIDTH_FRACTION) / narrowPx;
+  const thicknessSize = narrowPx * scale;
+  const lengthSize = longPx * scale;
+
+  const centerRadius = innerRadius + DOOM_LEVER_LENGTH / 2;
+  ctx.translate(centerRadius, 0);
+  if (isPortrait) {
+    // The image's long pixel dimension is its height, which drawImage would
+    // otherwise lay along the current y-axis (across the rod) — rotate a
+    // further -90deg first so it runs along the rod's own length instead.
+    ctx.rotate(-Math.PI / 2);
+    ctx.drawImage(leverImage, -thicknessSize / 2, -lengthSize / 2, thicknessSize, lengthSize);
+  } else {
+    ctx.drawImage(leverImage, -lengthSize / 2, -thicknessSize / 2, lengthSize, thicknessSize);
+  }
+
+  ctx.restore();
+}
+
 // Ivory body for the needle — only its final third (see NEEDLE_RED_FRACTION
 // below) is picked out in DANGER_COLOR, the way a real instrument needle's
 // own paint often marks just its tip as a warning accent rather than the
@@ -437,19 +516,59 @@ export function drawDoomLeverNeedle(ctx: CanvasRenderingContext2D, center: Point
 
 const TICK_COUNT = 12;
 
+// Printed underneath the rivet, in the same un-ticked ~90deg gap at the
+// bottom of the sweep the ticks/danger band already leave empty (see the
+// TICK_COUNT loop below) — so it never competes with them. Two lines, value
+// over unit, the way a manufacturer's nameplate/rating is set on a real
+// pressure gauge — vertically centered in the band between the rivet's own
+// socket and the face's bottom rim, rather than hung off the rivet's edge.
+// Ivory, matching NEEDLE_COLOR, the dial's existing "painted-on instrument
+// marking" tone; both lines are undefined for a kind with no
+// DOOM_LEVER_PITCH_TARGETS mapping (see setDoomLeverAngle in
+// ui/interaction.ts), which draws nothing rather than a stale/meaningless 0.
+const VALUE_TEXT_COLOR = 'rgba(240, 234, 214, 0.92)';
+const VALUE_TEXT_SIZE = 7;
+const VALUE_TEXT_LINE_GAP = 7; // distance between the two lines' own baselines-worth of vertical center
+
+function drawDoomLeverValueText(
+  ctx: CanvasRenderingContext2D,
+  center: Point,
+  faceRadius: number,
+  valueLine: string,
+  unitLine: string
+): void {
+  const bandMid = center.y + (RIVET_SOCKET_RADIUS + faceRadius) / 2;
+
+  ctx.save();
+  ctx.font = `${VALUE_TEXT_SIZE}px ${MONO_FONT_FAMILY}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+  ctx.shadowBlur = 2;
+  ctx.fillStyle = VALUE_TEXT_COLOR;
+  ctx.fillText(valueLine, center.x, bandMid - VALUE_TEXT_LINE_GAP / 2);
+  ctx.fillText(unitLine, center.x, bandMid + VALUE_TEXT_LINE_GAP / 2);
+  ctx.restore();
+}
+
 // The dial: beveled bezel ring, an aged brass face, tick marks around the
 // same -135..+135 sweep the needle/lever share, a red arc band over the
 // danger third, and (when dangerGlow > 0) a soft red wash across the whole
 // face — `alpha` is the gauge's own appear/disappear fade (see gaugeAlpha),
 // separate from dangerGlow, which fades independently based on the current
-// angle regardless of how long the gauge itself has been open.
+// angle regardless of how long the gauge itself has been open. `valueLine`/
+// `unitLine` (already formatted — see ui/render.ts's own call site) are the
+// two-line numeric readout printed below the rivet, nameplate-style; both
+// omitted for a kind whose lever doesn't drive any value yet.
 export function drawDoomLeverGauge(
   ctx: CanvasRenderingContext2D,
   center: Point,
   radius: number,
   angleDeg: number,
   dangerGlow: number,
-  alpha: number
+  alpha: number,
+  valueLine?: string,
+  unitLine?: string
 ): void {
   if (alpha <= 0.01) return;
 
@@ -553,6 +672,8 @@ export function drawDoomLeverGauge(
   }
 
   drawDoomLeverNeedle(ctx, center, angleDeg, faceRadius);
+
+  if (valueLine && unitLine) drawDoomLeverValueText(ctx, center, faceRadius, valueLine, unitLine);
 
   ctx.restore();
 }
