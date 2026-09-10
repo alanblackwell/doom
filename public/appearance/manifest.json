@@ -1,4 +1,23 @@
 {
   "version": 1,
-  "assets": []
+  "assets": [
+    {
+      "target": "canvas",
+      "file": "abbatoir-floor.jpg",
+      "sourceRect": {
+        "x": 0,
+        "y": 211.29365853658538,
+        "width": 1024,
+        "height": 601.4126829268292
+      },
+      "adjustments": {
+        "brightness": 2,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1.1071428571428572,
+        "opacity": 0.17857142857142858
+      },
+      "copyright": "Image created by Alan Blackwell on 8 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: Looking straight down at the rough and eroded stone floor of a filthy abbatoir, the stone all reddish brown, completely washed over red and brown from overlaid residue of hundreds of floods, old drops and trickles, congealed pools and streaks of blood, tiny scraps of sinew and hair. Texture under flat dim ambience, no visible objects, shapes or highlights."
+    }
+  ]
 }
