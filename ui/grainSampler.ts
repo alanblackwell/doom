@@ -41,6 +41,7 @@ import type { LevelWatcher, Recording } from '../audio/nodeCapture';
 import { computeSpectrogram, createLiveSpectrogram, renderSpectrogramImage } from './spectrogram';
 import type { LiveSpectrogram, SpectrogramData } from './spectrogram';
 import type { GrainPoint } from '../audio/grainPlayer';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 export const GRAIN_POPUP_WIDTH = 320;
 export const GRAIN_POPUP_HEIGHT = 190;
@@ -554,7 +555,7 @@ export function drawGrainSamplerPopup(
 
   const close = closeButtonPosition(popup);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText('grain', left + 10, top + TITLE_HEIGHT / 2);
@@ -592,7 +593,7 @@ export function drawGrainSamplerPopup(
     ctx.drawImage(live.canvas, 0, 0, live.columnCount, live.canvas.height, b.left, b.top, b.right - b.left, b.bottom - b.top);
   } else {
     ctx.save();
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
@@ -617,7 +618,7 @@ export function drawGrainSamplerPopup(
 
   drawRecordButton(ctx, layout.recordButton, state.status);
 
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
@@ -629,7 +630,7 @@ export function drawGrainSamplerPopup(
     ctx.fillStyle = 'rgba(10, 10, 10, 0.92)';
     ctx.fillRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('re-arm? this discards the current capture', layout.band.x, layout.band.y - 6);

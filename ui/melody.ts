@@ -32,6 +32,7 @@ import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
 import { ownerOf, popupRectFor, CLOSE_BUTTON_RADIUS } from './organelle';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 import { flatMakesSense, nearestStepForLetter, semitoneFromStep, sharpMakesSense } from './musicTheory';
 import { isBravuraReady } from './bravuraFont';
 import {
@@ -1425,7 +1426,7 @@ function drawOctaveButton(ctx: CanvasRenderingContext2D, rect: Rect, magnitude: 
   ctx.fillStyle = color;
   ctx.lineWidth = 1.2;
   ctx.strokeRect(rect.x - rect.width / 2, rect.y - rect.height / 2, rect.width, rect.height);
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const label = magnitude === 2 ? '15' : '8';

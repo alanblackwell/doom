@@ -29,6 +29,7 @@ import { exportSamplesZip, hasExportableSamples } from './sampleArchive';
 import { attachTextureEditor } from './textureEditor';
 import { attachAppearancePackDrop, exportAppearancePack, hasExportableAppearance, loadDefaultAppearance } from './appearancePack';
 import { loadBravuraFont } from './bravuraFont';
+import { loadMonoFont } from './monoFont';
 import { effectiveBounds } from './layout';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -1028,6 +1029,13 @@ loadDefaultAppearance().catch((err) => {
 // than waiting on this promise, so it doesn't need to block startup either.
 loadBravuraFont().catch((err) => {
   console.error('Failed to load Bravura font:', err);
+});
+
+// All the canvas/DOM label text (ui/monoFont.ts) — falls back to the
+// generic 'monospace' the app used before, so this doesn't need to block or
+// gate anything either.
+loadMonoFont().catch((err) => {
+  console.error('Failed to load Fira Code font:', err);
 });
 
 // Two independent states: whether the engine/graph has been built at all

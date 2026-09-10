@@ -32,6 +32,7 @@ import { viewportSize } from './stereoMix';
 import { detectOpaqueBounds, drawAdjustedTexture, setTexture, DEFAULT_ADJUSTMENTS } from './textures';
 import type { TextureAdjustments, TextureSourceRect, TextureTarget } from './textures';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 import { defaultCopyright } from './attribution';
 
 type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se';
@@ -1246,7 +1247,7 @@ export function drawTextureEditor(ctx: CanvasRenderingContext2D, canvas: HTMLCan
     drawScaleDragFeedback(ctx, scalePos, state.drag.pointer, zoomingIn);
   }
 
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.fillStyle = 'rgba(240, 240, 240, 0.9)';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';

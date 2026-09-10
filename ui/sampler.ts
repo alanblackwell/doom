@@ -29,6 +29,7 @@ import type { Monitor, Recording } from '../audio/samplerCapture';
 import { encodeWav } from '../audio/wavEncode';
 import { registerLoadedSampleFile, renameLoadedSampleFile } from './sampleDrop';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 export const SAMPLER_POPUP_WIDTH = 300;
 export const SAMPLER_POPUP_HEIGHT = 190;
@@ -578,7 +579,7 @@ function ensureNameInput(): HTMLInputElement {
   input.style.position = 'fixed';
   input.style.display = 'none';
   input.style.boxSizing = 'border-box';
-  input.style.font = '11px monospace';
+  input.style.font = `11px ${MONO_FONT_FAMILY}`;
   input.style.color = '#e8dcc0';
   input.style.background = 'rgba(0, 0, 0, 0.55)';
   input.style.border = '1px solid rgba(255, 255, 255, 0.25)';
@@ -863,7 +864,7 @@ export function drawSamplerPopup(
   const close = closeButtonPosition(popup);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText('sampler', left + 10, top + TITLE_HEIGHT / 2);
@@ -909,7 +910,7 @@ export function drawSamplerPopup(
     layout.deviceRow.height
   );
   ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.fillText(`◂ ${deviceLabel(state)} ▸`, layout.deviceRow.x - layout.deviceRow.width / 2 + 6, layout.deviceRow.y);
 
@@ -954,7 +955,7 @@ export function drawSamplerPopup(
     drawLiveTrace(ctx, layout.scope, state);
   } else {
     ctx.save();
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (state.lastError) {

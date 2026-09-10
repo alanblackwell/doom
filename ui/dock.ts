@@ -13,6 +13,7 @@ import { PROCESSOR_KINDS } from '../audio/graph';
 import type { InteractionState } from './interaction';
 import type { Point, Rect } from './layout';
 import { KIND_COLORS, DEFAULT_COLOR, ACCENT, shadeColor } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 const COLUMN_WIDTH = 96; // one column's worth of panel width, same as the old fixed DOCK_WIDTH
 const DOCK_TOP_PADDING = 60; // room for the "DOCK" label + the "show all" toggle row above the first icon
@@ -193,7 +194,7 @@ export function drawDock(
   ctx.setLineDash([]);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('DOCK', panel.x, top + 24);
@@ -214,7 +215,7 @@ export function drawDock(
     ctx.fillRect(boxX - boxSize / 2 + 2, boxY - boxSize / 2 + 2, boxSize - 4, boxSize - 4);
   }
   ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText('show all', boxX + boxSize / 2 + 6, boxY + 1);
@@ -259,7 +260,7 @@ function drawDockIcon(ctx: CanvasRenderingContext2D, entity: Entity, rect: Rect,
   }
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, rect.x, rect.y);

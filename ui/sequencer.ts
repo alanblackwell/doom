@@ -52,6 +52,7 @@ import { padRadius, PAD_FLASH_DURATION } from './pads';
 import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
 import type { InteractionState } from './interaction';
 import { ACCENT, shadeColor } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 // Amplitude shape, contained entirely within a note's own [onsetSeconds,
 // onsetSeconds + durationSeconds] — see noteEnvelopePoints. attack/decay/
@@ -1723,7 +1724,7 @@ function drawVelocitySlider(ctx: CanvasRenderingContext2D, state: SequencerState
   ctx.stroke();
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
   ctx.fillText(`velocity ${Math.round(note.velocity * 100)}%`, track.x, track.top - 6);
@@ -2761,7 +2762,7 @@ function drawSequencerNote(
     ctx.save();
     ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.font = '7px monospace';
+    ctx.font = `7px ${MONO_FONT_FAMILY}`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillText(':', cx, cy);
@@ -2899,7 +2900,7 @@ function drawSequencerGrid(
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
   ctx.lineWidth = 1;
   ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-  ctx.font = '8px monospace';
+  ctx.font = `8px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
 
@@ -2932,7 +2933,7 @@ function drawSequencerGrid(
     ctx.fillRect(grid.left - LANE_LABEL_WIDTH, laneTop, grid.right - grid.left + LANE_LABEL_WIDTH, LANE_HEIGHT);
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(state.channels[i].name, grid.left - LANE_LABEL_WIDTH / 2, laneTop + LANE_HEIGHT / 2);
@@ -3058,7 +3059,7 @@ export function drawSequencerPopup(
 
   // Title bar
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, left + 10, top + TITLE_HEIGHT / 2);

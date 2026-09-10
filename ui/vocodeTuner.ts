@@ -19,6 +19,7 @@ import { getEntityNodes, analyzeAndApplyVocode, setVocodeMode } from '../audio/g
 import { getAudioContext } from '../audio/context';
 import { getMasterChain } from '../audio/master';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 export const VOCODE_TUNER_POPUP_WIDTH = 320;
 export const VOCODE_TUNER_POPUP_HEIGHT = 210;
@@ -436,7 +437,7 @@ export function drawVocodeTunerPopup(
   ctx.strokeRect(left, top, popup.width, popup.height);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText('vocode: tune f0', left + 10, top + TITLE_HEIGHT / 2);
@@ -468,7 +469,7 @@ export function drawVocodeTunerPopup(
   ctx.lineWidth = modeChanged ? 1.5 : 1;
   ctx.stroke();
   ctx.fillStyle = modeChanged ? ACCENT : 'rgba(255, 255, 255, 0.8)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(VOCODE_MODES[modeIndex], modePos.x, modePos.y + 0.5);
@@ -537,7 +538,7 @@ export function drawVocodeTunerPopup(
   ctx.stroke();
 
   ctx.fillStyle = ACCENT;
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillText(`${state.markerHz.toFixed(1)} Hz`, Math.min(axisRight - 24, Math.max(axisLeft + 24, markerX)), axis.y - 2);
@@ -549,7 +550,7 @@ export function drawVocodeTunerPopup(
   ctx.lineWidth = 1;
   ctx.strokeRect(reanalyze.x - reanalyze.width / 2, reanalyze.y - reanalyze.height / 2, reanalyze.width, reanalyze.height);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('re-analyze', reanalyze.x, reanalyze.y);

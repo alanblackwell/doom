@@ -76,6 +76,7 @@ import { computeOnsetFeatures, pickOnsetCandidates, rankSuggestedOnsets } from '
 import type { OnsetFeature } from './beatMatcherSuggestions';
 import { getAudioContext, resumeAudioContext } from '../audio/context';
 import { ACCENT, shadeColor } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
 import type { InteractionState } from './interaction';
 
@@ -1105,7 +1106,7 @@ function drawBeatMatcherVelocitySlider(
   ctx.stroke();
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
   ctx.fillText(`velocity ${Math.round(note.velocity * 100)}%`, track.x, track.top - 6);
@@ -3179,7 +3180,7 @@ function drawInlineCaptureInfo(
 ): void {
   const left = popupBounds(popup).left + 10;
   ctx.fillStyle = source ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(source ? `source: ${source.label ?? source.kind}` : 'drag a source, or a file, here to begin', left, rowTop + 13);
@@ -3222,7 +3223,7 @@ function drawInfoOverlay(ctx: CanvasRenderingContext2D, popup: Rect, state: Beat
   ctx.strokeRect(r.left, r.top, r.width, r.height);
 
   ctx.fillStyle = source ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.4)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(source ? `source: ${source.label ?? source.kind}` : 'no source', r.left + 8, r.top + 13);
@@ -3301,7 +3302,7 @@ function drawBeatMatcherNote(
     ctx.save();
     ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.font = '7px monospace';
+    ctx.font = `7px ${MONO_FONT_FAMILY}`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillText(':', cx, cy);
@@ -3691,7 +3692,7 @@ function drawSpectrogramBand(ctx: CanvasRenderingContext2D, grid: Grid, state: B
     ctx.drawImage(live.canvas, 0, 0, live.columnCount, live.canvas.height, grid.left, bandTop, width, SPECTROGRAM_HEIGHT);
   } else {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('no capture yet', (grid.left + grid.right) / 2, bandTop + SPECTROGRAM_HEIGHT / 2);
@@ -3746,7 +3747,7 @@ function drawTimeRuler(ctx: CanvasRenderingContext2D, grid: Grid, pxPerSec: numb
   ctx.rect(grid.left, rulerTop, grid.right - grid.left, RULER_HEIGHT);
   ctx.clip();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-  ctx.font = '8px monospace';
+  ctx.font = `8px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const firstLine = Math.ceil(state.scrollSeconds / step) * step;
@@ -3869,7 +3870,7 @@ function drawSpeedControl(ctx: CanvasRenderingContext2D, popup: Rect, speed: num
   ctx.lineWidth = slowed ? 1.5 : 1;
   ctx.stroke();
   ctx.fillStyle = slowed ? ACCENT : 'rgba(255, 255, 255, 0.8)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(beatMatcherSpeedLabel(speed), p.x, p.y + 0.5);
@@ -4081,7 +4082,7 @@ export function drawBeatMatcherPopup(
   drawBeatMatcherTransportButtons(ctx, popup, state);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, b.left + 15 + CAPTURE_BUTTON_RADIUS + 8, b.top + TITLE_HEIGHT / 2);

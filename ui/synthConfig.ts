@@ -44,6 +44,7 @@ import { controlsFor, CONTROL_DOT_OUTER_RADIUS, CONTROL_DOT_RADIUS, CONTROL_DOT_
 import { getControlSetter } from '../audio/graph';
 import { getWireTo } from './wiring';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 // Matches audio/graph.ts's own (private) SYNTH_WAVEFORMS list and native
 // OscillatorNode.type strings exactly — kept as its own small, stable copy
@@ -288,7 +289,7 @@ export function drawSynthConfigPopup(
   ctx.strokeRect(left, top, popup.width, popup.height);
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, left + 10, top + TITLE_HEIGHT / 2);
@@ -352,7 +353,7 @@ export function drawSynthConfigPopup(
     if (dim) ctx.globalAlpha = 0.3;
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(spec.label, dot.x + 8, dot.y);

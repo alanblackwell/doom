@@ -33,6 +33,7 @@ import { controlsFor, CONTROL_HIT_RADIUS } from './controlSpecs';
 import type { ControlSpec } from './controlSpecs';
 import type { ControlHit } from './controls';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 import { wireHandlePosition } from './knobs';
 import { getEnvelopePlayback } from '../audio/graph';
 import type { EnvelopePlayback } from '../audio/graph';
@@ -604,7 +605,7 @@ export function drawPorthole(ctx: CanvasRenderingContext2D, graph: EntityGraph, 
 const TOOLTIP_BG = 'rgba(10, 10, 10, 0.95)';
 const TOOLTIP_PADDING = 6;
 const TOOLTIP_LINE_HEIGHT = 12;
-const TOOLTIP_FONT = '9px monospace';
+const TOOLTIP_FONT = `9px ${MONO_FONT_FAMILY}`;
 
 export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   const words = text.split(' ');
@@ -661,7 +662,7 @@ function drawHandle(ctx: CanvasRenderingContext2D, p: Point, label: string, acti
   ctx.stroke();
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-  ctx.font = '9px monospace';
+  ctx.font = `9px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
   ctx.fillText(label, p.x, p.y - 8);
@@ -750,7 +751,7 @@ function drawTimeGrid(ctx: CanvasRenderingContext2D, curve: CurveArea, timeScale
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
   ctx.lineWidth = 1;
   ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-  ctx.font = '8px monospace';
+  ctx.font = `8px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   for (let s = step; s <= timeScale; s += step) {
@@ -811,7 +812,7 @@ export function drawPopup(
 
   // Title bar
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-  ctx.font = '10px monospace';
+  ctx.font = `10px ${MONO_FONT_FAMILY}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(entity.kind, left + 10, top + TITLE_HEIGHT / 2);
@@ -840,7 +841,7 @@ export function drawPopup(
     ctx.fillStyle = specs[i].color;
     ctx.fill();
     ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-    ctx.font = '9px monospace';
+    ctx.font = `9px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(specs[i].label, dot.x + 8, dot.y);

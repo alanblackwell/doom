@@ -37,6 +37,7 @@ import { getControlSetter } from '../audio/graph';
 import { controlsFor } from './controlSpecs';
 import { DOOM_LEVER_PITCH_TARGETS } from './doomLever';
 import { ACCENT } from './palette';
+import { MONO_FONT_FAMILY } from './monoFont';
 
 // bass/grind/metal's own tuning organelles all list their pitch/frequency
 // param as a coreKey (factoryFor below), on the assumption it's still a real
@@ -654,7 +655,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     ctx.strokeRect(left, top, popup.width, popup.height);
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(config.title, left + 10, top + TITLE_HEIGHT / 2);
@@ -701,7 +702,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
         ctx.fillRect(cb.x - CHECKBOX_SIZE / 2 + 2, cb.y - CHECKBOX_SIZE / 2 + 2, CHECKBOX_SIZE - 4, CHECKBOX_SIZE - 4);
       }
 
-      ctx.font = '9px monospace';
+      ctx.font = `9px ${MONO_FONT_FAMILY}`;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
       ctx.textAlign = 'left';
       const labelX = cb.x + CHECKBOX_SIZE / 2 + 6;
@@ -767,7 +768,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
         const caretX = activeCaretDrag.target === 'min' ? minX : maxX;
         const caretValue = activeCaretDrag.target === 'min' ? range.min : range.max;
         const label = formatTunedValue(caretValue, factory.step);
-        ctx.font = '9px monospace';
+        ctx.font = `9px ${MONO_FONT_FAMILY}`;
         const textWidth = ctx.measureText(label).width;
         const labelY = y - CARET_SIZE - 14;
         ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -793,7 +794,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     ctx.lineWidth = 1;
     ctx.strokeRect(copyRect.x - copyRect.width / 2, copyRect.y - copyRect.height / 2, copyRect.width, copyRect.height);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-    ctx.font = '10px monospace';
+    ctx.font = `10px ${MONO_FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.fillText(flashing ? 'copied to clipboard' : 'copy tuning as source', copyRect.x, copyRect.y);
     ctx.textAlign = 'left';
