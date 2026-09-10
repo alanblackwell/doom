@@ -55,79 +55,16 @@ export interface GrindTuningParam {
 // Object.keys) — grouped by what they shape (grain shape, then grain
 // timing, then filter) rather than alphabetically, so related knobs sit
 // together.
+
 export const GRIND_TUNING: Record<string, GrindTuningParam> = {
-  grainMinDuration: {
-    value: 0.068,
-    min: 0.005,
-    max: 0.1,
-    step: 0.001,
-    label: 'grain min duration',
-    exposed: false,
-    description: "Shortest a grain's own randomized duration can be, in seconds — see scheduleGrain's randomBetween(grainMinDuration, grainMaxDuration).",
-  },
-  grainMaxDuration: {
-    value: 0.165,
-    min: 0.01,
-    max: 0.2,
-    step: 0.001,
-    label: 'grain max duration',
-    exposed: false,
-    description: 'Longest a grain can be, in seconds — shorter grains read as buzzier/grittier, longer ones as more individual scrapes.',
-  },
-  grainFade: {
-    value: 0.0044,
-    min: 0.0005,
-    max: 0.02,
-    step: 0.0005,
-    label: 'grain fade',
-    exposed: false,
-    description: "Fixed linear fade-in/out applied to every grain's own envelope regardless of its randomized duration, so no grain clicks at its own edges.",
-  },
-  grainIntervalMax: {
-    value: 0.087,
-    min: 0.01,
-    max: 0.3,
-    step: 0.001,
-    label: 'interval @ grind=0',
-    exposed: false,
-    description: 'Gap between grains, in seconds, at grind=0 — the sparsest end of the density range grind lerps between (see the tick() loop below).',
-  },
-  grainIntervalMin: {
-    value: 0.013,
-    min: 0.001,
-    max: 0.05,
-    step: 0.001,
-    label: 'interval @ grind=1',
-    exposed: false,
-    description: 'Gap between grains, in seconds, at grind=1 — the densest, most continuous-roar end of that same range.',
-  },
-  grainIntervalJitter: {
-    value: 0.3,
-    min: 0,
-    max: 1,
-    step: 0.01,
-    label: 'interval jitter',
-    exposed: false,
-    description: 'Random +/- variation on the grain interval, as a fraction of it — keeps even a fixed grind amount from locking into an audible periodic tick.',
-  },
-  grainFilterQ: {
-    value: 5.7,
-    min: 0.5,
-    max: 30,
-    step: 0.1,
-    label: 'filter Q',
-    exposed: false,
-    description: "Resonance (Q) of each grain's own bandpass filter — higher makes a grain read as a narrow pitched shriek around frequency, lower as broadband hiss.",
-  },
-  filterJitter: {
-    value: 0.16,
-    min: 0,
-    max: 1,
-    step: 0.01,
-    label: 'filter jitter',
-    exposed: false,
-    description: "How far a grain's own filter center wanders from frequency, as a fraction either way, scaled by grind too — more grind means more pitch chaos, not just more grains.",
-  },
+  grainMinDuration: { value: 0.068, min: 0.005, max: 0.1, step: 0.001, label: 'grain min duration', exposed: false, description: "Shortest a grain's own randomized duration can be, in seconds — see scheduleGrain's randomBetween(grainMinDuration, grainMaxDuration)." },
+  grainMaxDuration: { value: 0.165, min: 0.01, max: 0.2, step: 0.001, label: 'grain max duration', exposed: false, description: "Longest a grain can be, in seconds — shorter grains read as buzzier/grittier, longer ones as more individual scrapes." },
+  grainFade: { value: 0.0044, min: 0.0005, max: 0.02, step: 0.0005, label: 'grain fade', exposed: false, description: "Fixed linear fade-in/out applied to every grain's own envelope regardless of its randomized duration, so no grain clicks at its own edges." },
+  grainIntervalMax: { value: 0.097, min: 0.01, max: 0.3, step: 0.001, label: 'interval @ grind=0', exposed: false, description: "Gap between grains, in seconds, at grind=0 — the sparsest end of the density range grind lerps between (see the tick() loop below)." },
+  grainIntervalMin: { value: 0.016, min: 0.001, max: 0.05, step: 0.001, label: 'interval @ grind=1', exposed: false, description: "Gap between grains, in seconds, at grind=1 — the densest, most continuous-roar end of that same range." },
+  grainIntervalJitter: { value: 0.28, min: 0, max: 1, step: 0.01, label: 'interval jitter', exposed: false, description: "Random +/- variation on the grain interval, as a fraction of it — keeps even a fixed grind amount from locking into an audible periodic tick." },
+  grainFilterQ: { value: 6.1, min: 0.5, max: 30, step: 0.1, label: 'filter Q', exposed: false, description: "Resonance (Q) of each grain's own bandpass filter — higher makes a grain read as a narrow pitched shriek around frequency, lower as broadband hiss." },
+  filterJitter: { value: 0.26, min: 0, max: 1, step: 0.01, label: 'filter jitter', exposed: false, description: "How far a grain's own filter center wanders from frequency, as a fraction either way, scaled by grind too — more grind means more pitch chaos, not just more grains." },
 };
 
 export const GRIND_TUNING_KEYS = Object.keys(GRIND_TUNING);

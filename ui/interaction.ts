@@ -807,8 +807,13 @@ function setDoomLeverAngle(graph: EntityGraph, entityId: string, angleDeg: numbe
   entity.params.doomLeverAngle = angleDeg;
   const mapping = DOOM_LEVER_PITCH_TARGETS[entity.kind];
   if (mapping) {
-    const value = doomLeverAngleToValue(angleDeg, mapping.minValue, mapping.maxValue);
+    const value = doomLeverAngleToValue(angleDeg, mapping.minValue, mapping.maxValue, mapping.centerValue);
     applyControlValue(graph, entityId, mapping.param, value);
+    if (mapping.compensate) {
+      const c = mapping.compensate;
+      const compensated = doomLeverAngleToValue(angleDeg, c.minValue, c.maxValue, c.centerValue);
+      applyControlValue(graph, entityId, c.param, compensated);
+    }
   }
 }
 

@@ -580,7 +580,7 @@ function drawEntityDoomLever(
     const dangerGlow = dangerGlowOpacity(entity.id, angle, now);
     const mapping = DOOM_LEVER_PITCH_TARGETS[entity.kind];
     const valueLine = mapping
-      ? formatControlValue(doomLeverAngleToValue(angle, mapping.minValue, mapping.maxValue))
+      ? formatControlValue(doomLeverAngleToValue(angle, mapping.minValue, mapping.maxValue, mapping.centerValue))
       : undefined;
     const unitLine = mapping ? (mapping.param === 'speed' ? 'x' : 'Hz') : undefined;
     drawDoomLeverGauge(ctx, pivot, DOOM_LEVER_GAUGE_RADIUS, angle, dangerGlow, alpha, valueLine, unitLine);

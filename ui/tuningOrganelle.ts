@@ -11,18 +11,26 @@
 //     permanent control-dot on the entity's own box — the voice's existing
 //     control-dot params (config.coreKeys) start checked, since they
 //     already are real control-dots; everything else (config.tuning)
-//     starts from its own factory `exposed` flag.
+//     starts from its own factory `exposed` flag. A coreKey the doom lever
+//     already drives (ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS, e.g.
+//     grind's own 'frequency') draws a skull there instead — it isn't a
+//     real checkbox, can't be toggled, and never gets exposed, since a
+//     control-dot for that param would just fight the lever over the same
+//     entity.params value (see isDoomLeverKey below).
 //   - draggable min/max carets, on a track that always spans [0, some
 //     headroom past the current max] rather than [min, max] — so there's
 //     always room to drag either caret outward.
 //   - a hover tooltip over each row's own label, explaining how that
 //     parameter relates to the algorithm (config.tuning's own
 //     `description`, or config.coreDescriptions for core params).
-//   - a Copy button producing three ready-to-paste source snippets, since
+//   - a Copy button producing ready-to-paste source snippets, since
 //     promoting a tuning constant to a real control-dot genuinely touches
-//     three files (ui/controlSpecs.ts is deliberately audio/*-independent —
+//     multiple files (ui/controlSpecs.ts is deliberately audio/*-independent —
 //     its own header — so there's no way for an "exposed" checkbox to take
-//     effect on the live control-dot column without a source edit there).
+//     effect on the live control-dot column without a source edit there). A
+//     skull row instead gets a DOOM_LEVER_PITCH_TARGETS `centerValue`
+//     snippet, so the lever's own straight-up position picks up whatever
+//     this row was just tuned to.
 //
 // A row's own slider and its real control-dot (if any) are simply the SAME
 // entity.params value read from two places (applyTuningParam below writes
@@ -174,6 +182,16 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     return config.coreKeys.includes(key);
   }
 
+  // True for a coreKey the doom lever already drives (ui/doomLever.ts's
+  // DOOM_LEVER_PITCH_TARGETS) — e.g. grind's own 'frequency'. Such a row has
+  // no real control-dot to expose (the lever replaced it), so its checkbox
+  // is drawn as a skull instead and is neither togglable nor ever emitted
+  // as a ControlSpec line by the Copy button — see exposedStateFor,
+  // toggleExposed, hitTestPopup's checkbox branch, and buildCopyText below.
+  function isDoomLeverKey(key: string): boolean {
+    return DOOM_LEVER_PITCH_TARGETS[config.voiceKind]?.param === key;
+  }
+
   interface RowFactory {
     label: string;
     min: number;
@@ -293,7 +311,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
     let state = exposedByFeature.get(featureEntityId);
     if (!state) {
       state = {};
-      for (const key of config.coreKeys) state[key] = true;
+      for (const key of config.coreKeys) state[key] = !isDoomLeverKey(key);
       for (const key of tuningKeys) state[key] = config.tuning[key].exposed;
       exposedByFeature.set(featureEntityId, state);
     }
@@ -458,6 +476,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
   }
 
   function toggleExposed(featureEntityId: string, key: string): void {
+    if (isDoomLeverKey(key)) return; // hardcoded to the lever — not a real checkbox
     const state = exposedStateFor(featureEntityId);
     state[key] = !state[key];
   }
@@ -525,11 +544,29 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
       );
     });
 
-    const controlSpecLines = ALL_ROW_KEYS.filter((key) => exposed[key]).map((key) => {
+    const controlSpecLines = ALL_ROW_KEYS.filter((key) => exposed[key] && !isDoomLeverKey(key)).map((key) => {
       const factory = factoryFor(key);
       const range = ranges[key];
       return `  { param: '${key}', label: '${factory.label}', min: ${range.min}, max: ${range.max}, color: '${factory.color}' },`;
     });
+
+    // A coreKey the doom lever drives gets no control-dot line above —
+    // instead, whatever this row was just tuned to becomes the lever's own
+    // centerValue (its straight-up/resting position), the same adjustment
+    // ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS entry needs by hand for
+    // that to actually take effect.
+    const leverKey = config.coreKeys.find((key) => isDoomLeverKey(key));
+    const leverLines: string[] = [];
+    if (leverKey) {
+      const target = DOOM_LEVER_PITCH_TARGETS[config.voiceKind]!;
+      const factory = factoryFor(leverKey);
+      const centerValue = formatSourceNumber(currentValue(owner, leverKey), factory.step);
+      leverLines.push(
+        '',
+        `// --- ui/doomLever.ts: replace the '${config.voiceKind}' entry in DOOM_LEVER_PITCH_TARGETS with this ---`,
+        `${config.voiceKind}: { param: '${target.param}', minValue: ${target.minValue}, maxValue: ${target.maxValue}, centerValue: ${centerValue} },`
+      );
+    }
 
     const paramsEntries = [
       ...config.coreKeys.map((key) => `${key}: ${formatSourceNumber(currentValue(owner, key), factoryFor(key).step)}`),
@@ -548,6 +585,7 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
       `${config.voiceKind}: [`,
       ...controlSpecLines,
       '],',
+      ...leverLines,
       '',
       `// --- ${config.mainFilePath}: replace ${config.mainEntityId}'s params object with this ---`,
       `params: { ${paramsEntries.join(', ')} },`,
@@ -583,9 +621,11 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
         const key = ALL_ROW_KEYS[i];
         const y = rowY(popup, i);
 
-        const cb = checkboxCenter(popup, i);
-        if (dist(point, cb) <= CHECKBOX_SIZE) {
-          return { entityId: entity.id, kind: 'checkbox', key };
+        if (!isDoomLeverKey(key)) {
+          const cb = checkboxCenter(popup, i);
+          if (dist(point, cb) <= CHECKBOX_SIZE) {
+            return { entityId: entity.id, kind: 'checkbox', key };
+          }
         }
 
         if (Math.abs(point.y - y) <= ROW_HEIGHT / 2) {
@@ -694,12 +734,22 @@ export function createTuningOrganelle(config: TuningOrganelleConfig): TuningOrga
       const value = currentValue(owner, key);
 
       const cb = checkboxCenter(popup, i);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(cb.x - CHECKBOX_SIZE / 2, cb.y - CHECKBOX_SIZE / 2, CHECKBOX_SIZE, CHECKBOX_SIZE);
-      if (exposed[key]) {
-        ctx.fillStyle = ACCENT;
-        ctx.fillRect(cb.x - CHECKBOX_SIZE / 2 + 2, cb.y - CHECKBOX_SIZE / 2 + 2, CHECKBOX_SIZE - 4, CHECKBOX_SIZE - 4);
+      if (isDoomLeverKey(key)) {
+        // No real checkbox here — the doom lever already owns this param
+        // (ui/doomLever.ts's DOOM_LEVER_PITCH_TARGETS), so a skull marks it
+        // hardcoded rather than offering a control-dot toggle that would
+        // just fight the lever for the same entity.params value.
+        ctx.font = `${CHECKBOX_SIZE + 3}px ${MONO_FONT_FAMILY}`;
+        ctx.textAlign = 'center';
+        ctx.fillText('💀', cb.x, cb.y + 1);
+      } else {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cb.x - CHECKBOX_SIZE / 2, cb.y - CHECKBOX_SIZE / 2, CHECKBOX_SIZE, CHECKBOX_SIZE);
+        if (exposed[key]) {
+          ctx.fillStyle = ACCENT;
+          ctx.fillRect(cb.x - CHECKBOX_SIZE / 2 + 2, cb.y - CHECKBOX_SIZE / 2 + 2, CHECKBOX_SIZE - 4, CHECKBOX_SIZE - 4);
+        }
       }
 
       ctx.font = `9px ${MONO_FONT_FAMILY}`;

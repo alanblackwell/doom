@@ -89,12 +89,35 @@ export interface DoomLeverPitchTarget {
   param: string; // the entity.params key this drives (matches an audio/graph.ts registerControls key)
   minValue: number; // value at -135deg (the doomy/danger end)
   maxValue: number; // value at +135deg — the voice's own former ControlSpec max
+  centerValue?: number; // value at 0deg/straight up, if it shouldn't default to sqrt(minValue*maxValue)
+  // A second entity.params key the lever drives alongside `param`, log-
+  // mapped across the same sweep (its own minValue/maxValue/centerValue,
+  // same angle-to-value shape doomLeverAngleToValue already gives `param`).
+  // For grind: dropping frequency toward the danger end makes the grain
+  // texture read as quieter, not doomier, so compensate ramps `level` up
+  // to make the danger end read as LOUDER instead — see setDoomLeverAngle
+  // (ui/interaction.ts), the only place this gets applied.
+  compensate?: { param: string; minValue: number; maxValue: number; centerValue?: number };
 }
 
 export const DOOM_LEVER_PITCH_TARGETS: Record<string, DoomLeverPitchTarget> = {
   bass: { param: 'frequency', minValue: 5, maxValue: 150 },
   bow: { param: 'frequency', minValue: 5, maxValue: 500 },
-  grind: { param: 'frequency', minValue: 5, maxValue: 80 },
+  // centerValue pins the by-ear-tuned frequency (see audio/grindPlayer.ts's
+  // GRIND_TUNING / ui/grindTuner.ts) to the lever's resting/up position,
+  // rather than that position landing wherever sqrt(minValue*maxValue) falls.
+  // compensate's own centerValue/maxValue both match grind-1's own default
+  // level (ui/main.ts) — flat (no boost) from straight-up through the safe
+  // end, ramping up only across the danger half of the sweep, topping out
+  // at roughly 4.5x by -135deg. Adjust minValue here to taste; there's no
+  // slider for this one, it's by-ear-via-source-edit only.
+  grind: {
+    param: 'frequency',
+    minValue: 5,
+    maxValue: 80,
+    centerValue: 65,
+    compensate: { param: 'level', minValue: 7, maxValue: 1.54, centerValue: 1.54 },
+  },
   kick: { param: 'pitch', minValue: 5, maxValue: 100 },
   pluck: { param: 'pitch', minValue: 5, maxValue: 200 },
   metal: { param: 'pitch', minValue: 5, maxValue: 400 },
@@ -123,10 +146,22 @@ export const DOOM_LEVER_PITCH_TARGETS: Record<string, DoomLeverPitchTarget> = {
 
 // Log-interpolated angle -> value, clamped to the valid gauge-degree range
 // first so a caller passing an already-clamped or not-yet-clamped angle
-// behaves identically either way.
-export function doomLeverAngleToValue(angleDeg: number, minValue: number, maxValue: number): number {
+// behaves identically either way. With no centerValue this is a single log
+// ramp from minValue to maxValue, so 0deg/straight up lands on
+// sqrt(minValue*maxValue). A given centerValue instead pins that straight-up
+// position to a specific value by log-interpolating each half of the sweep
+// (-135..0 and 0..135) separately against it, still hitting minValue/maxValue
+// at the two ends.
+export function doomLeverAngleToValue(
+  angleDeg: number,
+  minValue: number,
+  maxValue: number,
+  centerValue?: number
+): number {
   const t = (clampGaugeAngle(angleDeg) - DOOM_LEVER_MIN_ANGLE) / (DOOM_LEVER_MAX_ANGLE - DOOM_LEVER_MIN_ANGLE);
-  return minValue * Math.pow(maxValue / minValue, t);
+  if (centerValue === undefined) return minValue * Math.pow(maxValue / minValue, t);
+  if (t <= 0.5) return minValue * Math.pow(centerValue / minValue, t / 0.5);
+  return centerValue * Math.pow(maxValue / centerValue, (t - 0.5) / 0.5);
 }
 
 // Gauge-degrees -> canvas radians (canvas: 0 = pointing along +x/right,

@@ -38,7 +38,7 @@ const CONTROL_SPECS: Record<string, ControlSpec[]> = {
   // literally "how far into the chaos." Frequency range shifted up into
   // buzzier chainsaw/grinder territory rather than a cello's.
 grind: [
-  { param: 'level', label: 'volume', min: 0, max: 1.2, color: '#e0c840' },
+  { param: 'level', label: 'volume', min: 0, max: 1.7567999999999997, color: '#e0c840' },
   { param: 'grind', label: 'grind', min: 0, max: 1, color: '#c85a5a' },
 ],
 overdrive: [

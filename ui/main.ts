@@ -276,7 +276,7 @@ graph.add({
   kind: 'grind',
   parentId: null,
   children: [],
-  params: { level: 0.82, frequency: 35, grind: 0.9 },
+  params: { level: 1.54, frequency: 65, grind: 0.66 },
   x: 1980,
   y: 160,
   width: 110,
