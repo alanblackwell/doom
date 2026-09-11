@@ -700,7 +700,22 @@ const WIRE_HANDLE_COLOR = '#c8a05a'; // warm brass — reads as "output jack"
 // getTexture(entity.kind) uses for a source's box (drawBox above), so a
 // texture assigned to a control's kind (ui/textureEditor.ts) actually shows
 // up on its circular body too, not just boxes.
-export function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, selected: boolean, kind: string): number {
+// `rotateRadians`, when given, spins the TEXTURE draw only (never the
+// untextured gradient-circle branch below, which shows the value via
+// drawKnob's own separately-drawn indicator line instead — see its own
+// comment) — same angle convention as knobIndicatorAngle (0 = straight up,
+// clockwise-positive), matching Canvas2D's own ctx.rotate() directly with
+// no sign correction needed. Lets a knob skin with its own baked-in
+// pointer/indicator (e.g. a physical dial photographed with a position
+// mark on it) actually rotate to show the current value, rather than
+// sitting frozen under a separately-drawn line pointing some other way.
+export function drawControlBody(
+  ctx: CanvasRenderingContext2D,
+  bounds: Rect,
+  selected: boolean,
+  kind: string,
+  rotateRadians?: number
+): number {
   const radius = Math.min(bounds.width, bounds.height) / 2;
   const texture = getTexture(kind);
 
@@ -714,7 +729,16 @@ export function drawControlBody(ctx: CanvasRenderingContext2D, bounds: Rect, sel
     // drawBox gives a source's box above — no forced circular clip, so a
     // texture renders exactly as uploaded/cropped in the editor rather than
     // being masked into a circle on top of that.
-    drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+    if (rotateRadians !== undefined) {
+      ctx.save();
+      ctx.translate(bounds.x, bounds.y);
+      ctx.rotate(rotateRadians);
+      ctx.translate(-bounds.x, -bounds.y);
+      drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+      ctx.restore();
+    } else {
+      drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+    }
     ctx.shadowColor = 'transparent';
   } else {
     ctx.beginPath();
@@ -810,19 +834,29 @@ export function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, 
 }
 
 function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
-  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
   const angle = knobIndicatorAngle(value);
+  // A skinned knob (ui/textureEditor.ts) rotates the image itself to show
+  // the current value instead — a physical dial's own printed/molded
+  // position mark IS the indicator here, so drawing the plain line on top
+  // of it too would just be a second, redundant (and differently-angled-
+  // looking, since it'd sit right on top of wherever the image's own mark
+  // rotated to) pointer. An untextured knob has no such mark baked into
+  // anything, so it still needs the line drawn below.
+  const texture = getTexture(entity.kind);
+  const radius = drawControlBody(ctx, bounds, selected, entity.kind, texture ? angle : undefined);
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(bounds.x, bounds.y);
-  ctx.lineTo(bounds.x + Math.sin(angle) * radius * 0.8, bounds.y - Math.cos(angle) * radius * 0.8);
-  ctx.strokeStyle = KNOB_INDICATOR_COLOR;
-  ctx.lineWidth = 3;
-  ctx.lineCap = 'round';
-  ctx.stroke();
-  ctx.restore();
+  if (!texture) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(bounds.x, bounds.y);
+    ctx.lineTo(bounds.x + Math.sin(angle) * radius * 0.8, bounds.y - Math.cos(angle) * radius * 0.8);
+    ctx.strokeStyle = KNOB_INDICATOR_COLOR;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.restore();
+  }
 
   drawWireBump(ctx, bounds, 0);
   drawControlLabel(ctx, entity, bounds, radius);

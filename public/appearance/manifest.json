@@ -78,6 +78,26 @@
       "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: An old guitar pedal box, seen from above. It is battered and scratched, held together with large pieces of dirty and fraying duct tape. It's not really possible to see any of the original graphics or text, just fragments where the paint hasn't peeled off.",
       "opaqueWidth": 60.00000000000001,
       "opaqueHeight": 100.40816326530613
+    },
+    {
+      "target": "knob",
+      "file": "pointer-knob.png",
+      "sourceRect": {
+        "x": 7,
+        "y": 7,
+        "width": 319,
+        "height": 324
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: A black bakelite knob with a position indicator poking out from one side. A remnant of a 1930s kitchen radio. Surface crazed, from years of fryer grime and cigarette smoke. Viewed from directly above, with uniform ambient lighting and no shadows, it sits alone on a matt black surface.",
+      "opaqueWidth": 60,
+      "opaqueHeight": 60.940438871473354
     }
   ]
 }
