@@ -122,13 +122,50 @@ export function exportAppearancePack(): void {
   URL.revokeObjectURL(url);
 }
 
+// ui/textureEditor.ts's own drop handler builds its object URL straight
+// from the dropped `File`, which already carries a real, browser/OS-
+// assigned MIME type — that's enough for every raster format (PNG/JPEG/
+// GIF/WEBP/...), which browsers generally still sniff correctly from
+// magic bytes via <img> even without one, but NOT for SVG: it's plain XML
+// text with no magic-byte signature, so a Blob built from raw bytes with
+// no explicit type is liable to silently fail to decode as an image
+// (Safari in particular) — the actual cause of an SVG-backed appearance
+// asset failing to reload from a saved pack even though the exact same
+// file dropped live onto the canvas worked fine (that path has a real File
+// object's own `.type` to lean on; this one, rebuilding a Blob from raw
+// bytes read back out of a zip/fetch, does not). Extensions mirror
+// ui/textureEditor.ts's own IMAGE_EXTENSION list, plus svg (missing there
+// for the same reason — see that file's own comment).
+function mimeTypeFor(fileName: string): string {
+  const ext = fileName.slice(fileName.lastIndexOf('.') + 1).toLowerCase();
+  switch (ext) {
+    case 'svg':
+      return 'image/svg+xml';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'bmp':
+      return 'image/bmp';
+    case 'avif':
+      return 'image/avif';
+    default:
+      return '';
+  }
+}
+
 // Decodes raw image bytes into an HTMLImageElement — the same
 // object-URL-via-Image route ui/textureEditor.ts's own drop handler uses,
 // just without the interactive crop/adjust step since a pack's manifest
 // already carries a finished sourceRect/adjustments for it.
-function decodeImage(bytes: Uint8Array): Promise<HTMLImageElement> {
+function decodeImage(bytes: Uint8Array, fileName: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
-    const blob = new Blob([bytes.slice()]);
+    const blob = new Blob([bytes.slice()], { type: mimeTypeFor(fileName) });
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => {
@@ -170,7 +207,7 @@ async function applyManifest(
     }
     let image: HTMLImageElement;
     try {
-      image = await decodeImage(bytes);
+      image = await decodeImage(bytes, asset.file);
     } catch {
       console.error(`Appearance pack: failed to decode image file "${asset.file}"`);
       continue;

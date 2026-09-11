@@ -794,7 +794,14 @@ function canvasPoint(canvas: HTMLCanvasElement, e: { clientX: number; clientY: n
   return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 
-const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+// svg included as a fallback alongside every raster format below — normally
+// unnecessary (a real dropped File's own file.type, checked first in
+// looksLikeImageFile, already covers it), but cheap insurance for whatever
+// OS/browser combination doesn't set it. See ui/appearancePack.ts's own
+// mimeTypeFor for why an SVG specifically needs this kind of explicit
+// handling elsewhere in this same pipeline (no magic-byte signature to
+// sniff, unlike every format below it).
+const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i;
 
 function looksLikeImageFile(file: File): boolean {
   return file.type.startsWith('image/') || IMAGE_EXTENSION.test(file.name);
