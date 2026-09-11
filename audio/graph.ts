@@ -96,7 +96,7 @@ export const TRIGGERED_KINDS = new Set(['kick', 'pluck', 'metal', 'sample', 'syn
 // ui/interaction.ts's pad-press/event-wire handling) in the same style as
 // a TRIGGERED_KINDS entity's own trigger pad, wired the same way too (see
 // activateEventTarget below).
-export const CONTINUOUS_KINDS = new Set(['bass', 'bow', 'grind', 'grain']);
+export const CONTINUOUS_KINDS = new Set(['bass', 'bow', 'grind', 'grain', 'liveInput']);
 
 // Below this actual playback time (buffer duration / current speed — see
 // the 'sample' case's registerTrigger), a pad hit layers a fresh voice on
@@ -119,6 +119,19 @@ const sampleBuffers = new Map<string, AudioBuffer>();
 
 export function registerSampleBuffer(entityId: string, buffer: AudioBuffer): void {
   sampleBuffers.set(entityId, buffer);
+}
+
+// The empty GainNode a 'liveInput' entity's real MediaStreamAudioSourceNode
+// connects into once getUserMedia resolves (ui/liveInputSetup.ts) — built
+// synchronously in createGenerator's 'liveInput' case below so the rest of
+// that entity's chain (level/pauseGate) exists immediately, same "permanent
+// placeholder, hot-swapped in later" shape as sampleBuffers above, just a
+// live Node connection point instead of a registered buffer (getUserMedia,
+// unlike a decoded file, can't resolve before the entity even exists).
+const liveInputSourceGains = new Map<string, GainNode>();
+
+export function getLiveInputSourceGain(entityId: string): GainNode | undefined {
+  return liveInputSourceGains.get(entityId);
 }
 
 // The live 'grain' voice instance for each entity, keyed by id — unlike
@@ -799,6 +812,35 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         grainControls[key] = (value) => grainVoice.set(key, value);
       }
       registerControls(entity.id, grainControls);
+
+      return pauseGate;
+    }
+    // A hardware live-input channel (a double-bass acoustic pickup, a mic —
+    // ui/liveInputSetup.ts's own popup handles device selection/connect).
+    // `sourceInput` is otherwise-empty until that popup's connectLiveInput
+    // resolves its getUserMedia call and connects the real
+    // MediaStreamAudioSourceNode into it — see getLiveInputSourceGain above.
+    // No melodyGate stage (unlike bass/bow): there's no plausible melody
+    // organelle attaching to raw live input, and 'grain' just above already
+    // establishes the simpler level->pauseGate-only shape for a continuous
+    // voice that doesn't need one. `level` starts conservatively low (well
+    // below every other voice's own default) since there's deliberately no
+    // anti-feedback protection yet — see ARCHITECTURE.md §5.4.
+    case 'liveInput': {
+      const sourceInput = ctx.createGain();
+      const level = ctx.createGain();
+      level.gain.value = entity.params.level ?? 0.15;
+      sourceInput.connect(level);
+
+      const pauseGate = ctx.createGain();
+      level.connect(pauseGate);
+      registerPauseGate(entity.id, pauseGate);
+
+      liveInputSourceGains.set(entity.id, sourceInput);
+
+      registerControls(entity.id, {
+        level: (value) => level.gain.setTargetAtTime(value, ctx.currentTime, 0.01),
+      });
 
       return pauseGate;
     }
@@ -2631,6 +2673,14 @@ export function rebuildEntity(entity: Entity, graph: EntityGraph): void {
   sustainedEntities.delete(entity.id);
   playingEntities.delete(entity.id);
   melodyOwnersByEntity.delete(entity.id);
+  // A 'liveInput' entity's own connection point (see getLiveInputSourceGain
+  // above) — by the time this runs the entity is always freshly undocked
+  // (rebuildEntity only ever fires on a dock-then-undock round trip, see its
+  // own comment below), and ui/docking.ts's dockEntity already released the
+  // actual mic stream when it was parked, so there's no live
+  // MediaStreamAudioSourceNode left pointing at this stale node — just
+  // registry hygiene, not a live-connection teardown.
+  liveInputSourceGains.delete(entity.id);
   // Stops the old instance's setInterval scheduler before dropping the
   // reference — otherwise a 'grain' voice rebuilt this way (drag out of the
   // dock, then back in) would leak a still-ticking scheduler forever, on

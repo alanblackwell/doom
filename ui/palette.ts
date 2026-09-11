@@ -26,6 +26,7 @@ export const KIND_COLORS: Record<string, string> = {
   wander: '#4a5a6e', // cool slate-blue — a control container (ui/controlSpecs.ts's CONTROL_CONTAINER_KINDS), drawn hollow like a filter/pedal; "drift," distinct from every pedal's own warmer hues
   jitter: '#6e4a4a', // dusty red-brown — the same hollow control-container treatment as wander, a duller red than growl/fuzz's own since this is "sloppy," not "hot"
   noisegate: '#4a6a6a', // cold, desaturated cyan-grey — "cut/silence," lighter and more neutral than reverb/chorus/ringmod/wander's own teal-blue cluster
+  liveInput: '#3a5a4a', // muted forest green — a hardware channel rather than a synthesized voice, distinct from every generated source's own wood/steel/rust hues; dimmed further in ui/render.ts's drawBox until something's actually connected
 };
 export const DEFAULT_COLOR = '#3a3a3a';
 export const ACCENT = '#c98a3c'; // selection / drop-target accent — warm, reads against the dark palette

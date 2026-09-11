@@ -122,6 +122,7 @@ import {
   stopGrainCapture,
   updateGrainPointDrag,
 } from './grainSampler';
+import { hitTestLiveInputSetupPopup, selectDevice as selectLiveInputDevice, toggleConnect as toggleLiveInputConnect, toggleDeviceList as toggleLiveInputDeviceList } from './liveInputSetup';
 import {
   beginGrindTunerMaxDrag,
   copyGrindTuning,
@@ -1361,6 +1362,34 @@ export function attachInteraction(
           break;
         // 'background' is absorbed with no further action, same as the
         // melody/envelope popups' own catch-all.
+      }
+      return;
+    }
+
+    // An open live-input setup popup (ui/liveInputSetup.ts) sits visually on
+    // top of everything else too, same reasoning as the melody/sampler
+    // popups above. Unlike sampler's own close case, closing this one does
+    // NOT release the mic — see ui/liveInputSetup.ts's own header comment.
+    const liveInputHit = hitTestLiveInputSetupPopup(graph, point);
+    if (liveInputHit && !popupIsCoveredByBox(graph, point, liveInputHit.entityId)) {
+      raiseFeatureOwner(graph, liveInputHit.entityId);
+      switch (liveInputHit.kind) {
+        case 'close': {
+          const feature = graph.get(liveInputHit.entityId);
+          if (feature) feature.expanded = false;
+          break;
+        }
+        case 'deviceRow':
+          toggleLiveInputDeviceList(liveInputHit.entityId);
+          break;
+        case 'deviceOption':
+          selectLiveInputDevice(liveInputHit.entityId, liveInputHit.ownerId, liveInputHit.deviceId);
+          break;
+        case 'connect':
+          toggleLiveInputConnect(liveInputHit.entityId, liveInputHit.ownerId);
+          break;
+        // 'background' is absorbed with no further action, same as the
+        // melody/sampler popups' own catch-all.
       }
       return;
     }

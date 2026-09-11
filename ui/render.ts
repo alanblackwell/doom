@@ -49,6 +49,7 @@ import type { NoteSnapIndicator } from './sequencer';
 import { beatMatcherNoteSnapHoldFraction, drawBeatMatcherBody, drawBeatMatcherPopup } from './beatMatcher';
 import type { BeatMatcherNoteSnapIndicator } from './beatMatcher';
 import { drawGrainSamplerPopup } from './grainSampler';
+import { drawLiveInputSetupPopup, isLiveInputConnected } from './liveInputSetup';
 import { drawGrindTunerPopup } from './grindTuner';
 import { drawBassTunerPopup } from './bassTuner';
 import { drawMetalTunerPopup } from './metalTuner';
@@ -297,6 +298,8 @@ function drawOwnFeatures(
       drawSamplerPopup(ctx, graph, feature, owner, canvas, now, drag);
     } else if (feature.kind === 'grainEditor') {
       drawGrainSamplerPopup(ctx, graph, feature, owner, interaction.hoverGrainId === feature.id, drag);
+    } else if (feature.kind === 'liveInputSetup') {
+      drawLiveInputSetupPopup(ctx, graph, feature, owner, now, drag);
     } else if (feature.kind === 'sequencer') {
       const draggingAxis = interaction.draggingTimeAxis?.entityId === feature.id;
       const resizing = interaction.resizingSequencer?.entityId === feature.id;
@@ -1205,7 +1208,14 @@ function drawBox(
   depth: number,
   flags: { selected: boolean; dropTarget: boolean; lifted: boolean }
 ): void {
-  const baseColor = KIND_COLORS[entity.kind] ?? DEFAULT_COLOR;
+  // A 'liveInput' entity reads visibly dim/unlit until something's actually
+  // connected (ui/liveInputSetup.ts's own Connect button) — during a
+  // performance, "is my mic actually live" needs to be readable at a glance
+  // on the box itself, not only inside its popup.
+  const baseColor =
+    entity.kind === 'liveInput' && !isLiveInputConnected(entity.id)
+      ? shadeColor(KIND_COLORS[entity.kind] ?? DEFAULT_COLOR, 0.45)
+      : (KIND_COLORS[entity.kind] ?? DEFAULT_COLOR);
   // Sink+source ("pedal"/filter) kinds render hollow — an empty container
   // waiting for something to be routed through it, rather than a solid
   // mass like a plain source/mixer. No id label (the box is about what's

@@ -261,6 +261,24 @@ Placeholders for larger features to elaborate on when we get to each one.
     own tuning organelle (`audio/noisegateTuning.ts`'s `NOISEGATE_TUNING`,
     reusing `ui/tuningOrganelle.ts` same as grind/bass/metal/grain/vocode).
 
+14. **Live input** (`audio/graph.ts`'s `liveInput` case, `ui/
+    liveInputSetup.ts`) — a real, persistent hardware-input Source entity
+    (`live-input-1`), landing ARCHITECTURE.md §3.1/§5.4's "Live Input" as an
+    actual instance rather than an unused reserved `EntityType`. Foundation
+    work for an eventual anti-feedback resonance model for a double-bass
+    acoustic-body pickup (adaptive system-identification against the app's
+    own synthesized output, AEC-style) — not built yet; this just gets a
+    genuine live channel into the graph to attach that to later. Device
+    selection/connect lives in its own setup organelle (device dropdown,
+    Connect/Disconnect, status, and a live level meter — no waveform/trim,
+    unlike `ui/sampler.ts`'s own popup, since this isn't a recording tool).
+    A real, ongoing `MediaStreamAudioSourceNode` connection, not a transient
+    analyser tap — it stays wired into the mix independent of the popup's
+    own open/closed state; only docking the entity releases it, matching
+    `ui/sampler.ts`/`ui/grainSampler.ts`'s own privacy-on-dock convention.
+    `level` defaults conservatively (well below every other voice's own
+    default) since there's deliberately no anti-feedback protection yet.
+
 ## Next: a doom/industrial/drone sound palette
 
 The current source/filter selection (`bow`, `pluck`, `bass`, `kick`,

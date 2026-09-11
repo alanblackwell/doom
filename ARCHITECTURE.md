@@ -33,7 +33,7 @@ keep correct, at the cost of ruling out a fully independent native audio server
 │  Transport / Scheduler  (lookahead clock driving pattern  │
 │  playback; independent of the graph, writes into it)      │
 ├─────────────────────────────────────────────────────────┤
-│  Live Input  (2ch: voice + instrument, getUserMedia)      │
+│  Live Input  (getUserMedia — see §5.4 for what's landed)  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +60,16 @@ save/load) is a projection of it.
   it belongs to one specific source rather than being freely relocatable.)
 - **Live Input** — a special Source backed by a hardware input channel
   (`MediaStreamAudioSourceNode`) rather than a synthesis algorithm. Behaves like
-  any other Source for routing/nesting purposes once created.
+  any other Source for routing/nesting purposes once created — implemented as
+  a plain `type: 'source', kind: 'liveInput'` entity (`audio/graph.ts`), not
+  the separate `'liveInput'` `EntityType` the union still reserves: every
+  `type === 'source'` guard elsewhere (doom lever, pan/level-from-canvas-
+  position, texture-pack targeting) already does exactly what this needs, so
+  keeping it a plain Source avoids widening five unrelated guards for a
+  distinction this paragraph itself says shouldn't exist post-creation.
+  Device selection/connect lives in its own setup organelle (`ui/
+  liveInputSetup.ts`, a `'feature'`, same porthole/popup mechanism as every
+  other organelle) rather than on the box itself.
 - **Feature** — an internal organelle belonging to exactly one Source (an ADSR
   envelope is the first one), drawn *within* that source's own boundary rather
   than as a sibling box on the canvas — the "metaphorical organelle within the
@@ -343,11 +352,11 @@ triggers note/sample events; it doesn't own any nodes itself.
 - Both engines address entities/AudioParams by ID from the entity graph — they
   don't know or care about the canvas.
 
-### 5.4 Live input (2 channels: voice + instrument)
+### 5.4 Live input
 
-Two `Live Input` entities, each backed by its own `getUserMedia` stream (or one
-stereo stream split into two mono sources if using a single 2-in interface) —
-explicitly disable browser voice-chat processing on both:
+Landed as one generic `Live Input` entity (`live-input-1`, `ui/main.ts` —
+`audio/graph.ts`'s `'liveInput'` case), backed by its own `getUserMedia`
+stream, explicitly disabling browser voice-chat processing:
 
 ```js
 navigator.mediaDevices.getUserMedia({
@@ -355,16 +364,32 @@ navigator.mediaDevices.getUserMedia({
     echoCancellation: false,
     noiseSuppression: false,
     autoGainControl: false,
-    channelCount: 1
   }
 })
 ```
 
-Each then behaves as an ordinary Source entity — droppable into any container,
-processable through the same worklet/native-node chains as synthesized sources.
-At two channels there's no pressing need for multichannel-interface routing
-complexity — standard `getUserMedia` device selection is sufficient; revisit only
-if the input count grows.
+(No `channelCount` constraint — see `audio/samplerCapture.ts`'s own comment
+on why forcing one is riskier than letting Web Audio downmix whatever the
+device natively provides, a lesson this entity's device-connect path reuses
+directly.)
+
+Device selection and the actual connect/disconnect live in the entity's own
+setup organelle (`ui/liveInputSetup.ts`, a porthole/popup like every other
+organelle) rather than on the box itself: picking a device and pressing
+Connect wires a real `MediaStreamAudioSourceNode` straight into the entity's
+own gain chain, where it stays connected independent of the popup's own
+open/closed state — only docking the entity (the "put this away" gesture)
+releases the stream, matching `ui/sampler.ts`/`ui/grainSampler.ts`'s own
+privacy-on-dock convention. Once connected, it behaves as an ordinary Source
+entity — droppable into any container, processable through the same
+worklet/native-node chains as synthesized sources. `level` defaults
+conservatively low and there is, deliberately, no anti-feedback protection
+yet — see TODO.md.
+
+Only one instance is seeded for now (no voice in this app has a duplicate/
+spawn mechanism yet — see TODO.md's "Maybe someday"); a second channel (e.g.
+a separate vocal mic) would be a second hardcoded entity seeded the same way,
+not a new mechanism.
 
 ## 6. Persistence — composition format
 

@@ -210,6 +210,13 @@ overdrive: [
   // whose 'sample' entry goes all the way down to 0.01x at the lever's own
   // doomy end, far below what this dot's old 0.1x floor allowed.
   sample: [{ param: 'level', label: 'volume', min: 0, max: 1.5, color: '#e0c840' }],
+  // A hardware live-input channel (audio/graph.ts's 'liveInput' case,
+  // ui/liveInputSetup.ts's own device-connect organelle) — just `level` for
+  // now, capped well below every other voice's own headroom since there's
+  // deliberately no anti-feedback protection yet (see ARCHITECTURE.md
+  // §5.4). A feedback-margin control belongs here once that work lands, not
+  // before.
+  liveInput: [{ param: 'level', label: 'volume', min: 0, max: 0.6, color: '#e0c840' }],
   // A knob's own value — reuses the same dot+slider mechanism as every
   // other parameter (see ui/controls.ts), rather than needing bespoke
   // interaction code. Color matches the knob's rotating indicator (see

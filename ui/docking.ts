@@ -10,6 +10,7 @@ import { removeWireTo } from './wiring';
 import { removeEventWiresTo } from './eventWiring';
 import { stopCapture } from './sampler';
 import { stopGrainCapture } from './grainSampler';
+import { disconnectLiveInput } from './liveInputSetup';
 
 // Only a leaf, non-control entity can dock — a Control (knob/clock/tap,
 // including a control-CONTAINING control like wander/jitter — see
@@ -59,6 +60,13 @@ export function dockEntity(graph: EntityGraph, entity: Entity): void {
     // same reasoning, its own watcher/recording must stop, not run on
     // silently in the background.
     if (feature.kind === 'grainEditor') stopGrainCapture(feature.id);
+    // A live-input setup organelle (ui/liveInputSetup.ts) may hold a genuinely
+    // open, ongoing mic/pickup stream — unlike the two cases above this one
+    // deliberately stays open across the popup's own close button (a live
+    // channel is meant to keep running once set up), but parking the
+    // instrument in the dock is the "put this away" gesture, so it releases
+    // here, same privacy-on-dock reasoning as sampler/grainEditor above.
+    if (feature.kind === 'liveInputSetup') disconnectLiveInput(feature.id, entity.id);
   }
   entity.docked = true;
 }

@@ -833,6 +833,51 @@ graph.add({
   ownerId: 'grain-1',
   expanded: false,
 });
+// A hardware live-input channel (audio/graph.ts's 'liveInput' case) — a
+// double-bass acoustic-pickup or mic channel, backed by getUserMedia rather
+// than a synthesis algorithm (ARCHITECTURE.md §3.1/§5.4's "Live Input").
+// Silent and unconnected until its own setup organelle (below) picks a
+// device and presses Connect. `level` starts well below every other voice's
+// own default — there's deliberately no anti-feedback protection yet.
+graph.add({
+  id: 'live-input-1',
+  type: 'source',
+  kind: 'liveInput',
+  parentId: null,
+  children: [],
+  params: { level: 0.15 },
+  x: 2880,
+  y: 160,
+  width: 110,
+  height: 70,
+  seed: 36,
+  docked: true,
+  ownerId: null,
+  expanded: false,
+});
+// live-input-1's own setup organelle (EntityType 'feature', kind
+// 'liveInputSetup' — ui/liveInputSetup.ts): device selector, connect/
+// disconnect, status readout, and a live level meter. Same porthole/popup
+// mechanism as sampler-1-capture/grain-1-editor above, but — unlike
+// either — its connection stays open across the popup closing; only
+// docking the owner releases it (ui/docking.ts). x/y/width/height/seed are
+// unused for a feature entity, same as every other feature in this file.
+graph.add({
+  id: 'live-input-1-setup',
+  type: 'feature',
+  kind: 'liveInputSetup',
+  parentId: null,
+  children: [],
+  params: {},
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  seed: 37,
+  docked: false,
+  ownerId: 'live-input-1',
+  expanded: false,
+});
 // A completely conventional oscillator+LFO synth voice (audio/graph.ts's
 // 'synth' case, ui/synthConfig.ts's own organelle) — up to four blended
 // native-oscillator waveforms, gated by the same ADSR-envelope-organelle
