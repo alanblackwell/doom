@@ -188,10 +188,31 @@ export function effectiveBounds(graph: EntityGraph, entity: Entity, drag?: DragC
   // controlsFor('envelope') entry does return specs (for wire-color lookup —
   // see controlSpecs.ts), so this guards against the reservation math
   // running against a feature's own unused x/y/width/height regardless.
+  // A textured entity's own image (ui/textureEditor.ts) is its absolute
+  // final footprint (see actualSize above, which already returns the
+  // image's own opaqueSize instead of entity.width/height once one's
+  // assigned) — never grown past that to reserve room for the control-dot
+  // column the way an untextured, procedurally-drawn box is below. Growing
+  // it would inflate the rect ui/render.ts's drawBox/drawTexturedFill then
+  // stretches the assigned image to fill exactly, distorting its aspect
+  // ratio — the actual bug this guard exists to avoid. Every position that
+  // otherwise derives from this function's return value (control dots —
+  // ui/controls.ts's dotPositionFor; the organelle porthole —
+  // ui/organelle.ts's portholePosition; the trigger pad — ui/pads.ts's
+  // isWithinPad; the doom lever's rivet — ui/doomLever.ts's doomLeverAnchor)
+  // ends up sitting at/near the image's own true edge instead, which can
+  // mean two of them overlap on a small image — accepted, rather than
+  // distorting the image to make room. ui/interaction.ts's existing
+  // pointerdown dispatch order already resolves such an overlap in the
+  // control-dot/porthole's favor (checked before the doom lever, which is
+  // itself checked before a plain box/pad hit — see its own comments),
+  // with no changes needed here for that.
+  const hasTexture = getTexture(entity.kind) != null;
+
   const specs = controlsFor(entity.kind);
   const isEmptyFilter = PROCESSOR_KINDS.has(entity.kind) && graph.childrenOf(entity.id).length === 0;
   const isPlainControl = entity.type === 'control';
-  if (specs.length > 0 && !isPlainControl && entity.type !== 'feature' && !isEmptyFilter) {
+  if (specs.length > 0 && !isPlainControl && entity.type !== 'feature' && !isEmptyFilter && !hasTexture) {
     const baseRect = { x: pos.x, y: pos.y, width: size.width, height: size.height };
     const bottomDot = dotPosition(baseRect, 0);
     const topDot = dotPosition(baseRect, specs.length - 1);
