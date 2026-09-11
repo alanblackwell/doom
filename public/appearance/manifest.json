@@ -38,6 +38,46 @@
       "copyright": "FreeSVG.org ID 183100 by OpenClipart. Creative commons CC0 (public domain)",
       "opaqueWidth": 60,
       "opaqueHeight": 152.3926380368098
+    },
+    {
+      "target": "synth",
+      "file": "synth.png",
+      "sourceRect": {
+        "x": 8.265625000000028,
+        "y": 7.232421875,
+        "width": 508.33593749999994,
+        "height": 305.828125
+      },
+      "adjustments": {
+        "brightness": 0.5803571428571429,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: The front panel of a small modular music synthesiser, with just four simple modules in a rack and patch cords between them.",
+      "opaqueWidth": 135.4662162162162,
+      "opaqueHeight": 81.5
+    },
+    {
+      "target": "overdrive",
+      "file": "old-pedal.png",
+      "sourceRect": {
+        "x": 12.07421875,
+        "y": 10.9765625,
+        "width": 322.7109375,
+        "height": 540.046875
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: An old guitar pedal box, seen from above. It is battered and scratched, held together with large pieces of dirty and fraying duct tape. It's not really possible to see any of the original graphics or text, just fragments where the paint hasn't peeled off.",
+      "opaqueWidth": 60.00000000000001,
+      "opaqueHeight": 100.40816326530613
     }
   ]
 }

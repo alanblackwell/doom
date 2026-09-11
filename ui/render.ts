@@ -215,6 +215,7 @@ function drawEntity(
       selected: entity.id === interaction.selectedId,
       dropTarget: entity.id === interaction.hoverTargetId,
       lifted: false,
+      hasChildren: graph.childrenOf(entity.id).length > 0,
     });
   }
 
@@ -1198,6 +1199,59 @@ function drawTexturedFill(
   ctx.restore();
 }
 
+// A 10% border kept at the texture's own normal opacity once something's
+// actually routed through a textured filter/pedal (drawBox's own
+// `flags.hasChildren`) — a plain drawTexturedFill reads as a flat, solid
+// image regardless of contents, which stops reading as a CONTAINER the
+// moment something's dropped inside it (an untextured pedal's own hollow
+// outline, just below in drawBox, has no such problem — there's no fill to
+// go flat in the first place). Fraction of each axis independently, so it
+// stays proportional to the box's own current w/h rather than a fixed px
+// margin that would read inconsistently across differently-sized pedals.
+const CONTAINER_TEXTURE_MARGIN_FRACTION = 0.1;
+// The center's own opacity, as a further fraction of the texture's already-
+// configured adjustments.opacity — so turning the whole skin's opacity down
+// dims the window proportionally too, rather than the center fighting to
+// render at some fixed absolute alpha regardless.
+const CONTAINER_TEXTURE_CENTER_ALPHA_FACTOR = 0.2;
+
+function drawTexturedContainerFill(
+  ctx: CanvasRenderingContext2D,
+  texture: SavedTexture,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): void {
+  const { image, sourceRect, adjustments } = texture;
+  const dest = { x: x - w / 2, y: y - h / 2, width: w, height: h };
+
+  // The dimmed center first, across the WHOLE box — the border redraw right
+  // after overwrites its own band back to full/normal opacity on top of
+  // this, so only the center strip is left showing through at the lower
+  // alpha once both passes are done.
+  ctx.save();
+  ctx.globalAlpha = adjustments.opacity * CONTAINER_TEXTURE_CENTER_ALPHA_FACTOR;
+  drawAdjustedTexture(ctx, image, sourceRect, dest, adjustments);
+  ctx.restore();
+
+  const marginX = w * CONTAINER_TEXTURE_MARGIN_FRACTION;
+  const marginY = h * CONTAINER_TEXTURE_MARGIN_FRACTION;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(dest.x, dest.y, w, h);
+  // A second, inner rect added to the SAME path, clipped with the
+  // even-odd rule below — a point covered by both rects has a crossing
+  // count of 2 (even, so OUTSIDE the clip), one covered by only the outer
+  // rect has a count of 1 (odd, INSIDE) — carving the inner rect out as a
+  // hole, leaving just the border band clipped in.
+  ctx.rect(dest.x + marginX, dest.y + marginY, Math.max(0, w - marginX * 2), Math.max(0, h - marginY * 2));
+  ctx.clip('evenodd');
+  ctx.globalAlpha = adjustments.opacity;
+  drawAdjustedTexture(ctx, image, sourceRect, dest, adjustments);
+  ctx.restore();
+}
+
 function drawBox(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
@@ -1206,7 +1260,7 @@ function drawBox(
   w: number,
   h: number,
   depth: number,
-  flags: { selected: boolean; dropTarget: boolean; lifted: boolean }
+  flags: { selected: boolean; dropTarget: boolean; lifted: boolean; hasChildren: boolean }
 ): void {
   // A 'liveInput' entity reads visibly dim/unlit until something's actually
   // connected (ui/liveInputSetup.ts's own Connect button) — during a
@@ -1246,7 +1300,17 @@ function drawBox(
   }
 
   if (texture) {
-    drawTexturedFill(ctx, texture, x, y, w, h);
+    // Once something's actually routed through a textured filter/pedal,
+    // switch to the windowed border-opaque/center-dimmed treatment (see
+    // drawTexturedContainerFill's own header) so it still reads as a
+    // container rather than a flat, solid image once it has contents to
+    // show through — an empty one stays a plain full-opacity draw, same as
+    // before.
+    if (isHollowContainer && flags.hasChildren) {
+      drawTexturedContainerFill(ctx, texture, x, y, w, h);
+    } else {
+      drawTexturedFill(ctx, texture, x, y, w, h);
+    }
     ctx.shadowColor = 'transparent';
     if (flags.selected || flags.dropTarget) {
       ctx.strokeStyle = ACCENT;
@@ -1561,6 +1625,7 @@ function drawDraggedSubtree(
       selected: isRoot,
       dropTarget: false,
       lifted: isRoot,
+      hasChildren: graph.childrenOf(entity.id).length > 0,
     });
   }
   for (const child of graph.childrenOf(entity.id)) {
