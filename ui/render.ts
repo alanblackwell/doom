@@ -194,7 +194,8 @@ function drawEntity(
         entity,
         { x: bounds.x, y: bounds.y, width: bounds.width * scale, height: bounds.height * scale },
         entity.id === interaction.selectedId,
-        entity.id === interaction.hoverTargetId
+        entity.id === interaction.hoverTargetId,
+        graph.childrenOf(entity.id).length > 0
       );
     } else if (entity.kind === 'clock') {
       drawClock(ctx, entity, bounds, entity.id === interaction.selectedId, now);
@@ -984,14 +985,35 @@ function drawTap(
 // (ui/knobs.ts's hitTestWireHandle already excludes this kind from the
 // wire-drag-start hit test that draws one) — it isn't a wire source, it
 // just modifies whatever control is nested inside it.
+// The wander/jitter "stadium" outline (two semicircle caps of radius `r`,
+// joined by straight vertical sides) as its own path, built fresh on `ctx` —
+// shared by drawControlContainer's plain fill/stroke, its dashed boundary,
+// and its selected/drop-target accent outline, so all three always trace
+// the exact same shape rather than three independent copies of this drifting
+// apart. `topCenterY`/`bottomCenterY` are the two semicircle centers (not
+// re-derived here — callers already compute them once from `bounds`).
+function capsulePath(ctx: CanvasRenderingContext2D, cx: number, topCenterY: number, bottomCenterY: number, r: number): void {
+  ctx.beginPath();
+  ctx.arc(cx, topCenterY, r, Math.PI, 0, false); // top cap, left round to right
+  ctx.lineTo(cx + r, bottomCenterY); // right side down
+  ctx.arc(cx, bottomCenterY, r, 0, Math.PI, false); // bottom cap, right round to left
+  ctx.lineTo(cx - r, topCenterY); // left side back up
+  ctx.closePath();
+}
+
 function drawControlContainer(
   ctx: CanvasRenderingContext2D,
   entity: Entity,
   bounds: Rect,
   selected: boolean,
-  dropTarget: boolean
+  dropTarget: boolean,
+  hasChildren: boolean
 ): void {
   const baseColor = KIND_COLORS[entity.kind] ?? DEFAULT_COLOR;
+  // A user-customized texture (ui/textureEditor.ts) — same getTexture(kind)
+  // lookup drawBox/drawControlBody already use, just never wired up here
+  // before, so a skin assigned to wander/jitter silently never drew at all.
+  const texture = getTexture(entity.kind);
 
   // Radius is always exactly half the box's width — effectiveBounds never
   // pads left/right beyond it (see its own comment) — so it, and the two
@@ -1008,21 +1030,47 @@ function drawControlContainer(
   ctx.shadowBlur = 6;
   ctx.shadowOffsetY = 2;
 
-  ctx.beginPath();
-  ctx.arc(bounds.x, topCenterY, r, Math.PI, 0, false); // top cap, left round to right
-  ctx.lineTo(bounds.x + r, bottomCenterY); // right side down
-  ctx.arc(bounds.x, bottomCenterY, r, 0, Math.PI, false); // bottom cap, right round to left
-  ctx.lineTo(bounds.x - r, topCenterY); // left side back up
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — matches drawBox's own hollow-pedal fill
-  ctx.fill();
-  ctx.shadowColor = 'transparent';
+  if (texture) {
+    // Same "the image's own bounds/alpha define the visible shape" treatment
+    // drawControlBody gives a knob's own circular body — no forced capsule
+    // clip, so the texture renders exactly as uploaded/cropped rather than
+    // being masked into the stadium shape on top of that. And the same
+    // "reads as a container, not a flat image, once something's actually
+    // wrapped inside it" windowed treatment drawBox gives a textured
+    // PROCESSOR_KINDS pedal — wander/jitter wrap exactly one control the
+    // same way a pedal wraps a source, so an empty one still gets the
+    // plain full-opacity draw, unchanged.
+    if (hasChildren) {
+      drawTexturedContainerFill(ctx, texture, bounds.x, bounds.y, bounds.width, bounds.height);
+      capsulePath(ctx, bounds.x, topCenterY, bottomCenterY, r);
+      strokeContainerBoundaryDash(ctx);
+    } else {
+      drawTexturedFill(ctx, texture, bounds.x, bounds.y, bounds.width, bounds.height);
+    }
+    ctx.shadowColor = 'transparent';
+    if (selected || dropTarget) {
+      // The capsule's own true outline, not a plain rect — matches the
+      // dashed boundary just above (and the untextured branch's own outline
+      // below) rather than a rectangle sitting oddly across a rounded shape.
+      capsulePath(ctx, bounds.x, topCenterY, bottomCenterY, r);
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 2.5;
+      if (dropTarget) ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  } else {
+    capsulePath(ctx, bounds.x, topCenterY, bottomCenterY, r);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // not the kind's own hue — matches drawBox's own hollow-pedal fill
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
 
-  ctx.lineWidth = selected || dropTarget ? 2.5 : 1.5;
-  ctx.strokeStyle = selected || dropTarget ? ACCENT : shadeColor(baseColor, 1.3);
-  if (dropTarget) ctx.setLineDash([6, 4]);
-  ctx.stroke();
-  ctx.setLineDash([]);
+    ctx.lineWidth = selected || dropTarget ? 2.5 : 1.5;
+    ctx.strokeStyle = selected || dropTarget ? ACCENT : shadeColor(baseColor, 1.3);
+    if (dropTarget) ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 
   // Below the shape, same spot drawClock/drawLfo put their own live readout
@@ -1259,6 +1307,31 @@ const CONTAINER_TEXTURE_MARGIN_FRACTION = 0.1;
 // render at some fixed absolute alpha regardless.
 const CONTAINER_TEXTURE_CENTER_ALPHA_FACTOR = 0.2;
 
+// A dotted outline traced along the CURRENT (possibly grown, to enclose
+// whatever's actually inside — see effectiveBounds) boundary, once
+// drawTexturedContainerFill's windowed treatment is in play — its dimmed,
+// mostly-see-through center and photographic (not a crisp drawn line)
+// border otherwise leave the container's own true edge hard to place at a
+// glance, unlike an untextured container's own solid outline stroke.
+// Distinct from the selected/drop-target ACCENT outline both callers
+// already draw on top of this when relevant — this one is unconditional
+// whenever there's content to show the boundary of, not a selection state.
+const CONTAINER_BOUNDARY_DASH_COLOR = 'rgba(255, 255, 255, 0.5)';
+const CONTAINER_BOUNDARY_DASH_WIDTH = 1.5;
+const CONTAINER_BOUNDARY_DASH_PATTERN = [4, 3];
+
+// Strokes whatever path is already current on `ctx` (the caller builds it —
+// a plain rect for drawBox, the rounded capsule outline for
+// drawControlContainer — so this stays shape-agnostic) with the shared
+// dotted style above.
+function strokeContainerBoundaryDash(ctx: CanvasRenderingContext2D): void {
+  ctx.strokeStyle = CONTAINER_BOUNDARY_DASH_COLOR;
+  ctx.lineWidth = CONTAINER_BOUNDARY_DASH_WIDTH;
+  ctx.setLineDash(CONTAINER_BOUNDARY_DASH_PATTERN);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 function drawTexturedContainerFill(
   ctx: CanvasRenderingContext2D,
   texture: SavedTexture,
@@ -1352,6 +1425,9 @@ function drawBox(
     // before.
     if (isHollowContainer && flags.hasChildren) {
       drawTexturedContainerFill(ctx, texture, x, y, w, h);
+      ctx.beginPath();
+      ctx.rect(x - w / 2, y - h / 2, w, h);
+      strokeContainerBoundaryDash(ctx);
     } else {
       drawTexturedFill(ctx, texture, x, y, w, h);
     }
@@ -1663,7 +1739,7 @@ function drawDraggedSubtree(
   // while being dragged — see drawControlContainer's own header — rather
   // than flashing over to drawBox's rectangle mid-drag and back on drop.
   if (CONTROL_CONTAINER_KINDS.has(entity.kind)) {
-    drawControlContainer(ctx, entity, scaledBounds, isRoot, false);
+    drawControlContainer(ctx, entity, scaledBounds, isRoot, false, graph.childrenOf(entity.id).length > 0);
   } else {
     drawBox(ctx, entity, scaledBounds.x, scaledBounds.y, scaledBounds.width, scaledBounds.height, depth, {
       selected: isRoot,

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "assets": [
-    {
+    "assets": [
+	    {
       "target": "canvas",
       "file": "abbatoir-floor.jpg",
       "sourceRect": {
@@ -138,6 +138,66 @@
       "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: Front view of a dirty old kick-drum, sitting upright on a matt black floor with matt black background. The only lighting on the drum is the glow of an unseen distant fire.",
       "opaqueWidth": 133.15579710144928,
       "opaqueHeight": 128.5
+    },
+    {
+      "target": "jitter",
+      "file": "coins.png",
+      "sourceRect": {
+        "x": 11,
+        "y": 7,
+        "width": 397,
+        "height": 397
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: Two old iron pennies with scratches and rust. Tossed and spinning as they land on dark red velvet.",
+      "opaqueWidth": 48.5,
+      "opaqueHeight": 48.5
+    },
+    {
+      "target": "wander",
+      "file": "dice.png",
+      "sourceRect": {
+        "x": 11.623046875,
+        "y": 6.33984375,
+        "width": 519.8671875,
+        "height": 519.8671875
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: Two scrimshaw bone dice on dark red velvet.",
+      "opaqueWidth": 48.5,
+      "opaqueHeight": 48.5
+    },
+    {
+      "target": "clock",
+      "file": "metronome.png",
+      "sourceRect": {
+        "x": 5.0390625,
+        "y": 7.0546875,
+        "width": 344.671875,
+        "height": 501.890625
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: An industrial steel pocket metronome for a doom metal band with the pendulum swung over at an angle from the body. Flat front view.  Stark and simple. Rendered against a very dark red / black background.",
+      "opaqueWidth": 54.35542168674698,
+      "opaqueHeight": 79.14912280701753
     }
   ]
 }

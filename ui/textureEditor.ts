@@ -99,7 +99,12 @@ export function isTextureEditorActive(): boolean {
   return state !== null;
 }
 
-const MIN_CROP_SIZE = 60; // px, editor space
+// px, editor space — a control-type entity (knob/clock/tap/lfo/wander/
+// jitter) defaults to a 30x30 body (ui/main.ts), so the previous 60px
+// floor made it impossible to ever crop a skin down small enough to
+// actually fit one without spilling past its column; comfortably below
+// that instead, with a little headroom to spare.
+const MIN_CROP_SIZE = 24;
 const HANDLE_SIZE = 10;
 const HANDLE_HIT_RADIUS = HANDLE_SIZE / 2 + 5;
 // Band straddling each edge of the crop rect (half inside, half outside)
