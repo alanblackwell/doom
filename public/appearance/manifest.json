@@ -98,6 +98,46 @@
       "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: A black bakelite knob with a position indicator poking out from one side. A remnant of a 1930s kitchen radio. Surface crazed, from years of fryer grime and cigarette smoke. Viewed from directly above, with uniform ambient lighting and no shadows, it sits alone on a matt black surface.",
       "opaqueWidth": 60,
       "opaqueHeight": 60.940438871473354
+    },
+    {
+      "target": "lfo",
+      "file": "regulator.png",
+      "sourceRect": {
+        "x": 5,
+        "y": 19,
+        "width": 436,
+        "height": 398
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: Two spinning brass balls at the end of a rotating hinged pantogram linkage. Rendered against a very dark red / black background. Dark ambience. No light sources or direct lighting",
+      "opaqueWidth": 65.7286432160804,
+      "opaqueHeight": 59.99999999999999
+    },
+    {
+      "target": "kick",
+      "file": "kick-drum.png",
+      "sourceRect": {
+        "x": 6.999999999999972,
+        "y": 8,
+        "width": 429.00000000000006,
+        "height": 414
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: Front view of a dirty old kick-drum, sitting upright on a matt black floor with matt black background. The only lighting on the drum is the glow of an unseen distant fire.",
+      "opaqueWidth": 133.15579710144928,
+      "opaqueHeight": 128.5
     }
   ]
 }

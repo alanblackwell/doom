@@ -907,7 +907,17 @@ function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, se
   const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const rate = entity.params.rate ?? 4;
 
-  drawWaveGlyph(ctx, { x: bounds.x, y: bounds.y - radius - 8 }, radius * 1.1, radius * 0.5, 'sine', false);
+  // The drawn sine glyph stands in for a rotating dial pointer this control
+  // otherwise has none of (see this function's own header comment) — once a
+  // skin's assigned (ui/textureEditor.ts), the image itself is the whole
+  // point, and a stock sine squiggle floating above it (unrelated to
+  // whatever the skin actually depicts) reads as a leftover annotation
+  // rather than part of the control. Same "suppress the programmatic
+  // decoration once a texture takes over that role" treatment drawKnob
+  // gives its own indicator line.
+  if (!getTexture(entity.kind)) {
+    drawWaveGlyph(ctx, { x: bounds.x, y: bounds.y - radius - 8 }, radius * 1.1, radius * 0.5, 'sine', false);
+  }
   drawWireBump(ctx, bounds, 0);
 
   ctx.save();
