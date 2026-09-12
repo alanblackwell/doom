@@ -49,7 +49,7 @@ import {
 import type { HandleKind } from './organelle';
 import { wireHandlePosition } from './knobs';
 import { padRadius, PAD_FLASH_DURATION } from './pads';
-import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
+import { drawBodyBulge, drawControlBody } from './render';
 import type { InteractionState } from './interaction';
 import { ACCENT, shadeColor } from './palette';
 import { MONO_FONT_FAMILY } from './monoFont';
@@ -2477,11 +2477,10 @@ export function drawSequencerBody(
   interaction: InteractionState,
   now: number
 ): void {
-  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
+  drawControlBody(ctx, bounds, selected, entity.kind);
   drawBodyBulge(ctx, bounds);
   const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'sequencer');
   drawSequencerPlayButton(ctx, bounds, feature ? sequencerStateFor(feature.id).playing : false, interaction, entity.id, now);
-  drawControlLabel(ctx, entity, bounds, radius);
 }
 
 function drawPlayIcon(ctx: CanvasRenderingContext2D, center: Point, playing: boolean): void {

@@ -40,14 +40,23 @@
         0 0 16px 2px rgba(70, 200, 100, 0.8);
     }
     #start-audio:disabled { opacity: 0.6; cursor: default; }
-    /* Same dark-button bevel as #start-audio, minus the colored glow (this
-       one has no running/idle state to signal) — pinned to the viewport's
-       own bottom-left corner (like #start-audio's top-left), not the
-       scrollable canvas content, so it stays put as the canvas is scrolled. */
-    #export-samples, #export-appearance {
+    /* Pinned to the viewport's own bottom-center, not the scrollable canvas
+       content, so it stays put as the canvas is scrolled — side by side
+       rather than #export-samples/#export-appearance each managing their
+       own fixed position, so centering the PAIR is one rule instead of two
+       hand-matched offsets. */
+    #export-buttons {
       position: fixed;
-      left: 16px;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
       z-index: 1;
+      display: flex;
+      gap: 12px;
+    }
+    /* Same dark-button bevel as #start-audio, minus the colored glow (this
+       one has no running/idle state to signal). */
+    #export-samples, #export-appearance {
       font: 12px "Fira Code", monospace;
       color: #ccc;
       background: #262626;
@@ -66,18 +75,14 @@
     /* Scarcely visible while disabled — much dimmer than the enabled
        state above, rather than just a slightly darker version of it. */
     #export-samples:disabled, #export-appearance:disabled { opacity: 0.12; cursor: default; }
-    #export-samples { bottom: 16px; }
-    /* Stacked above #export-samples rather than sharing its row — both are
-       pinned to the viewport's bottom-left corner (see #export-samples'
-       comment), independent buttons that can each be enabled/disabled on
-       their own (ui/main.ts). */
-    #export-appearance { bottom: 56px; }
   </style>
 </head>
 <body>
   <button id="start-audio">start audio</button>
-  <button id="export-samples" disabled>export samples</button>
-  <button id="export-appearance" disabled>export appearance</button>
+  <div id="export-buttons">
+    <button id="export-samples" disabled>export samples</button>
+    <button id="export-appearance" disabled>export appearance</button>
+  </div>
   <div id="viewport">
     <canvas id="stage"></canvas>
   </div>

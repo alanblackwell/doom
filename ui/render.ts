@@ -198,7 +198,7 @@ function drawEntity(
         graph.childrenOf(entity.id).length > 0
       );
     } else if (entity.kind === 'clock') {
-      drawClock(ctx, entity, bounds, entity.id === interaction.selectedId, now);
+      drawClock(ctx, entity, bounds, entity.id === interaction.selectedId, now, interaction);
     } else if (entity.kind === 'tap') {
       const highlighted = entity.id === interaction.selectedId || interaction.hoveredTapId === entity.id;
       drawTap(ctx, entity, bounds, highlighted, now, interaction);
@@ -207,7 +207,7 @@ function drawEntity(
     } else if (entity.kind === 'beatMatcher') {
       drawBeatMatcherBody(ctx, graph, entity, bounds, entity.id === interaction.selectedId, interaction, now);
     } else if (entity.kind === 'lfo') {
-      drawLfo(ctx, entity, bounds, entity.id === interaction.selectedId);
+      drawLfo(ctx, entity, bounds, entity.id === interaction.selectedId, interaction);
     } else {
       drawKnob(ctx, entity, bounds, entity.id === interaction.selectedId);
     }
@@ -729,16 +729,21 @@ export function drawControlBody(
     // Same "the image's own bounds/alpha define the visible shape" treatment
     // drawBox gives a source's box above — no forced circular clip, so a
     // texture renders exactly as uploaded/cropped in the editor rather than
-    // being masked into a circle on top of that.
+    // being masked into a circle on top of that. Drawn at bounds.width x
+    // bounds.height (the image's own real, possibly non-square opaqueSize —
+    // see ui/layout.ts's actualSize) rather than radius*2 on both axes,
+    // which would squash/stretch a control skin wider or taller than the
+    // OTHER axis into a square it was never cropped to (e.g. the
+    // sequencer's own music-box skin, noticeably wider than tall).
     if (rotateRadians !== undefined) {
       ctx.save();
       ctx.translate(bounds.x, bounds.y);
       ctx.rotate(rotateRadians);
       ctx.translate(-bounds.x, -bounds.y);
-      drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+      drawTexturedFill(ctx, texture, bounds.x, bounds.y, bounds.width, bounds.height);
       ctx.restore();
     } else {
-      drawTexturedFill(ctx, texture, bounds.x, bounds.y, radius * 2, radius * 2);
+      drawTexturedFill(ctx, texture, bounds.x, bounds.y, bounds.width, bounds.height);
     }
     ctx.shadowColor = 'transparent';
   } else {
@@ -826,14 +831,6 @@ export function drawBodyBulge(ctx: CanvasRenderingContext2D, bounds: Rect): void
   ctx.restore();
 }
 
-export function drawControlLabel(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, radius: number): void {
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = `11px ${MONO_FONT_FAMILY}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(entity.id, bounds.x, bounds.y + radius + 14);
-}
-
 function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
   const value = Math.min(1, Math.max(0, entity.params.value ?? 0.5));
   const angle = knobIndicatorAngle(value);
@@ -860,7 +857,6 @@ function drawKnob(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, s
   }
 
   drawWireBump(ctx, bounds, 0);
-  drawControlLabel(ctx, entity, bounds, radius);
 }
 
 // The master clock (audio/transport.ts): same body as a knob, but its
@@ -876,7 +872,8 @@ function drawClock(
   entity: Entity,
   bounds: Rect,
   selected: boolean,
-  now: number
+  now: number,
+  interaction: InteractionState
 ): void {
   const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const bpm = Math.round(entity.params.bpm ?? 80);
@@ -885,14 +882,21 @@ function drawClock(
 
   // Below the body, not at its center — the center is where the control
   // dot/slider (drawn separately, in renderFrame's overlay pass) sits, and
-  // would otherwise cover the readout.
-  ctx.save();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = `11px ${MONO_FONT_FAMILY}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`${bpm} BPM`, bounds.x, bounds.y + radius + 14);
-  ctx.restore();
+  // would otherwise cover the readout. Only drawn while its own bpm dot is
+  // actually being dragged (ui/controls.ts's draggingControl — the same
+  // gesture that reveals the dot's own slider/label just above the dot
+  // itself), not at rest — the skin already says "this is the clock," so
+  // this number only needs to exist while its value is actively changing.
+  const dragging = interaction.draggingControl?.entityId === entity.id && interaction.draggingControl.spec.param === 'bpm';
+  if (dragging) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = `11px ${MONO_FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${bpm} BPM`, bounds.x, bounds.y + radius + 14);
+    ctx.restore();
+  }
 }
 
 // A shared LFO modulation source (audio/graph.ts's 'lfo' case): same body as
@@ -904,7 +908,7 @@ function drawClock(
 // spot drawClock's BPM readout uses and for the same reason — the body's
 // own center is where the live rate dot/slider (drawn separately, in
 // renderFrame's overlay pass) sits.
-function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean): void {
+function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, selected: boolean, interaction: InteractionState): void {
   const radius = drawControlBody(ctx, bounds, selected, entity.kind);
   const rate = entity.params.rate ?? 4;
 
@@ -921,13 +925,18 @@ function drawLfo(ctx: CanvasRenderingContext2D, entity: Entity, bounds: Rect, se
   }
   drawWireBump(ctx, bounds, 0);
 
-  ctx.save();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.font = `11px ${MONO_FONT_FAMILY}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`${rate.toFixed(1)} Hz`, bounds.x, bounds.y + radius + 14);
-  ctx.restore();
+  // Same "only while its own dot is actually being dragged" gating as
+  // drawClock's BPM readout just above — see that function's own comment.
+  const dragging = interaction.draggingControl?.entityId === entity.id && interaction.draggingControl.spec.param === 'rate';
+  if (dragging) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = `11px ${MONO_FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${rate.toFixed(1)} Hz`, bounds.x, bounds.y + radius + 14);
+    ctx.restore();
+  }
 }
 
 const TAP_FLASH_DURATION_MS = 150; // matches ui/clockPulse.ts's FLASH_DURATION_MS
@@ -1071,17 +1080,6 @@ function drawControlContainer(
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  ctx.restore();
-
-  // Below the shape, same spot drawClock/drawLfo put their own live readout
-  // — the body's own center is where the live rate/amount dot/slider
-  // (drawn separately, in renderFrame's overlay pass) sits once expanded.
-  ctx.save();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-  ctx.font = `10px ${MONO_FONT_FAMILY}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(entity.kind, bounds.x, bounds.y + bounds.height / 2 + 14);
   ctx.restore();
 }
 
@@ -1508,9 +1506,11 @@ const MIX_OVERLAY_MAX_ALPHA = 0.4;
 const MIX_OVERLAY_STOPS = 40;
 
 // Whether ui/render.ts's canvas-position-mix visualization (below) is
-// currently drawn — on by default for now; exposed as a toggle for a future
-// on/off control (a button, keyboard shortcut, ...) that doesn't exist yet.
-let mixOverlayVisible = true;
+// currently drawn — off by default (hidden per request; the mapping itself
+// still runs in ui/stereoMix.ts, this only silences its on-canvas red wash);
+// exposed as a toggle for a future on/off control (a button, keyboard
+// shortcut, ...) that doesn't exist yet.
+let mixOverlayVisible = false;
 
 export function setMixOverlayVisible(visible: boolean): void {
   mixOverlayVisible = visible;

@@ -96,8 +96,8 @@
         "opacity": 1
       },
       "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: A black bakelite knob with a position indicator poking out from one side. A remnant of a 1930s kitchen radio. Surface crazed, from years of fryer grime and cigarette smoke. Viewed from directly above, with uniform ambient lighting and no shadows, it sits alone on a matt black surface.",
-      "opaqueWidth": 60,
-      "opaqueHeight": 60.940438871473354
+      "opaqueWidth": 47.5,
+      "opaqueHeight": 48.24451410658307
     },
     {
       "target": "lfo",
@@ -239,21 +239,23 @@
     },
     {
       "target": "sequencer",
-      "file": "handcranked-music-box-tunes-movements-retro-cylinder-mechanisms-closeup_264183-193.jpg",
+      "file": "music-box.png",
       "sourceRect": {
-        "x": 380.5914585472302,
-        "y": 162.2486179986139,
-        "width": 718.8170829055396,
-        "height": 718.8170829055396
+        "x": 9.765625,
+        "y": 12.20703125,
+        "width": 610.3515625,
+        "height": 358.88671875
       },
       "adjustments": {
-        "brightness": 0.6428571428571429,
+        "brightness": 0.5357142857142857,
         "hue": 0,
         "hueEnabled": false,
         "saturation": 1,
         "opacity": 1
       },
-      "copyright": "Uploaded by user Alan Blackwell on 2026-09-12. Sourced from site with non-functioning attribution search - img.magnific.com"
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026 with Palimpsest II",
+      "opaqueWidth": 56.95238095238096,
+      "opaqueHeight": 33.48800000000001
     },
     {
       "target": "tap",

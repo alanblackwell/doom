@@ -15,6 +15,7 @@ import {
   stopBeatMatcherPlaybackScheduler,
 } from '../audio/beatMatcherPlayer';
 import { EntityGraph } from '../audio/entityGraph';
+import type { Entity } from '../audio/entityGraph';
 import { renderFrame } from './render';
 import {
   attachInteraction,
@@ -1017,6 +1018,52 @@ graph.add({
   expanded: false,
 });
 
+// The left-hand control column above (knob/clock/tap/sequencer/beat-matcher/
+// lfo/wander/jitter, every one of them at x: 60) is laid out vertically HERE
+// rather than trusting the y values hand-picked above — a skin
+// (ui/textureEditor.ts) can give any of these a very different on-canvas
+// height than its own 30px default (see ui/layout.ts's actualSize, which
+// effectiveBounds already measures from), so fixed y coordinates chosen
+// against the unskinned size would leave gaps or overlap depending on which
+// skins happen to be assigned. Stacked top-to-bottom in this order, each
+// one's own actual (post-skin) height determining how much room it needs,
+// with an equal gap between every consecutive pair — that gap shrinks
+// (never grows past LEFT_COLUMN_MAX_GAP) as needed so the whole column
+// still fits within the current window height, down to LEFT_COLUMN_MIN_GAP
+// before it'd start overlapping instead. Run once now (covering the
+// unskinned default before any pack loads) and again once the committed
+// default appearance pack, if any, has finished loading (see the
+// loadDefaultAppearance call below) — a skin's real size isn't known until
+// its image has actually decoded.
+const LEFT_COLUMN_IDS = ['knob-1', 'clock-1', 'tap-1', 'sequencer-1', 'beat-matcher-1', 'lfo-1', 'wander-1', 'jitter-1'];
+const LEFT_COLUMN_TOP = 75;
+const LEFT_COLUMN_BOTTOM_MARGIN = 16; // matches #start-audio/#export-buttons' own 16px inset, so the column stops short of the window edge by the same amount
+const LEFT_COLUMN_MAX_GAP = 40;
+const LEFT_COLUMN_MIN_GAP = 6;
+
+function layoutLeftControlColumn(): void {
+  const entities = LEFT_COLUMN_IDS.map((id) => graph.get(id)).filter((e): e is Entity => e !== undefined);
+  const heights = entities.map((e) => effectiveBounds(graph, e).height);
+  const totalHeight = heights.reduce((sum, h) => sum + h, 0);
+  const available = window.innerHeight - LEFT_COLUMN_TOP - LEFT_COLUMN_BOTTOM_MARGIN;
+  const gapCount = entities.length - 1;
+  // Shrinks from the default max toward the min as the window gets shorter
+  // relative to how much room every control's own height alone needs —
+  // negative "room left" (heights alone already exceed the window) just
+  // clamps to the min rather than going negative, same as it would with no
+  // window-fit logic at all: entities still overlap somewhat rather than
+  // vanishing.
+  const gap = gapCount > 0 ? Math.min(LEFT_COLUMN_MAX_GAP, Math.max(LEFT_COLUMN_MIN_GAP, (available - totalHeight) / gapCount)) : 0;
+
+  let top = LEFT_COLUMN_TOP;
+  for (let i = 0; i < entities.length; i++) {
+    const height = heights[i];
+    entities[i].y = top + height / 2;
+    top += height + gap;
+  }
+}
+layoutLeftControlColumn();
+
 // Margin kept past the furthest entity's edge so it doesn't sit flush
 // against the scrollable area's border.
 const CONTENT_MARGIN = 40;
@@ -1064,9 +1111,13 @@ attachAppearancePackDrop(canvas);
 // ui/appearancePack.ts), if any — applied whenever it resolves; renderFrame
 // picks up newly-set textures on its next frame same as any interactively-
 // saved one, so this doesn't need to block or sequence against draw() below.
-loadDefaultAppearance().catch((err) => {
-  console.error('Failed to load default appearance:', err);
-});
+// Re-runs layoutLeftControlColumn once it lands, since that's the first
+// point any of those controls' actual (post-skin) heights are known.
+loadDefaultAppearance()
+  .then(() => layoutLeftControlColumn())
+  .catch((err) => {
+    console.error('Failed to load default appearance:', err);
+  });
 
 // The melody organelle's notation font (ui/bravuraFont.ts) — started as
 // early as possible since it's needed the moment any melody popup first

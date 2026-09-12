@@ -10,8 +10,7 @@
 // interaction, and playback code. It shares only genuinely generic,
 // kind-agnostic infrastructure the codebase already treats as shared:
 // ui/organelle.ts's porthole/popup positioning, ui/render.ts's
-// drawControlBody/drawBodyBulge/drawControlLabel, ui/eventWiring.ts's
-// event-wire registry.
+// drawControlBody/drawBodyBulge, ui/eventWiring.ts's event-wire registry.
 //
 // What makes this different from the sequencer: instead of authoring notes
 // against a blank grid, the track is authored against a spectrogram of a
@@ -66,7 +65,7 @@ import type { Entity, EntityGraph } from '../audio/entityGraph';
 import type { DragContext, Point, Rect } from './layout';
 import { gridStepSeconds, ownerOf, popupRectFor, closeButtonPosition, registerFeaturePopupSize, CLOSE_BUTTON_RADIUS, TITLE_HEIGHT } from './organelle';
 import type { HandleKind } from './organelle';
-import { drawBodyBulge, drawControlBody, drawControlLabel } from './render';
+import { drawBodyBulge, drawControlBody } from './render';
 import { getEntityNodes } from '../audio/graph';
 import { startNodeCapture, watchSound } from '../audio/nodeCapture';
 import type { LevelWatcher, Recording } from '../audio/nodeCapture';
@@ -3053,11 +3052,10 @@ export function drawBeatMatcherBody(
   interaction: InteractionState,
   now: number
 ): void {
-  const radius = drawControlBody(ctx, bounds, selected, entity.kind);
+  drawControlBody(ctx, bounds, selected, entity.kind);
   drawBodyBulge(ctx, bounds);
   const feature = graph.featuresOf(entity.id).find((f) => f.kind === 'beatMatcher');
   drawBeatMatcherPlayButton(ctx, bounds, feature ? beatMatcherStateFor(feature.id).playing : false, interaction, entity.id, now);
-  drawControlLabel(ctx, entity, bounds, radius);
 }
 
 const PANEL_BG = 'rgba(22, 22, 22, 0.97)';
