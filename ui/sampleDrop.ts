@@ -182,6 +182,33 @@ async function addSampleEntity(
   registerSampleBuffer(id, buffer);
   loadedSampleFiles.set(id, { fileName: file.name, bytes });
   graph.add(entity);
+  // A "player"'s own ADSR envelope organelle (ui/organelle.ts) — same
+  // mechanism/defaults as pluck-1-envelope (ui/main.ts), but starting
+  // DISABLED (enabled: 0): a dropped-in file should keep playing exactly as
+  // it always has until this organelle is actually opened, at which point
+  // ui/interaction.ts's portholePress handling switches it on. Never added
+  // to the mic-recorder's own sampler-1 entity (ui/sampler.ts never calls
+  // this function), which keeps only its recording organelle — see
+  // audio/graph.ts's 'sample' case for how enabled/disabled gates the
+  // extra gain stage this adds. Must be added to the graph before
+  // activateEntity below, since that's what actually builds this entity's
+  // audio nodes and reads featuresOf(id) at that moment.
+  graph.add({
+    id: `${id}-envelope`,
+    type: 'feature',
+    kind: 'envelope',
+    parentId: null,
+    children: [],
+    params: { attack: 0.01, decay: 0.2, sustain: 0.8, release: 0.3, timeScale: 2, enabled: 0 },
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    seed: nextSeed++,
+    docked: false,
+    ownerId: id,
+    expanded: false,
+  });
   // No-ops if the engine hasn't started yet (same guard docking.ts's own
   // undock-from-dock call relies on) — buildFromEntityGraph picks the
   // entity up normally the first time "start audio" is pressed instead.

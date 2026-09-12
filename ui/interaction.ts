@@ -60,6 +60,7 @@ import { isDockable, dockEntity } from './docking';
 import { applyPositionToMix, clearLevelOverride, markLevelOverridden } from './stereoMix';
 import { isTextureEditorActive } from './textureEditor';
 import {
+  envelopeHasToggle,
   envelopeValuesFromHandle,
   hitTestFeatureDot,
   hitTestPopup,
@@ -2187,6 +2188,9 @@ export function attachInteraction(
       if (popupHit.kind === 'close') {
         const feature = graph.get(popupHit.entityId);
         if (feature) feature.expanded = false;
+      } else if (popupHit.kind === 'toggle') {
+        const feature = graph.get(popupHit.entityId);
+        if (feature) feature.params.enabled = feature.params.enabled === 1 ? 0 : 1;
       } else if (popupHit.kind === 'handle') {
         canvas.setPointerCapture(e.pointerId);
         state.draggingHandle = { entityId: popupHit.entityId, handle: popupHit.handle };
@@ -3026,7 +3030,18 @@ export function attachInteraction(
       // event-output jack — see this block's own header comment) never
       // reaches this at all, matching "attaching a wire... doesn't need
       // to bring it to the top."
-      if (state.portholePress.entity.expanded) raiseFeatureOwner(graph, state.portholePress.entity.id);
+      if (state.portholePress.entity.expanded) {
+        raiseFeatureOwner(graph, state.portholePress.entity.id);
+        // A toggleable envelope (ui/organelle.ts's envelopeHasToggle — so
+        // far just the sample-player's own, ui/sampleDrop.ts) starts life
+        // disabled, but opening its organelle at all is a clear enough
+        // signal of intent to shape the sound that it's switched on right
+        // here — the popup's own toggle (organelle.ts's envelopeTogglePosition)
+        // still lets it be switched back off without closing the popup.
+        if (envelopeHasToggle(state.portholePress.entity)) {
+          state.portholePress.entity.params.enabled = 1;
+        }
+      }
       state.portholePress = null;
       return;
     }

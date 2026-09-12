@@ -972,6 +972,31 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
       const level = ctx.createGain();
       level.gain.value = entity.params.level ?? 0.8;
 
+      // An attached ADSR envelope organelle (ui/organelle.ts) — only present
+      // on a dropped-in-file sample (ui/sampleDrop.ts's addSampleEntity), not
+      // on the mic-recorder's own sampler-1 entity, which has no envelope
+      // feature at all and so leaves `envelope` undefined below exactly like
+      // any other envelope-less voice. Unlike pluck/metal (createPluckVoice),
+      // this one starts life DISABLED (envelope.params.enabled === 0 — see
+      // ui/organelle.ts's isEnvelopeEnabled) so a freshly dropped file keeps
+      // playing exactly as it always has until the organelle is actually
+      // opened (ui/interaction.ts's portholePress flips enabled to 1 the
+      // moment it's raised). `enabled` is read fresh at every gate event
+      // below, same as attack/decay/sustain/release already are, so toggling
+      // it from the popup takes effect on the very next trigger/release with
+      // no separate live-control wiring needed. envelopeGain sits at unity
+      // gain and is simply never touched while disabled, so this is a
+      // no-op insertion for every sample entity that predates this feature
+      // or never gets its organelle opened.
+      const envelope = graph.featuresOf(entity.id).find((f) => f.kind === 'envelope');
+      let envelopeGain: GainNode | undefined;
+      if (envelope) {
+        envelopeGain = ctx.createGain();
+        envelopeGain.gain.value = 1;
+        envelopeGain.connect(level);
+      }
+      const playbackDestination = envelopeGain ?? level;
+
       // The AudioBufferSourceNode currently playing, if any — a fresh node
       // per segment (a WebAudio source can only ever be started once, and
       // pausing means actually stopping it — there's no native pause/resume
@@ -1022,7 +1047,7 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         source.buffer = buffer;
         source.playbackRate.value = rate;
         source.loop = true;
-        source.connect(level);
+        source.connect(playbackDestination);
         // Guards a paused-right-at-the-end race (offsetNow() landing at or
         // past duration) — start() would otherwise reject an out-of-range
         // offset; falling back to 0 just replays from the top.
@@ -1041,6 +1066,32 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
             playingEntities.delete(entity.id);
           }
         });
+
+        // Gate-on: Attack up to full, then Decay down to Sustain — same
+        // shape as createPluckVoice's own gate-on ramp, just applied to this
+        // gate-driven (looping/long-slow) playback path only; the short
+        // one-shot layering branch below always plays straight through
+        // `playbackDestination` at whatever gain it was last left at (see
+        // this case's own header comment on why that's a non-issue: a given
+        // sample is either always short hits or always gate-driven, never
+        // both, for a fixed buffer/speed pairing).
+        if (envelope && envelopeGain && envelope.params.enabled === 1) {
+          const attack = Math.max(0.001, envelope.params.attack ?? 0.01);
+          const decay = Math.max(0.001, envelope.params.decay ?? 0.2);
+          const sustain = Math.min(1, Math.max(0, envelope.params.sustain ?? 0.6));
+          envelopeGain.gain.cancelScheduledValues(now);
+          envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
+          envelopeGain.gain.linearRampToValueAtTime(1, now + attack);
+          envelopeGain.gain.linearRampToValueAtTime(sustain, now + attack + decay);
+
+          envelopePlaybackByFeature.set(envelope.id, {
+            gateOnAt: performance.now(),
+            attack,
+            decay,
+            gateOffAt: null,
+            release: 0,
+          });
+        }
       }
 
       registerTrigger(entity.id, () => {
@@ -1072,7 +1123,28 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         // not the file's nominal duration.
         const playbackSeconds = buffer.duration / rate;
 
-        if (playbackSeconds < LONG_SAMPLE_SECONDS) {
+        // An ENABLED envelope always takes the gate-driven single-voice path
+        // below, regardless of the sample's own length — the whole point of
+        // attaching one is ADSR shaping tied to press/release (startPlayback's
+        // gate-on ramp, registerRelease's gate-off ramp above), the same
+        // held-note model createPluckVoice uses, which the short-hit layering
+        // path below has no gate lifecycle to hang that on at all (it always
+        // plays straight through at `level`, ignoring envelopeGain entirely —
+        // see this case's own header comment). Most dropped-in files are
+        // well under LONG_SAMPLE_SECONDS, so without this an enabled envelope
+        // would silently never audibly apply for the common case. Same
+        // pre-existing caveat this gate-driven path already had for a
+        // naturally long/slow sample: a trigger with no matching release
+        // (e.g. a tap/clock wire firing this via activateEventTarget, which
+        // never calls releaseEntity) loops forever rather than fading —
+        // real for any long/slow sample already, and now also reachable by
+        // a short one once its envelope is switched on; a plain pad
+        // press-and-hold (the normal way to play a "player" sample) always
+        // pairs trigger with release, so this only bites the same
+        // fire-and-forget wiring pattern that was already a known trade-off.
+        const envelopeActive = envelope !== undefined && envelope.params.enabled === 1;
+
+        if (!envelopeActive && playbackSeconds < LONG_SAMPLE_SECONDS) {
           // Short hit (a drum/foley one-shot, typically) — always layers a
           // fresh, independent voice on top of whatever's already sounding,
           // same "click it again before the last hit fades" expectation
@@ -1095,11 +1167,12 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
           return;
         }
 
-        // Long/slow — single voice, gate-driven (see startPlayback's own
-        // comment). Resumes from a pause point if the pad's own explicit
-        // "stop it now" button (registerStop below) left one; a plain
-        // release never sets one (see registerRelease), so this is only
-        // ever nonzero after that gesture specifically.
+        // Long/slow, OR any length with an enabled envelope — single voice,
+        // gate-driven (see startPlayback's own comment). Resumes from a
+        // pause point if the pad's own explicit "stop it now" button
+        // (registerStop below) left one; a plain release never sets one (see
+        // registerRelease), so this is only ever nonzero after that gesture
+        // specifically.
         const resumeFrom = pausedOffset;
         pausedOffset = 0;
         // Replaces rather than layers, if something's already playing (e.g.
@@ -1115,6 +1188,24 @@ function createGenerator(entity: Entity, graph: EntityGraph): AudioNode | undefi
         // there), so this is safe to fire unconditionally regardless of
         // which path the matching trigger actually took.
         if (current) current.loop = false;
+
+        // Gate-off: fade envelopeGain out over the envelope's own release
+        // time, same as createPluckVoice's own release ramp — only while
+        // the envelope is actually enabled; a no-op read of envelope.params
+        // otherwise, matching the gate-on check in startPlayback above.
+        if (envelope && envelopeGain && envelope.params.enabled === 1) {
+          const now = ctx.currentTime;
+          const release = Math.max(0.001, envelope.params.release ?? 0.3);
+          envelopeGain.gain.cancelScheduledValues(now);
+          envelopeGain.gain.setValueAtTime(envelopeGain.gain.value, now);
+          envelopeGain.gain.linearRampToValueAtTime(0, now + release);
+
+          const playback = envelopePlaybackByFeature.get(envelope.id);
+          if (playback) {
+            playback.gateOffAt = performance.now();
+            playback.release = release;
+          }
+        }
       });
 
       registerStop(entity.id, () => {

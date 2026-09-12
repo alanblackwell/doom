@@ -182,6 +182,32 @@ export function closeButtonPosition(popup: Rect): Point {
   return { x: popup.x + popup.width / 2 - 14, y: popup.y - popup.height / 2 + 12 };
 }
 
+// An envelope feature only carries an `enabled` param at all if it was
+// created with an enable/disable toggle in mind (currently just the
+// sample-player's own envelope, ui/sampleDrop.ts's addSampleEntity) — every
+// older envelope (pluck-1-envelope, metal-1-envelope, synth-1-envelope, ...)
+// has no such key and stays unconditionally "on" exactly as it always has,
+// with no toggle drawn at all. Presence of the key, not its owner's kind, is
+// what decides this, so a future envelope can opt in the same way without
+// this module needing to know its owner's kind.
+export function envelopeHasToggle(entity: Entity): boolean {
+  return entity.params.enabled !== undefined;
+}
+
+export function isEnvelopeEnabled(entity: Entity): boolean {
+  return entity.params.enabled === undefined || entity.params.enabled === 1;
+}
+
+const TOGGLE_RADIUS = 5;
+const TOGGLE_HIT_RADIUS = 8;
+
+// Sits just to the left of the close button, same title-bar row — the only
+// other always-visible control an envelope popup has besides its curve.
+export function envelopeTogglePosition(popup: Rect): Point {
+  const close = closeButtonPosition(popup);
+  return { x: close.x - 22, y: close.y };
+}
+
 // Index 0 (attack) nearest the popup's bottom edge, rising — same
 // bottom-up-column convention as controlSpecs.ts's dotPosition uses for a
 // box's own edge. Exported so another feature kind's own popup module
@@ -413,6 +439,7 @@ const HANDLE_HIT_RADIUS = 9;
 // underneath on the canvas) without starting anything.
 export type PopupHit =
   | { entityId: string; kind: 'close' }
+  | { entityId: string; kind: 'toggle' }
   | { entityId: string; kind: 'handle'; handle: HandleKind }
   | { entityId: string; kind: 'dot'; spec: ControlSpec }
   | { entityId: string; kind: 'axisHandle' }
@@ -447,6 +474,9 @@ export function hitTestPopup(graph: EntityGraph, point: Point, drag?: DragContex
     const popup = popupRect(graph, owner, drag, entity);
     if (dist(point, closeButtonPosition(popup)) <= CLOSE_BUTTON_RADIUS + 4) {
       return { entityId: entity.id, kind: 'close' };
+    }
+    if (envelopeHasToggle(entity) && dist(point, envelopeTogglePosition(popup)) <= TOGGLE_HIT_RADIUS) {
+      return { entityId: entity.id, kind: 'toggle' };
     }
 
     const curve = curveArea(popup);
@@ -831,6 +861,31 @@ export function drawPopup(
   ctx.lineTo(close.x - 3, close.y + 3);
   ctx.stroke();
 
+  // Enable/disable toggle — only drawn at all for an envelope that carries
+  // an `enabled` param (see envelopeHasToggle's own comment); every older
+  // always-on envelope skips this entirely.
+  const hasToggle = envelopeHasToggle(entity);
+  const enabled = isEnvelopeEnabled(entity);
+  if (hasToggle) {
+    const toggle = envelopeTogglePosition(popup);
+    ctx.beginPath();
+    ctx.arc(toggle.x, toggle.y, TOGGLE_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (enabled) {
+      ctx.beginPath();
+      ctx.arc(toggle.x, toggle.y, TOGGLE_RADIUS - 2, 0, Math.PI * 2);
+      ctx.fillStyle = ACCENT;
+      ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+    ctx.font = `8px ${MONO_FONT_FAMILY}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('on', toggle.x - TOGGLE_RADIUS - 3, toggle.y);
+  }
+
   // Connection dots — always visible (not hover-revealed like the generic
   // control-dot column; there's no slider hiding behind them to reveal).
   const specs = controlsFor(entity.kind);
@@ -859,6 +914,10 @@ export function drawPopup(
   ctx.beginPath();
   ctx.rect(left, top + TITLE_HEIGHT, popup.width, popup.height - TITLE_HEIGHT);
   ctx.clip();
+  // Dimmed rather than hidden while a toggleable envelope is switched off —
+  // the shape stays visible (so opening the popup still shows what it's
+  // about to do once enabled) but reads as inactive at a glance.
+  if (hasToggle && !enabled) ctx.globalAlpha *= 0.35;
 
   drawTimeGrid(ctx, curve, timeScale);
 

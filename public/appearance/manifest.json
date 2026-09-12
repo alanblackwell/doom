@@ -1,7 +1,7 @@
 {
   "version": 1,
-    "assets": [
-	    {
+  "assets": [
+    {
       "target": "canvas",
       "file": "abbatoir-floor.jpg",
       "sourceRect": {
@@ -198,6 +198,82 @@
       "copyright": "Image created by Alan Blackwell on 11 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: An industrial steel pocket metronome for a doom metal band with the pendulum swung over at an angle from the body. Flat front view.  Stark and simple. Rendered against a very dark red / black background.",
       "opaqueWidth": 54.35542168674698,
       "opaqueHeight": 79.14912280701753
+    },
+    {
+      "target": "beatMatcher",
+      "file": "baton.png",
+      "sourceRect": {
+        "x": 7,
+        "y": 9,
+        "width": 489,
+        "height": 310
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: A single short ivory orchestra conductors baton. It has a rounded cork handle and a sharp point at the other end. It is on a matt black background.",
+      "opaqueWidth": 57.575806451612905,
+      "opaqueHeight": 36.5
+    },
+    {
+      "target": "sample",
+      "file": "scope.jpg",
+      "sourceRect": {
+        "x": 179.96710801393732,
+        "y": 300.7063414634147,
+        "width": 664.0657839721254,
+        "height": 422.5873170731707
+      },
+      "adjustments": {
+        "brightness": 0.9375,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026 using Flux 2 Klein 9B Fast model, prompt: Front view of a dimly flickering ancient oscilloscope screen only just visible in a dark room, with layers of grime over the glass, parts of the reticule markings scratched off, the green scope signal fading and glowing dimly under the dirt. "
+    },
+    {
+      "target": "sequencer",
+      "file": "handcranked-music-box-tunes-movements-retro-cylinder-mechanisms-closeup_264183-193.jpg",
+      "sourceRect": {
+        "x": 380.5914585472302,
+        "y": 162.2486179986139,
+        "width": 718.8170829055396,
+        "height": 718.8170829055396
+      },
+      "adjustments": {
+        "brightness": 0.6428571428571429,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Uploaded by user Alan Blackwell on 2026-09-12. Sourced from site with non-functioning attribution search - img.magnific.com"
+    },
+    {
+      "target": "tap",
+      "file": "button.png",
+      "sourceRect": {
+        "x": 11,
+        "y": 9,
+        "width": 298,
+        "height": 298
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: A black bakelite pointer knob. A remnant of a 1930s kitchen radio. Surface crazed, from years of fryer grime and cigarette smoke. Viewed from directly above, with uniform ambient lighting and no shadows, it sits alone on a matt black surface.",
+      "opaqueWidth": 47.5,
+      "opaqueHeight": 47.5
     }
   ]
 }

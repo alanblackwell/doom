@@ -130,10 +130,12 @@ export const DOOM_LEVER_PITCH_TARGETS: Record<string, DoomLeverPitchTarget> = {
   // Not a frequency at all — a playback-rate multiplier — but the same
   // "raising it audibly raises pitch too" physical coupling ui/controlSpecs.ts's
   // old 'sample' comment already noted, so it gets the same log-mapped
-  // treatment, just with unitless bounds instead of Hz. 0.01x is deep enough
-  // into "inaudibly slow" that a normal recording reads as a near-frozen
-  // drone rather than a recognizably slowed-down copy of itself.
-  sample: { param: 'speed', minValue: 0.01, maxValue: 4 },
+  // treatment, just with unitless bounds instead of Hz. centerValue pins
+  // the lever's resting/up position to 1x (unchanged playback speed), with
+  // each extreme exactly three octaves away (2^3 = 8x at +135deg, 2^-3 =
+  // 0.125x at -135deg) — doomLeverAngleToValue's log-per-half-sweep shape
+  // means each octave step is an equal angle either side of center.
+  sample: { param: 'speed', minValue: 0.125, maxValue: 8, centerValue: 1 },
   // Not a pitch either, but the same "the lever swings from a wrecked/
   // doomy extreme up to the original clean setting" shape applies — a
   // crushed sample rate is the bitcrusher's own equivalent of "sub-bass
