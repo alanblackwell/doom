@@ -276,6 +276,66 @@
       "copyright": "Image created by Alan Blackwell on 12 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: A black bakelite pointer knob. A remnant of a 1930s kitchen radio. Surface crazed, from years of fryer grime and cigarette smoke. Viewed from directly above, with uniform ambient lighting and no shadows, it sits alone on a matt black surface.",
       "opaqueWidth": 47.5,
       "opaqueHeight": 47.5
+    },
+    {
+      "target": "bitcrush",
+      "file": "futuristic-pedal.png",
+      "sourceRect": {
+        "x": 11,
+        "y": 7,
+        "width": 308,
+        "height": 470
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: Top view of a guitar pedal box inspired by the works of architects like Zaha Hadid and artists such as Anselm Kiefer, rendered in a style that merges brutalism with futuristic design.",
+      "opaqueWidth": 73.06808510638297,
+      "opaqueHeight": 111.49999999999997
+    },
+    {
+      "target": "reverb",
+      "file": "vintage-pedal-with-tubes.png",
+      "sourceRect": {
+        "x": 58.22265625,
+        "y": 52.9296875,
+        "width": 297.46484375,
+        "height": 473.19140625
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt:  A close-up of a vintage, heavily modified guitar pedal, its metal casing scuffed and worn, with exposed wires and vacuum tubes glowing faintly. The background is an abstract swirl of dark, industrial textures, reminiscent of circuit boards and rusted metal. The lighting is stark and moody, highlighting the intricate, handmade details. Style inspired by the gritty, textured works of H.R. Giger and the raw industrial music visuals.",
+      "opaqueWidth": 65.6923937360179,
+      "opaqueHeight": 104.50000000000001
+    },
+    {
+      "target": "vocode",
+      "file": "steampunk-pedal.png",
+      "sourceRect": {
+        "x": 12,
+        "y": 11.999999999999972,
+        "width": 221,
+        "height": 431.00000000000006
+      },
+      "adjustments": {
+        "brightness": 1,
+        "hue": 0,
+        "hueEnabled": false,
+        "saturation": 1,
+        "opacity": 1
+      },
+      "copyright": "Image created by Alan Blackwell on 11 Sept 2026. Mask-edited with Palimpsest II, base image created using Flux 2 Klein 9B Fast model, prompt: A pirate device for music sample capture seen from above, disconnected sitting on a very dark red background.",
+      "opaqueWidth": 68.83758700696058,
+      "opaqueHeight": 134.24886877828058
     }
   ]
 }
